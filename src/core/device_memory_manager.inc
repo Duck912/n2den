@@ -209,6 +209,7 @@ void DeviceMemoryManager<Traits>::Map(DAddr address, VAddr virtual_address, size
     Core::Memory::Memory* process_memory = registered_processes[asid.id];
     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
+    {
     std::scoped_lock lk(mapping_guard);
 
     tracked_entries.CommitRegion(start_page_d, start_page_d + num_pages);
@@ -242,6 +243,19 @@ void DeviceMemoryManager<Traits>::Map(DAddr address, VAddr virtual_address, size
     translation_generation.fetch_add(1, std::memory_order_release);
     if (track) {
         TrackContinuityImpl(address, virtual_address, size, asid);
+    }
+    }
+    // A cache can have synchronized these device pages while they had no backing: unmapped reads
+    // return zeros and the upload clears the pages' CPU-modified state, and unbacked pages are never
+    // write-protected, so writes after this mapping would go unseen and the host copy would keep the
+    // zeros (Fast Fusion's DLSS coefficient table, read as zero by its output kernel). Mark the range
+    // modified as Unmap does. EDEN_N2DEN_MAP_INVALIDATE=0 skips it for A/B.
+    static const bool invalidate_on_map = [] {
+        const char* value = std::getenv("EDEN_N2DEN_MAP_INVALIDATE");
+        return !(value && value[0] == '0');
+    }();
+    if (invalidate_on_map && device_inter != nullptr) {
+        device_inter->InvalidateRegion(address, size);
     }
 }
 
