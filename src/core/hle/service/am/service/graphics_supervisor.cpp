@@ -1553,10 +1553,16 @@ private:
                 result = m_display_service->GetDisplayResolution(&width, &height, *m_default_display);
                 if (result.IsSuccess()) {
                     // Observed with Fortune's Weave: mode 1 -> 1280x720 output, 2 -> 1920x1080,
-                    // 4 and 8 -> 2560x1440 (its highest); 0, 3 and 5 fall back to 720p. The vi
-                    // display always reports 1280x720, so pick the mode from the docked setting
-                    // (the Switch 2 screen is 1080p).
-                    resolution = Settings::IsDockedMode() ? 4 : 2;
+                    // 4 and 8 -> 2560x1440 (its highest); 0, 3 and 5 fall back to 720p. Mode 8 is a
+                    // 3840x2160 display. The vi display always reports 1280x720, so pick the mode from
+                    // the docked setting (the Switch 2 screen is 1080p): 1440p docked, or 4K with the
+                    // EDEN_NX2_DOCKED_DEFAULT_4K opt-in. EDEN_NX2_DOCKED_MAX_RESOLUTION overrides it.
+                    const char* const docked_4k = std::getenv("EDEN_NX2_DOCKED_DEFAULT_4K");
+                    u64 docked = docked_4k && docked_4k[0] == '1' ? 8 : 4;
+                    if (const char* env = std::getenv("EDEN_NX2_DOCKED_MAX_RESOLUTION")) {
+                        docked = std::strtoull(env, nullptr, 0);
+                    }
+                    resolution = Settings::IsDockedMode() ? docked : 2;
                 }
             }
         }
