@@ -1596,7 +1596,13 @@ bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shade
                 return;
             }
         }
-        if (!gpu_modified || !host) {
+        // EDEN_NX2_FRAME_DUMP_HOST_BUFFERS=1 (diagnostic): read every binding from the host buffer the shader
+        // reads, not guest memory, to compare the two (a host copy that missed a guest write).
+        static const bool host_buffers = [] {
+            const char* value = std::getenv("EDEN_NX2_FRAME_DUMP_HOST_BUFFERS");
+            return value && value[0] == '1';
+        }();
+        if ((!gpu_modified && !host_buffers) || !host) {
             buffer.guest.resize(size);
             device_memory.ReadBlockUnsafe(binding.device_addr, buffer.guest.data(), size);
         }

@@ -1540,7 +1540,32 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
         const u32 size = binding.size;
-        SynchronizeBuffer(buffer, binding.device_addr, size);
+        // EDEN_N2DEN_SYNC_TRACE=<size> (diagnostic): log the tracker state around the sync of read-only
+        // compute storage bindings of that byte size (first 32), to see whether guest data is
+        // uploaded (Fast Fusion's DLSS table: 360448).
+        static const u64 trace_size = [] {
+            const char* value = std::getenv("EDEN_N2DEN_SYNC_TRACE");
+            return value ? std::strtoull(value, nullptr, 0) : 0ULL;
+        }();
+        static int trace_left = 32;
+        const bool trace = trace_size != 0 && !is_written && size == trace_size && trace_left > 0;
+        bool trace_cpu = false;
+        u64 trace_guest = 0;
+        if (trace) {
+            trace_cpu = memory_tracker.IsRegionCpuModified(binding.device_addr, size);
+            device_memory.ReadBlockUnsafe(binding.device_addr, &trace_guest, sizeof(trace_guest));
+        }
+        const bool sync_skipped = SynchronizeBuffer(buffer, binding.device_addr, size);
+        if (trace) {
+            --trace_left;
+            LOG_WARNING(HW_GPU,
+                        "sync trace addr={:#x} size={:#x} cpu_modified={} gpu_modified={} guest_u64={:#x} "
+                        "backed={} buffer={:#x}+{:#x} skipped={} tick={}",
+                        binding.device_addr, size, trace_cpu,
+                        memory_tracker.IsRegionGpuModified(binding.device_addr, size), trace_guest,
+                        device_memory.template GetPointer<u8>(binding.device_addr) != nullptr,
+                        buffer.CpuAddr(), buffer.SizeBytes(), sync_skipped, frame_tick);
+        }
 
         const u32 offset = buffer.Offset(binding.device_addr);
         buffer.MarkUsage(offset, size);
