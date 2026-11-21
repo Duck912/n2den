@@ -266,6 +266,8 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdSetLineRasterizationModeEXT vkCmdSetLineRasterizationModeEXT{};
     PFN_vkCmdSetLineStippleEnableEXT vkCmdSetLineStippleEnableEXT{};
     PFN_vkCmdSetLineStippleEXT vkCmdSetLineStippleEXT{};
+    PFN_vkCmdSetCheckpointNV vkCmdSetCheckpointNV{};
+    PFN_vkGetQueueCheckpointDataNV vkGetQueueCheckpointDataNV{};
     PFN_vkCmdSetDepthBiasEnableEXT vkCmdSetDepthBiasEnableEXT{};
     PFN_vkCmdSetLogicOpEnableEXT vkCmdSetLogicOpEnableEXT{};
     PFN_vkCmdSetDepthClampEnableEXT vkCmdSetDepthClampEnableEXT{};
@@ -884,6 +886,21 @@ public:
 
     VkResult Present(const VkPresentInfoKHR& present_info) const noexcept {
         return dld->vkQueuePresentKHR(queue, &present_info);
+    }
+
+    /// VK_NV_device_diagnostic_checkpoints: the last checkpoints the queue reached (empty when the
+    /// extension is not loaded).
+    std::vector<VkCheckpointDataNV> CheckpointData() const {
+        std::vector<VkCheckpointDataNV> out;
+        if (dld == nullptr || dld->vkGetQueueCheckpointDataNV == nullptr) {
+            return out;
+        }
+        u32 count = 0;
+        dld->vkGetQueueCheckpointDataNV(queue, &count, nullptr);
+        out.resize(count, VkCheckpointDataNV{.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV});
+        dld->vkGetQueueCheckpointDataNV(queue, &count, out.data());
+        out.resize(count);
+        return out;
     }
 
 private:

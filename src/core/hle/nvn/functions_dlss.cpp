@@ -2,6 +2,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 n2den Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later AND MIT
 
+#include <tuple>
+#include <set>
+#include <mutex>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -549,6 +552,21 @@ void nvnDlssNetworkBuilderGetOptimalSettings(Call& c) {
     put(min_w, sizes->min[0]);
     put(min_h, sizes->min[1]);
     c.ret.SetBool(true);
+    {
+        // One line per distinct question: what the game's resolution choice is based on.
+        static std::mutex logged_mutex;
+        static std::set<std::tuple<u32, s32, s32, u32>> logged;
+        const u32 asked = (optimal_w != 0 ? 1u : 0u) | (max_w != 0 ? 2u : 0u) | (min_w != 0 ? 4u : 0u);
+        std::scoped_lock lock{logged_mutex};
+        if (logged.size() < 64 && logged.emplace(b.method, b.width, b.height, asked).second) {
+            LOG_INFO(Core,
+                     "[nvn] dlss: GetOptimalSettings method {} output {}x{} -> optimal {}x{} max {}x{} "
+                     "min {}x{} (asked:{}{}{})",
+                     b.method, b.width, b.height, sizes->optimal[0], sizes->optimal[1], sizes->max[0],
+                     sizes->max[1], sizes->min[0], sizes->min[1], (asked & 1) ? " optimal" : "",
+                     (asked & 2) ? " max" : "", (asked & 4) ? " min" : "");
+        }
+    }
 }
 
 // ---- NVNdlssNetwork --------------------------------------------------------------------------------

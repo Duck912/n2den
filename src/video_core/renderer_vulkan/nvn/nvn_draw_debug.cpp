@@ -4,6 +4,7 @@
 // Diagnostics of the draw path (see nvn_debug.h): draw log, per-target draw table, render target
 // dumps. Only reached when Debug::Tracing() (the environment's switches or a diag request).
 
+#include <cstdlib>
 #include <algorithm>
 #include <filesystem>
 #include <iterator>
@@ -127,6 +128,14 @@ void DrawContext::DebugOnPassEnd() {
             (std::max)(s.extent.width >> target.ref.texture.level, 1u) != config.dump_width) {
             return;
         }
+        // EDEN_NX2_NVN_DUMP_MIN_WIDTH=N: only targets at least N texels wide (the full-size passes).
+        static const u32 min_width = [] {
+            const char* value = std::getenv("EDEN_NX2_NVN_DUMP_MIN_WIDTH");
+            return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : 0u;
+        }();
+        if ((std::max)(s.extent.width >> target.ref.texture.level, 1u) < min_width) {
+            return;
+        }
         Debug::PendingDump pending;
         pending.path = fmt::format("{}/f{:05}_p{:03}_{}_t{:x}_d{}.tga", dbg.dump_dir, dbg.frame,
                                    dbg.pass_index, tag, target.texture->serial, dbg.pass_draws);
@@ -200,7 +209,18 @@ void DrawContext::DebugOnDraw(u32 mode) {
     const bool log_this_draw = dbg.logged < dbg.draw_log;
     // nvn-draw / EDEN_NX2_NVN_DUMP_DRAW: draw n is logged with the CPU view of its buffers; a
     // request also writes those lines to its report file.
-    const bool dump_this_draw = dbg.dump_draw != 0 && dbg.dump_draw == dbg.draw_index;
+    // EDEN_NX2_NVN_DUMP_DRAW_VS=<hex>: every draw of the selected frames whose vertex program has
+    // this hash (draw numbers move between boots; program hashes do not).
+    static const u64 dump_vs = [] {
+        const char* value = std::getenv("EDEN_NX2_NVN_DUMP_DRAW_VS");
+        return value != nullptr ? std::strtoull(value, nullptr, 16) : u64{0};
+    }();
+    bool vs_match = false;
+    if (dump_vs != 0) {
+        const auto it = resources.program_hashes.find(stages[0].program_serial);
+        vs_match = it != resources.program_hashes.end() && it->second[0] == dump_vs;
+    }
+    const bool dump_this_draw = (dbg.dump_draw != 0 && dbg.dump_draw == dbg.draw_index) || vs_match;
     if (!log_this_draw && !dump_this_draw) {
         return;
     }

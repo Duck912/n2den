@@ -1027,6 +1027,35 @@ struct Context::Impl {
     /// Set once when the Vulkan device was lost; never cleared. From then on the replay completes
     /// submissions and presents without running them.
     std::atomic<bool> device_lost{false};
+    /// Debugging (EDEN_NX2_NVN_CHECKPOINTS=1, needs VK_NV_device_diagnostic_checkpoints): every
+    /// replayed op is preceded by a checkpoint whose marker is its index + 1 in this ring; after a
+    /// device loss the queue's last checkpoints are logged with the ops' frame, number and programs.
+    struct CheckpointEntry {
+        u64 frame{};
+        u32 op_number{};
+        u16 op{};
+        u64 program{};  ///< compute program, or the vertex program of a draw
+        u64 program2{}; ///< the fragment program of a draw
+        u32 count{};    ///< draws: vertex/index count
+        u32 instances{};
+        u64 indirect{}; ///< draws/dispatches: indirect argument address
+    };
+    static constexpr u32 CHECKPOINT_RING = 1u << 18;
+    std::vector<CheckpointEntry> checkpoint_ring;
+    u32 checkpoint_pos{};
+    u32 checkpoint_frame_ops{};
+    u64 checkpoint_last_frame{};
+    CheckpointEntry* checkpoint_current{}; ///< the op being replayed (replay thread only)
+    void LogCheckpoints();
+    /// Adds a ring entry (op code `code`, 0xF000+ for internal points) and its checkpoint to `cmd`.
+    void Checkpoint(VkCommandBuffer cmd, u16 code, u64 a = 0, u64 b = 0) {
+        if (checkpoint_ring.empty() || cmd == VK_NULL_HANDLE) {
+            return;
+        }
+        const u32 slot = checkpoint_pos++ & (CHECKPOINT_RING - 1);
+        checkpoint_ring[slot] = {checkpoint_last_frame, checkpoint_frame_ops, code, a, b};
+        dld.vkCmdSetCheckpointNV(cmd, reinterpret_cast<const void*>(static_cast<uintptr_t>(slot) + 1));
+    }
     std::function<void(std::string)> failure_callback;
     std::mutex failure_mutex; ///< Held while failure_callback runs (and while it is replaced).
     bool stopping{false};

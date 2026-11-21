@@ -154,6 +154,8 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkCmdSetConservativeRasterizationModeEXT);
     X(vkCmdSetLineRasterizationModeEXT);
     X(vkCmdSetLineStippleEnableEXT);
+    X(vkCmdSetCheckpointNV);
+    X(vkGetQueueCheckpointDataNV);
     X(vkCmdSetDepthBiasEnableEXT);
     X(vkCmdSetLogicOpEnableEXT);
     X(vkCmdSetDepthClampEnableEXT);

@@ -352,6 +352,14 @@ Context::Impl::Impl(const Device& device_, std::mutex& submit_mutex_,
         present_target->Attach(*allocator);
     }
     queue = device.GetGraphicsQueue();
+    if (const char* env = std::getenv("EDEN_NX2_NVN_CHECKPOINTS"); env != nullptr && env[0] == '1') {
+        if (dld.vkCmdSetCheckpointNV != nullptr && dld.vkGetQueueCheckpointDataNV != nullptr) {
+            checkpoint_ring.resize(CHECKPOINT_RING);
+            LOG_WARNING(Render_Vulkan, "[nvn] diagnostic checkpoints on every replayed op (EDEN_NX2_NVN_CHECKPOINTS)");
+        } else {
+            LOG_WARNING(Render_Vulkan, "[nvn] EDEN_NX2_NVN_CHECKPOINTS: VK_NV_device_diagnostic_checkpoints is not available");
+        }
+    }
     command_pool = device.GetLogical().CreateCommandPool({
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .pNext = nullptr,
@@ -959,6 +967,48 @@ void Context::Impl::NoteDeviceLost(const char* where) {
 
 void Context::Impl::DescribeDeviceFault() {
     // VK_EXT_device_fault is not used in Eglantine: Device::ReportLoss logs the loss.
+    LogCheckpoints();
+}
+
+void Context::Impl::LogCheckpoints() {
+    if (checkpoint_ring.empty()) {
+        return;
+    }
+    const auto data = queue.CheckpointData();
+    LOG_CRITICAL(Render_Vulkan, "[nvn] checkpoints after the device loss: {} reported", data.size());
+    for (const VkCheckpointDataNV& point : data) {
+        const u64 marker = reinterpret_cast<uintptr_t>(point.pCheckpointMarker);
+        if (marker == 0 || marker > CHECKPOINT_RING) {
+            LOG_CRITICAL(Render_Vulkan, "[nvn] checkpoint stage {:#x}: marker {:#x} (not ours)",
+                         static_cast<u32>(point.stage), marker);
+            continue;
+        }
+        const CheckpointEntry& entry = checkpoint_ring[marker - 1];
+        LOG_CRITICAL(Render_Vulkan,
+                     "[nvn] checkpoint stage {:#x}: frame {} op #{} (op code {}) programs {:016x} {:016x}",
+                     static_cast<u32>(point.stage), entry.frame, entry.op_number, entry.op,
+                     entry.program, entry.program2);
+    }
+    // Every draw, dispatch and internal point between the oldest and the newest reported checkpoint
+    // (bottom of pipe lags top of pipe: the work in between was in flight).
+    u64 lo = ~u64{0}, hi = 0;
+    for (const VkCheckpointDataNV& point : data) {
+        const u64 marker = reinterpret_cast<uintptr_t>(point.pCheckpointMarker);
+        if (marker != 0 && marker <= CHECKPOINT_RING) {
+            lo = (std::min)(lo, marker - 1);
+            hi = (std::max)(hi, marker - 1);
+        }
+    }
+    if (lo <= hi && hi - lo < 4096) {
+        for (u64 slot = lo; slot <= hi + 2; ++slot) {
+            const CheckpointEntry& e = checkpoint_ring[slot & (CHECKPOINT_RING - 1)];
+            if (e.op != 51 && e.op != 52 && e.op != 53 && e.op < 0xF000) {
+                continue;
+            }
+            LOG_CRITICAL(Render_Vulkan, "[nvn]   in flight: op #{} code {:#x} programs {:016x} {:016x} count {} instances {} indirect {:#x}",
+                         e.op_number, e.op, e.program, e.program2, e.count, e.instances, e.indirect);
+        }
+    }
 }
 
 void Context::Impl::NoteIfDeviceLost(const char* where) {

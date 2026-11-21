@@ -33,6 +33,7 @@
 #include "video_core/nvn/shader/nvn_driver_layout.h"
 #include "video_core/nvn/timestamp_mode.h"
 #include "video_core/nvn_draw_probe.h"
+#include "video_core/renderer_vulkan/nvn/nvn_skip_programs.h"
 #include "video_core/renderer_vulkan/nvn/nvn_draw.h"
 #include "video_core/renderer_vulkan/nvn/nvn_backing_log.h"
 
@@ -135,6 +136,26 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
         hash_it == resources.program_hashes.end() || hash_it->second[STAGE_COMPUTE] == 0) {
         skipped();
         host->HostUnsupported("Dispatch", "no compute program is bound");
+        return;
+    }
+    // Debugging: EDEN_NX2_NVN_TRACE_DISPATCH=<hex hash> logs the group counts of the first 64
+    // dispatches of that compute program (indirect ones log the argument address).
+    static const u64 trace_dispatch = [] {
+        const char* env = std::getenv("EDEN_NX2_NVN_TRACE_DISPATCH");
+        return env ? std::strtoull(env, nullptr, 16) : u64{0};
+    }();
+    if (trace_dispatch != 0 && hash_it->second[STAGE_COMPUTE] == trace_dispatch) {
+        static std::atomic<u32> traced{0};
+        if (traced.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_INFO(Render_Vulkan, "[nvn] dispatch trace {:016x}: groups {}x{}x{} indirect {:#x} caller {:#x}",
+                     trace_dispatch, p.x, p.y, p.z, p.indirect, p.caller);
+        }
+    }
+    if (impl.checkpoint_current != nullptr) {
+        impl.checkpoint_current->program = hash_it->second[STAGE_COMPUTE];
+    }
+    if (SkipProgramForDebug(hash_it->second[STAGE_COMPUTE], "dispatch")) {
+        skipped();
         return;
     }
     const VC::ProgramDesc& program = *program_it->second;

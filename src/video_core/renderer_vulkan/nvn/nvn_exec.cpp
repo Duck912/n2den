@@ -1149,6 +1149,8 @@ void Recorder::BeginSegment() {
     }
     pending_waits.clear();
     segment.signal_value = queue.next_value++;
+    impl.Checkpoint(segment.raw, 0xF001, segment.wait_semaphores.size(),
+                    segment.wait_values.empty() ? 0 : segment.wait_values.back());
     if (flight.gpu_prof) {
         segment.prof_begin = flight.gpu_prof->StampSegment(segment.cmd);
     }
@@ -1162,11 +1164,20 @@ void Recorder::BeginSegment() {
 }
 
 void Recorder::EndSegment() {
+    if (!segments.empty()) {
+        impl.Checkpoint(segments.back().raw, 0xF002);
+    }
     FlushConditionEnd();
     EndRenderCondition();
     EndDrawPass(BreakCause::SegmentEnd);
+    if (!segments.empty()) {
+        impl.Checkpoint(segments.back().raw, 0xF003);
+    }
     // Storage shadows go back to their pools before the host barrier below.
     draw.FlushShadows();
+    if (!segments.empty()) {
+        impl.Checkpoint(segments.back().raw, 0xF004);
+    }
     // Queries cannot span command buffers: fold the samples counted so far into the queue's
     // accumulator (the next draw of the next segment starts a new query); in-pass queries: the
     // events the passes left (queries and resets without a report) go into it as well.
@@ -5839,6 +5850,33 @@ bool Recorder::RecordList(std::span<const u64> list, size_t start, size_t& stop,
                     op == VC::Op::SetRenderTargets)) {
             WatchSnapshot(
                 fmt::format("f{} before op #{}", impl.presents_recorded + 1, op_log_count));
+        }
+        if (!impl.checkpoint_ring.empty() && !segments.empty()) [[unlikely]] {
+            const u64 frame = impl.presents_recorded + 1;
+            if (frame != impl.checkpoint_last_frame) {
+                impl.checkpoint_last_frame = frame;
+                impl.checkpoint_frame_ops = 0;
+            }
+            const u32 slot = impl.checkpoint_pos++ & (Context::Impl::CHECKPOINT_RING - 1);
+            impl.checkpoint_ring[slot] = {frame, ++impl.checkpoint_frame_ops, static_cast<u16>(op), 0, 0};
+            if (op == VC::Op::Draw && payload_size >= sizeof(VC::DrawPayload)) {
+                const auto* d = static_cast<const VC::DrawPayload*>(payload);
+                impl.checkpoint_ring[slot].count = d->count;
+                impl.checkpoint_ring[slot].instances = d->instance_count;
+                impl.checkpoint_ring[slot].indirect = d->indirect;
+            } else if (op == VC::Op::DrawIndexed && payload_size >= sizeof(VC::DrawIndexedPayload)) {
+                const auto* d = static_cast<const VC::DrawIndexedPayload*>(payload);
+                impl.checkpoint_ring[slot].count = d->count;
+                impl.checkpoint_ring[slot].instances = d->instance_count;
+                impl.checkpoint_ring[slot].indirect = d->indirect;
+            } else if (op == VC::Op::Dispatch && payload_size >= sizeof(VC::DispatchPayload)) {
+                const auto* d = static_cast<const VC::DispatchPayload*>(payload);
+                impl.checkpoint_ring[slot].count = d->x * d->y * d->z;
+                impl.checkpoint_ring[slot].indirect = d->indirect;
+            }
+            impl.checkpoint_current = &impl.checkpoint_ring[slot];
+            impl.dld.vkCmdSetCheckpointNV(segments.back().raw,
+                                          reinterpret_cast<const void*>(static_cast<uintptr_t>(slot) + 1));
         }
         current_list = list;
         next_record = index + words;

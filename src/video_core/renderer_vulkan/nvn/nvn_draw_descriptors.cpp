@@ -2137,7 +2137,12 @@ bool DrawContext::PrepareOutsidePass(DrawPlan& plan) {
     shadow_phase.Stop();
     Phases::Scope feedback_phase{Phases::Phase::OutFeedback};
     if (!plan.feedback.empty()) {
-        if (!need && pass_open) {
+        // EDEN_NX2_NVN_FEEDBACK_NO_PRUNE=1 (diagnostic): every feedback copy is made again.
+        static const bool no_prune = [] {
+            const char* value = std::getenv("EDEN_NX2_NVN_FEEDBACK_NO_PRUNE");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (!need && pass_open && !no_prune) {
             // Only the copies a still-current scratch cannot serve end the pass.
             PruneFreshFeedback(plan);
         }

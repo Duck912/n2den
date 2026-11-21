@@ -20,6 +20,7 @@
 #include "video_core/nvn/state_layouts.h"
 #include "video_core/nvn/timestamp_mode.h"
 #include "video_core/nvn_draw_probe.h"
+#include "video_core/renderer_vulkan/nvn/nvn_skip_programs.h"
 #include "video_core/renderer_vulkan/nvn/nvn_barrier.h"
 #include "video_core/renderer_vulkan/nvn/nvn_draw.h"
 #include "video_core/renderer_vulkan/nvn/nvn_draw_plan.h"
@@ -2139,6 +2140,16 @@ std::shared_ptr<GraphicsPipeline> DrawContext::ResolvePipeline(u32 mode, u32 ele
                               mesh ? "no mesh program bound" : "no vertex program bound");
         return nullptr;
     }
+    if (impl.checkpoint_current != nullptr) {
+        impl.checkpoint_current->program = request.stages[0].hash != 0 ? request.stages[0].hash
+                                                                        : request.stages[STAGE_MESH].hash;
+        impl.checkpoint_current->program2 = request.stages[1].hash; // NVN stage 1: fragment
+    }
+    for (const auto& stage : request.stages) {
+        if (SkipProgramForDebug(stage.hash, "draw")) {
+            return nullptr;
+        }
+    }
     // Debugging (EDEN_SKIP_VS=<hex program hash>): draws with this vertex program are skipped.
     static const u64 skip_vs = [] {
         const char* env = std::getenv("EDEN_SKIP_VS");
@@ -2920,6 +2931,12 @@ bool DrawContext::GenerateIndices(const PreparedDraw& prepared, const IndexRange
 }
 
 void DrawContext::Draw(const VC::DrawPayload& p) {
+    if (impl.checkpoint_current != nullptr && impl.checkpoint_current->program == 0) {
+        const auto vs = resources.program_hashes.find(stages[0].program_serial);
+        const auto fs = resources.program_hashes.find(stages[1].program_serial);
+        impl.checkpoint_current->program = vs != resources.program_hashes.end() ? vs->second[0] : 0;
+        impl.checkpoint_current->program2 = fs != resources.program_hashes.end() ? fs->second[1] : 0;
+    }
     if (p.indirect != 0 || p.count_address != 0) {
         // Indirect draws are the indirect family's (NvnIndirect) through PrepareDraw.
         return DrawIndirect(p);
