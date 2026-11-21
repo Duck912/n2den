@@ -31,5 +31,8 @@ traces, profilers, A/B experiments). Only these remain:
 | `EDEN_JIT_HOT_MAP=1` | Keeps, per core, a table of which range of Dynarmic x64 code belongs to which game block (start and end PC), filled when a block is emitted or loaded from the cache. The debug server's `jit_hot` call uses it to report which game blocks the JIT time is spent in. Costs about 24 bytes per block (about 50 MB in OoT). Off by default. |
 | `EDEN_WINDOW_TITLE` | Window title in eden-cli (used internally by the frontend itself). |
 
+The NVN-HLE renderer's own debugging and A/B switches (`EDEN_NX2_NVN_*`, `EDEN_NX2_TRY_*`) are listed in
+[nvn-hle-debugging.md](nvn-hle-debugging.md).
+
 The tests in `src/tests/video_core/native_shader.cpp` still read `EDEN_NATIVE_SHADER_FIXTURES`
 and related variables (optional, only for running the tests with fixtures).
