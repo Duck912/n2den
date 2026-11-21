@@ -1602,6 +1602,12 @@ void DrawContext::StageVertexRanges() {
         if (!pool->vram_mirror && impl.vtx_mirror) {
             impl.VramMirror(*pool, true, false); // read-only; null when refused (stays as before)
         }
+        if (pool->vram_mirror && impl.MirrorGpuWritten(*pool, offset, range.size)) {
+            // The GPU wrote it in guest memory (a compute pass's instance stream): read it there.
+            impl.stats.vram_bindings_host.fetch_add(1, std::memory_order_relaxed);
+            outcome(range, VtxCov::Other);
+            continue;
+        }
         if (PoolMirror* const mirror = pool->vram_mirror.get()) {
             // The pool's VRAM mirror serves the range: only its stale pages are copied in, and
             // no more than the bound of them per pass (the later passes take the rest; the draws

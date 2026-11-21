@@ -1870,6 +1870,7 @@ void Recorder::NotePoolWrite(Pool& pool, u64 offset, u64 size, bool invalidate_m
         if (invalidate_mirror) {
             impl.MirrorInvalidate(pool, offset, size);
         }
+        impl.MirrorNoteGpuWrite(pool, offset, size, !invalidate_mirror);
         break;
     case Pool::Backing::Mirror: {
         {

@@ -34,6 +34,9 @@ public:
     /// Every page [offset, offset + length) touches is valid (false for an empty or out-of-pool
     /// range).
     [[nodiscard]] bool AllValid(u64 offset, u64 length) const;
+    /// Some page [offset, offset + length) touches is valid (false for an empty or out-of-pool
+    /// range).
+    [[nodiscard]] bool AnyValid(u64 offset, u64 length) const;
     /// Marks the pages [offset, offset + length) touches invalid (clamped to the pool).
     void Invalidate(u64 offset, u64 length);
     void InvalidateAll();
@@ -103,6 +106,13 @@ struct PoolMirror {
     /// VtxCovServeOrMiss): the prefetch's working set, which bounds its copies (null until the
     /// first use).
     std::unique_ptr<MirrorPages> wanted;
+    /// Pages the GPU wrote in imported guest memory (storage writes and shadow flushes that did not
+    /// go through this mirror): set bits = written, sticky until a write through the mirror itself.
+    /// Read-only uses never take them from the mirror (Impl::MirrorGpuWritten): copying GPU-written
+    /// imported memory into the mirror was not reliably ordered after the writes (Fast Fusion's
+    /// compute-written instance streams read stale and washed the race out), and the copies were
+    /// most of the mirror's copy-in. Null until the first such write.
+    std::unique_ptr<MirrorPages> gpu_written;
     /// The tracker's write counter of the pool's registration (GuestMemory::WriteEpoch) and its
     /// value from before the last whole-pool collect of CPU writes: while they are equal no page
     /// of the pool is dirty, and the currency checks skip the tracker.

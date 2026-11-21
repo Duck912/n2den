@@ -491,6 +491,11 @@ void DrawContext::ApplyMirrors(DrawPlan& plan, bool allow_create) {
             }
             mirror->wanted->Set(use.offset, use.size);
         }
+        if (impl.MirrorGpuWritten(*use.pool, use.offset, use.size)) {
+            // The GPU wrote it in guest memory: read it there (PoolMirror::gpu_written).
+            impl.stats.vram_bindings_host.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
         if (!allow_create) {
             if (impl.MirrorCurrent(*use.pool, use.offset, use.size)) {
                 serve(use, *mirror->buffer);

@@ -1438,6 +1438,12 @@ struct Context::Impl {
     void MirrorTakeStale(Pool& pool, u64 offset, u64 size, std::vector<std::pair<u64, u64>>& runs);
     /// Something other than the mirror wrote the pool range: copy it in again at the next use.
     void MirrorInvalidate(Pool& pool, u64 offset, u64 size);
+    /// The GPU wrote [offset, offset + size) of the imported pool outside its mirror
+    /// (`through_mirror` false) or through it (true: the mirror holds the newest bytes).
+    void MirrorNoteGpuWrite(Pool& pool, u64 offset, u64 size, bool through_mirror);
+    /// A read-only use of [offset, offset + size) must read guest memory: the GPU wrote a page of
+    /// it there (PoolMirror::gpu_written). EDEN_NX2_NVN_MIRROR_GPU_WRITTEN=0 turns the rule off.
+    [[nodiscard]] bool MirrorGpuWritten(const Pool& pool, u64 offset, u64 size) const;
     /// Raw global stores may have written any pool.
     void MirrorInvalidateAll();
     /// The pool is destroyed: stop tracking its pages (its mirror goes with the pool).

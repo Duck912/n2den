@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 n2den Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstdlib>
 #include <algorithm>
 #include <bit>
 
@@ -60,6 +61,24 @@ void MirrorPages::Invalidate(u64 offset, u64 length) {
 
 void MirrorPages::InvalidateAll() {
     std::ranges::fill(valid, u64{0});
+}
+
+bool MirrorPages::AnyValid(u64 offset, u64 length) const {
+    u64 first = 0;
+    u64 last = 0;
+    if (!PageSpan(offset, length, first, last)) {
+        return false;
+    }
+    for (u64 page = first; page <= last;) {
+        const u64 bit = page % 64;
+        const u64 count = (std::min)(64 - bit, last - page + 1);
+        const u64 mask = (count == 64 ? ~u64{0} : ((u64{1} << count) - 1)) << bit;
+        if ((valid[page / 64] & mask) != 0) {
+            return true;
+        }
+        page += count;
+    }
+    return false;
 }
 
 void MirrorPages::Set(u64 offset, u64 length) {
@@ -354,6 +373,9 @@ bool Context::Impl::MirrorCurrent(Pool& pool, u64 offset, u64 size) {
     if (mirror == nullptr || !mirror->pages.AllValid(offset, size)) {
         return false;
     }
+    if (MirrorGpuWritten(pool, offset, size)) {
+        return false; // read where the GPU wrote it
+    }
     if (mirror->write_epoch &&
         mirror->write_epoch->load(std::memory_order_acquire) == mirror->epoch_clean) {
         return true; // no page of the pool was written since the last whole-pool collect
@@ -432,6 +454,29 @@ void Context::Impl::MirrorTakeStaleWanted(Pool& pool, std::vector<std::pair<u64,
     }
     const size_t first_new = runs.size();
     mirror->pages.TakeInvalidWithin(*mirror->wanted, runs);
+    if (mirror->gpu_written && !ahead) {
+        // Read-only uses read GPU-written pages from guest memory: not worth (or safe) copying.
+        thread_local std::vector<std::pair<u64, u64>> kept;
+        kept.clear();
+        for (size_t i = first_new; i < runs.size(); ++i) {
+            u64 begin = runs[i].first;
+            const u64 end = runs[i].second;
+            while (begin < end) {
+                const u64 page_end = (std::min)(end, (begin / MirrorPages::PAGE + 1) * MirrorPages::PAGE);
+                const bool written = mirror->gpu_written->AnyValid(begin, page_end - begin);
+                if (written) {
+                    mirror->pages.Invalidate(begin, page_end - begin);
+                } else if (!kept.empty() && kept.back().second == begin) {
+                    kept.back().second = page_end;
+                } else {
+                    kept.emplace_back(begin, page_end);
+                }
+                begin = page_end;
+            }
+        }
+        runs.resize(first_new);
+        runs.insert(runs.end(), kept.begin(), kept.end());
+    }
     if (ahead) [[unlikely]] {
         mirror->ra_log->NoteTakeWanted(*mirror->wanted, runs, first_new);
     }
@@ -454,6 +499,39 @@ void Context::Impl::MirrorArmRuns(Pool& pool, PoolMirror& mirror, VC::GuestMemor
         }
         stats.vram_copy_in_bytes.fetch_add(end - begin, std::memory_order_relaxed);
     }
+}
+
+namespace {
+bool MirrorGpuWrittenRule() {
+    static const bool on = [] {
+        const char* value = std::getenv("EDEN_NX2_NVN_MIRROR_GPU_WRITTEN");
+        return value == nullptr || value[0] != '0';
+    }();
+    return on;
+}
+} // Anonymous namespace
+
+void Context::Impl::MirrorNoteGpuWrite(Pool& pool, u64 offset, u64 size, bool through_mirror) {
+    PoolMirror* const mirror = pool.vram_mirror.get();
+    if (mirror == nullptr || !MirrorGpuWrittenRule()) {
+        return;
+    }
+    if (through_mirror) {
+        if (mirror->gpu_written) {
+            mirror->gpu_written->Invalidate(offset, (std::max<u64>)(size, 1));
+        }
+        return;
+    }
+    if (!mirror->gpu_written) {
+        mirror->gpu_written = std::make_unique<MirrorPages>(pool.size);
+    }
+    mirror->gpu_written->Set(offset, (std::max<u64>)(size, 1));
+}
+
+bool Context::Impl::MirrorGpuWritten(const Pool& pool, u64 offset, u64 size) const {
+    const PoolMirror* const mirror = pool.vram_mirror.get();
+    return mirror != nullptr && mirror->gpu_written &&
+           mirror->gpu_written->AnyValid(offset, (std::max<u64>)(size, 1));
 }
 
 void Context::Impl::MirrorInvalidate(Pool& pool, u64 offset, u64 size) {
