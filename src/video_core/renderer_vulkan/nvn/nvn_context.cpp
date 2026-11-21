@@ -1318,6 +1318,43 @@ void Context::Impl::CompleteMain() {
         if (flight->screenshot) {
             DeliverScreenshot(*flight);
         }
+        if (!flight->tex_writebacks.empty() && !device_lost.load(std::memory_order_acquire)) {
+            // As the mirror write-back above: straight into the pool's host bytes where it has
+            // them (GuestMemory::Write waits on the import gate, which must not block this thread).
+            VC::GuestMemory* const memory = guest.load(std::memory_order_acquire);
+            static std::atomic<u64> written{0};
+            for (InFlight::TexWriteBack& wb : flight->tex_writebacks) {
+                if (wb.storage.expired()) {
+                    continue; // the texture is gone: its range may hold something else now
+                }
+                wb.buffer.Invalidate();
+                const std::span<const u8> mapped = wb.buffer.Mapped();
+                const bool host = wb.pool->HasHost();
+                if (!host && memory == nullptr) {
+                    continue;
+                }
+                for (u32 row = 0; row < wb.rows; ++row) {
+                    const u8* source = mapped.data() + row * wb.row_bytes;
+                    const u64 offset = wb.pool_offset + row * wb.pitch;
+                    if (host) {
+                        std::memcpy(wb.pool->HostRaw() + offset, source, wb.row_bytes);
+                    } else {
+                        memory->Write(wb.pool->address + offset, source, wb.row_bytes);
+                    }
+                }
+                const u64 n = written.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 4 || n % 3600 == 0) {
+                    float first[4]{};
+                    std::memcpy(first, mapped.data(), (std::min<size_t>)(sizeof(first), mapped.size()));
+                    LOG_INFO(Render_Vulkan,
+                             "[nvn] texture write-back #{}: {:#x} ({} rows of {} bytes, pitch {}), "
+                             "first words as floats {} {} {} {}",
+                             n, wb.pool->address + wb.pool_offset, wb.rows, wb.row_bytes, wb.pitch,
+                             first[0], first[1], first[2], first[3]);
+                }
+            }
+            flight->tex_writebacks.clear();
+        }
         for (InFlight::Dump& dump : flight->dumps) {
             dump.buffer.Invalidate();
             const std::string summary = Debug::WriteTga(dump.info, dump.buffer.Mapped());

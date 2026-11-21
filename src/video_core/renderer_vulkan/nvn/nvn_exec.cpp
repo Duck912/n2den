@@ -887,6 +887,10 @@ private:
                            const Rescale::CopyRegion& region, bool dst_covered);
     /// The GPU writes the storage (PrepareImages calls it for the layouts that write).
     void NoteGpuWrite(Storage& s);
+    /// GPU-written linear textures in CPU-readable pools noted this submission: Finish copies them
+    /// back into guest memory (RecordTexWriteBacks; EDEN_NX2_TRY_TEX_WRITEBACK=0 turns it off).
+    std::vector<std::shared_ptr<Storage>> tex_writeback_pending;
+    void RecordTexWriteBacks();
     void UploadStorage(Storage& s);
     /// A tile-backed sparse storage (nvn_sparse.h): binds device memory for the tiles the pool
     /// mapped since the last use, takes it back from the unmapped ones, and uploads the mapped
@@ -2236,6 +2240,100 @@ bool LegacyFirstUpload() {
 
 } // Anonymous namespace
 
+namespace {
+
+/// EDEN_NX2_TRY_TEX_WRITEBACK (default 1) and EDEN_NX2_NVN_TEX_WRITEBACK_MAX_KIB (default 1024).
+struct TexWriteBackConfig {
+    bool on{true};
+    u64 max_bytes{u64{1024} << 10};
+};
+const TexWriteBackConfig& TexWriteBackSettings() {
+    static const TexWriteBackConfig config = [] {
+        TexWriteBackConfig c;
+        if (const char* v = std::getenv("EDEN_NX2_TRY_TEX_WRITEBACK"); v != nullptr && *v != '\0') {
+            c.on = v[0] != '0';
+        }
+        if (const char* v = std::getenv("EDEN_NX2_NVN_TEX_WRITEBACK_MAX_KIB"); v != nullptr && *v) {
+            c.max_bytes = std::strtoull(v, nullptr, 10) << 10;
+        }
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] texture write-back: {} (GPU-written linear textures in CPU-readable pools up "
+                 "to {} KiB reach guest memory at submission end; EDEN_NX2_TRY_TEX_WRITEBACK)",
+                 c.on ? "on" : "off", c.max_bytes >> 10);
+        return c;
+    }();
+    return config;
+}
+
+/// A texture the CPU can read in place: linear (a linear render target in a CPU pool exists to be
+/// read by the CPU, e.g. Fast Fusion's auto-exposure state, read every frame to build the tone
+/// map's exposure), one 2D level and layer, a plain colour format, guest-sized, small.
+bool TexWriteBackEligible(Context::Impl& impl, const Storage& s) {
+    const TexWriteBackConfig& config = TexWriteBackSettings();
+    if (!config.on || !IsLinearStorage(s.desc) || s.scaled || s.type != VK_IMAGE_TYPE_2D ||
+        s.levels != 1 || s.layers != 1 || s.layout.size == 0 || s.layout.size > config.max_bytes) {
+        return false;
+    }
+    const bool plain = !s.host.needs_transcode && !s.host.guest_layout_differs &&
+                       s.samples == VK_SAMPLE_COUNT_1_BIT && !s.host.depth && !s.host.stencil;
+    return plain && FormatBlockInfo(s.desc.format).bytes != 0 && CpuReadablePoolOf(impl, s) != nullptr;
+}
+
+} // Anonymous namespace
+
+void Recorder::RecordTexWriteBacks() {
+    for (const std::shared_ptr<Storage>& storage : tex_writeback_pending) {
+        Storage& s = *storage;
+        if (!s.image || s.current_layout == VK_IMAGE_LAYOUT_UNDEFINED || s.origin != StorageOrigin::Gpu) {
+            continue;
+        }
+        Pool* const pool = CpuReadablePoolOf(impl, s);
+        const auto pool_it = impl.pools.find(s.pool_serial);
+        if (pool == nullptr || pool_it == impl.pools.end()) {
+            continue;
+        }
+        const BlockInfo block = FormatBlockInfo(s.desc.format);
+        const u32 width = s.extent.width;
+        const u32 height = (std::max)(s.extent.height, 1u);
+        const u32 bw = (std::max)(block.width, 1u);
+        const u32 bh = (std::max)(block.height, 1u);
+        const u64 cols = (width + bw - 1) / bw;
+        const u32 rows = (height + bh - 1) / bh;
+        const u64 row_bytes = cols * block.bytes;
+        const u64 pitch = s.layout.layer_size / rows;
+        if (pitch < row_bytes || s.pool_offset + pitch * (rows - 1) + row_bytes > pool->size) {
+            continue;
+        }
+        InFlight::TexWriteBack entry;
+        entry.buffer = impl.CreateHostBuffer(row_bytes * rows, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                             MemoryUsage::Download);
+        entry.pool = pool_it->second;
+        entry.storage = storage;
+        entry.pool_offset = s.pool_offset;
+        entry.pitch = pitch;
+        entry.row_bytes = row_bytes;
+        entry.rows = rows;
+        PrepareImages({{&s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}});
+        FlushPending();
+        const VkBufferImageCopy region{
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {width, height, 1},
+        };
+        Cmd().CopyImageToBuffer(*s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, *entry.buffer, region);
+        barrier_pending = true;
+        host_barrier_needed = true;
+        // From now on its guest bytes follow its GPU contents: not CPU rewrites (Storage).
+        s.cpu_writeback = true;
+        s.gpu_guest_sig_valid = false;
+        flight.tex_writebacks.push_back(std::move(entry));
+    }
+    tex_writeback_pending.clear();
+}
+
 void Recorder::NoteGpuWrite(Storage& s) {
     if (Storage* const owner = s.scale_owner) {
         // A pass, copy or clear wrote the scaled twin: the guest storage it stands for holds
@@ -2270,6 +2368,11 @@ void Recorder::NoteGpuWrite(Storage& s) {
     }
     if (s.scaled) {
         s.scale_state = Rescale::AfterNativeWrite();
+    }
+    if (TexWriteBackEligible(impl, s) &&
+        std::ranges::none_of(tex_writeback_pending,
+                             [&](const std::shared_ptr<Storage>& p) { return p.get() == &s; })) {
+        tex_writeback_pending.push_back(s.shared_from_this());
     }
 }
 
@@ -6751,6 +6854,7 @@ void Recorder::Finish(std::span<const VkSemaphore> binary_signals) {
     // Deferred report zero-fills first: the write-back copies below must see them.
     EndRenderCondition();
     EndDrawPass();
+    RecordTexWriteBacks();
     WriteReadbacks();
     EndSegment();
     draw.EndSubmission();

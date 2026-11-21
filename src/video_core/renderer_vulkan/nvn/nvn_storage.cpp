@@ -239,6 +239,9 @@ void Context::Impl::DetectGuestChange(Storage& s, u64 seq) {
     if (watching && ((pool.flags & PoolFlag::CpuNoAccess) != 0 || pool.IsVirtual())) {
         return;
     }
+    if (watching && s.cpu_writeback) {
+        return; // its guest bytes are our write-back of its GPU contents (Storage::cpu_writeback)
+    }
     const u64 size = (std::min)(s.layout.size, pool.size - s.pool_offset);
     if (size == 0) {
         return;

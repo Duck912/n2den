@@ -447,6 +447,11 @@ struct Storage : std::enable_shared_from_this<Storage> {
     /// a fallback for pools without CPU write tracking, see `gpu_takeover_armed`).
     u64 gpu_guest_sig{0};
     bool gpu_guest_sig_valid{false};
+    /// The GPU's contents are copied back into the guest bytes at the end of every submission that
+    /// writes them (Recorder::RecordTexWriteBacks: a linear target in a CPU-readable pool, which
+    /// exists for the CPU to read). Guest-byte changes are then ours: the sampled watch does not
+    /// treat them as CPU rewrites (the page tracker still sees real CPU writes).
+    bool cpu_writeback{false};
     /// The storage's pages were armed in its pool's `takeover_track` when the GPU took it over:
     /// GuestMemory::AnyWritten over them tells whether the CPU wrote them since (any bytes, also
     /// the same ones again, which the signature cannot see).
@@ -624,6 +629,18 @@ struct InFlight {
     };
     std::optional<Screenshot> screenshot;
 
+    /// GPU-written linear textures in CPU-readable pools, copied back into guest memory at
+    /// completion (Recorder::RecordTexWriteBacks).
+    struct TexWriteBack {
+        vk::Buffer buffer;
+        std::shared_ptr<Pool> pool;
+        std::weak_ptr<Storage> storage;
+        u64 pool_offset{};
+        u64 pitch{};
+        u64 row_bytes{};
+        u32 rows{};
+    };
+    std::vector<TexWriteBack> tex_writebacks;
     /// Render target dumps (EDEN_NX2_NVN_DUMP_TARGETS), written at completion.
     struct Dump {
         vk::Buffer buffer;
