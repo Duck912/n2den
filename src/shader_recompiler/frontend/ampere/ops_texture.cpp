@@ -526,6 +526,117 @@ void Visitor::SUST() {
                   ir.CompositeConstruct(colors[0], colors[1], colors[2], colors[3]), info);
 }
 
+namespace {
+// Bytes per texel of the uncompressed colour formats a raw surface store can target; 0 for the rest
+// (block-compressed, depth/stencil), which are not split.
+u32 TexelBytes(TexturePixelFormat format) {
+    using F = TexturePixelFormat;
+    switch (format) {
+    case F::R8_UNORM: case F::R8_SNORM: case F::R8_SINT: case F::R8_UINT:
+        return 1;
+    case F::R5G6B5_UNORM: case F::B5G6R5_UNORM: case F::A1R5G5B5_UNORM: case F::A1B5G5R5_UNORM:
+    case F::A5B5G5R1_UNORM: case F::R16_FLOAT: case F::R16_UNORM: case F::R16_SNORM: case F::R16_UINT:
+    case F::R16_SINT: case F::R8G8_UNORM: case F::R8G8_SNORM: case F::R8G8_SINT: case F::R8G8_UINT:
+    case F::A4B4G4R4_UNORM:
+        return 2;
+    case F::A8B8G8R8_UNORM: case F::A8B8G8R8_SNORM: case F::A8B8G8R8_SINT: case F::A8B8G8R8_UINT:
+    case F::A8B8G8R8_SRGB: case F::B8G8R8A8_UNORM: case F::B8G8R8A8_SRGB: case F::A2B10G10R10_UNORM:
+    case F::A2B10G10R10_UINT: case F::A2R10G10B10_UNORM: case F::B10G11R11_FLOAT: case F::R32_FLOAT:
+    case F::R32_UINT: case F::R32_SINT: case F::R16G16_UNORM: case F::R16G16_FLOAT: case F::R16G16_UINT:
+    case F::R16G16_SINT: case F::R16G16_SNORM: case F::E5B9G9R9_FLOAT:
+        return 4;
+    case F::R16G16B16A16_FLOAT: case F::R16G16B16A16_UNORM: case F::R16G16B16A16_SNORM:
+    case F::R16G16B16A16_SINT: case F::R16G16B16A16_UINT: case F::R16G16B16X16_FLOAT:
+    case F::R32G32_FLOAT: case F::R32G32_SINT: case F::R32G32_UINT:
+        return 8;
+    case F::R32G32B32A32_UINT: case F::R32G32B32A32_FLOAT: case F::R32G32B32A32_SINT:
+        return 16;
+    default:
+        return 0;
+    }
+}
+} // Anonymous namespace
+
+// SUST.D: raw ("data") surface store, the texel's bits from registers, its size from bits 73..75
+// (U8, S8, U16, S16, 32, 64, 128; nvdisasm). As the Maxwell SUST.D translation does, the image is
+// written through a view of the matching integer format (R8_UINT .. R32G32B32A32_UINT), so the bits
+// land unconverted whatever the image's own format. Bit 72 (.BA): the first coordinate counts bytes,
+// not texels; it is divided by the texel size here. The other fields are SUST's: coordinates 24,
+// data 32, descriptor 40..58, clamp 59..60 (only .IGN), dimension 61..63, memory ordering 76..79 and
+// eviction priority 84..86. Fast Fusion's upscaling output pass writes its result with
+// SUST.D.BA.2D (32-bit texels).
+void Visitor::SUST_D() {
+    const u32 coord_reg = Take(24, 8);
+    const u32 data_reg = Take(32, 8);
+    const u32 cbuf_offset = Take(40, 14) * 4;
+    const u32 cbuf_index = Take(54, 5);
+    Require(Take(59, 2) == 0, "native surface clamp mode");
+    const Dimension dim = ImageDimensionOf(Take(61, 3));
+    Require(dim.coordinates != 0, "native surface dimension");
+    const bool byte_address = Take(72, 1) != 0;
+    const u32 size = Take(73, 3);
+    Ignore(76, 4); // memory ordering
+    Ignore(84, 3); // cache eviction priority
+    // Only the 32-bit form is seen (all 72 uses in the DLSS library): the others are not tested and
+    // the signed narrow ones would need a signed sampled type.
+    Require(size == 4, "native raw surface store size");
+    static constexpr std::array<ImageFormat, 7> formats{
+        ImageFormat::R8_UINT,  ImageFormat::R8_SINT,     ImageFormat::R16_UINT,
+        ImageFormat::R16_SINT, ImageFormat::R32_UINT,    ImageFormat::R32G32_UINT,
+        ImageFormat::R32G32B32A32_UINT,
+    };
+    static constexpr std::array<u32, 7> texel_shift{0, 0, 1, 1, 2, 3, 4}; // log2 of the texel bytes
+    const u32 words = size == 5 ? 2 : (size == 6 ? 4 : 1);
+    Require(data_reg == 255 || (data_reg % words == 0 && data_reg + words <= 255),
+            "native raw surface store data");
+    Require(coord_reg + dim.coordinates < 255, "native surface registers");
+    UseDescriptorBuffer(cbuf_index);
+    // A 32-bit byte-addressed store into an image of narrower texels writes several texels: the view
+    // must be in the image's texel size (a 32-bit view of a 16-bit image is not a valid view). Fast
+    // Fusion's upscaler output pass stores pairs of halves into an R16_FLOAT image this way. The
+    // format is the descriptor's at translation time, as for the texture pass's integer type.
+    const u32 image_bytes = TexelBytes(env.ReadTexturePixelFormat(env.ReadCbufValue(cbuf_index, cbuf_offset)));
+    Require(image_bytes == 0 || image_bytes <= 4, "native raw surface store into a wider texel");
+    if (byte_address && (image_bytes == 1 || image_bytes == 2)) {
+        const u32 parts = 4 / image_bytes;
+        const u32 part_bits = image_bytes * 8;
+        const IR::U32 value{X(data_reg)};
+        for (u32 part = 0; part < parts; ++part) {
+            const IR::Value coords{SurfaceCoordinates(ir, dim, coord_reg, [&](u32 r) -> IR::U32 {
+                if (r != coord_reg) {
+                    return X(r);
+                }
+                const IR::U32 texel{image_bytes == 2 ? IR::U32{ir.ShiftRightLogical(X(r), ir.Imm32(1))}
+                                                     : X(r)};
+                return part == 0 ? texel : IR::U32{ir.IAdd(texel, ir.Imm32(part))};
+            })};
+            const IR::U32 bits{ir.BitFieldExtract(value, ir.Imm32(part * part_bits), ir.Imm32(part_bits))};
+            IR::TextureInstInfo info{};
+            info.type.Assign(dim.type);
+            info.image_format.Assign(image_bytes == 2 ? ImageFormat::R16_UINT : ImageFormat::R8_UINT);
+            const IR::U32 zero{ir.Imm32(0U)};
+            ir.ImageWrite(DescriptorHandle(cbuf_offset), coords, ir.CompositeConstruct(bits, zero, zero, zero),
+                          info);
+        }
+        return;
+    }
+    const IR::Value coords{SurfaceCoordinates(ir, dim, coord_reg, [&](u32 r) -> IR::U32 {
+        if (r == coord_reg && byte_address && texel_shift[size] != 0) {
+            return ir.ShiftRightLogical(X(r), ir.Imm32(texel_shift[size]));
+        }
+        return X(r);
+    })};
+    std::array<IR::U32, 4> colors;
+    for (u32 k = 0; k < 4; ++k) {
+        colors[k] = k < words ? X(data_reg == 255 ? 255 : data_reg + k) : ir.Imm32(0U);
+    }
+    IR::TextureInstInfo info{};
+    info.type.Assign(dim.type);
+    info.image_format.Assign(formats[size]);
+    ir.ImageWrite(DescriptorHandle(cbuf_offset), coords,
+                  ir.CompositeConstruct(colors[0], colors[1], colors[2], colors[3]), info);
+}
+
 // SULD: formatted surface load into consecutive registers, one per selected channel.
 void Visitor::SULD() {
     const u32 dest = Take(16, 8);

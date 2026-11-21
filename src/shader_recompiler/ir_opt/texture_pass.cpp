@@ -1428,7 +1428,11 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             }
             const bool is_written{inst->GetOpcode() != IR::Opcode::ImageRead};
             const bool is_read{inst->GetOpcode() != IR::Opcode::ImageWrite};
-            const bool is_integer{is_texture_pixel_format_integer(cbuf)};
+            // An explicit format (typed SULD.D / SUST.D, R8_UINT .. R32G32B32A32_UINT) is always an
+            // integer one: the view is made in that format and SPIR-V needs an integer sampled type
+            // for it, whatever the image's own format is.
+            const bool is_integer{flags.image_format != ImageFormat::Typeless ||
+                                  is_texture_pixel_format_integer(cbuf)};
             if (flags.type == TextureType::Buffer) {
                 index = descriptors.Add(ImageBufferDescriptor{
                     .format = flags.image_format,

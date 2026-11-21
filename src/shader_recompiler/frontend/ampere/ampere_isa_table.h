@@ -11,7 +11,7 @@ struct IsaRow {
     std::array<u32, 4> known;
 };
 
-inline constexpr size_t ISA_ROW_COUNT = 637;
+inline constexpr size_t ISA_ROW_COUNT = 639;
 struct IsaListEntry {
     u32 op12;
     IsaRow row;
@@ -89,7 +89,7 @@ inline constexpr IsaListEntry ISA_ROWS[] = {
     {0x304, {"F2F", {0x00ffffffU, 0xc00000ffU, 0x0031d800U, 0xfffffe00U}}},
     {0x305, {"F2I", {0x00ffffffU, 0xd00000ffU, 0x0031f900U, 0xfffffe00U}}},
     {0x306, {"I2F", {0x00ffffffU, 0xf00000ffU, 0x0030dc00U, 0xfffffe00U}}},
-    {0x307, {"FRnd", {0x00ffffffU, 0xc00000ffU, 0x0031d800U, 0xfffffe00U}}},
+    {0x307, {"FRnd", {0x00ffffffU, 0xd00000ffU, 0x0031d800U, 0xfffffe00U}}},
     {0x308, {"MuFu", {0x00ffffffU, 0xd00000ffU, 0x0000fe00U, 0xfffffe00U}}},
     {0x309, {"PopC", {0x00ffffffU, 0xc00000ffU, 0x00000000U, 0xfffffe00U}}},
     {0x310, {"F2F", {0x00ffffffU, 0xc00000ffU, 0x0031d800U, 0xfffffe00U}}},
@@ -101,6 +101,7 @@ inline constexpr IsaListEntry ISA_ROWS[] = {
     {0x322, {"ASt", {0xff00ffffU, 0x0003ffffU, 0x00003cffU, 0xfffffe00U}}},
     {0x324, {"Out/OutFinal", {0xffffffffU, 0xc00000ffU, 0x0000c300U, 0xfffffe00U}}},
     {0x326, {"Ipa", {0x00ffffffU, 0x000000ffU, 0x000ef0ffU, 0xfffffe00U}}},
+    {0x343, {"CALL.ABS", {0xff00ffffU, 0x00000000U, 0x07f00000U, 0xfffffe00U}}},
     {0x348, {"WarpSync", {0x0000ffffU, 0xc00000ffU, 0x07800000U, 0xfffffe00U}}},
     // Added by hand (not in the NAK field map): geometry-only encodings; masks as lower_to_maxwell.h checks them.
     {0x34e, {"LEPC", {0x00ffffffU, 0x00000000U, 0x00000000U, 0xfffffe00U}}},
@@ -503,6 +504,7 @@ inline constexpr IsaListEntry ISA_ROWS[] = {
     {0xb82, {"Ldc", {0xffffffffU, 0x07ffffc0U, 0x0800ce00U, 0xfffffe00U}}},
     {0xb97, {"SULD", {0xffffffffU, 0xe7ffff00U, 0x007eff00U, 0xfffffe00U}}},
     {0xb9b, {"SUST", {0xff00ffffU, 0xe7ffffffU, 0x0070ff00U, 0xfffffe00U}}},
+    {0xb9d, {"SUST.D", {0xff00ffffU, 0xe7ffffffU, 0x0070ff00U, 0xfffffe00U}}},
     {0xc02, {"Mov", {0x00ffffffU, 0xc000003fU, 0x08000f00U, 0xfffffe00U}}},
     {0xc07, {"Sel", {0xffffffffU, 0xc000003fU, 0x0f800300U, 0xfffffe00U}}},
     {0xc09, {"FMnMx", {0xffffffffU, 0xc000003fU, 0x0f81031eU, 0xfffffe00U}}},

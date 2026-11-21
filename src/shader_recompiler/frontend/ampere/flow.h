@@ -31,6 +31,10 @@ struct Guard {
 // Absolute instruction index targeted by a native BRA or BSSY.
 [[nodiscard]] std::optional<u32> BranchTarget(const Instruction& instruction, u32 index);
 
+/// BRA.DIV ~URZ / BRA.CONV ~URZ: branches on whether the warp is diverged (see flow.cpp).
+enum class WarpStateBranch { None, Diverged, Converged };
+[[nodiscard]] WarpStateBranch WarpStateBranchOf(const Instruction& instruction);
+
 struct FlowAnalysis {
     std::vector<u8> reachable;
     std::vector<u8> leader;

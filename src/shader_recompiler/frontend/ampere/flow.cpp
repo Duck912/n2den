@@ -110,6 +110,26 @@ Guard SecondOf(const Instruction& instruction) {
     return {instruction.Bits(87, 3), instruction.Bits(90, 1) != 0};
 }
 
+// BRA.DIV ~URZ / BRA.CONV ~URZ (0x947 with bit 91, the uniform register ~URZ = the whole warp at
+// 24..31, the mode in bits 32..33: 2 DIV, 3 CONV): branch when the warp is diverged / converged.
+// CUDA wraps an inline __shfl_sync in them: a converged warp runs the inline SHFL, a diverged one
+// jumps to an out-of-line call of __cuda_sm70_shflsync_* and branches back; both compute the same
+// value. Lanes are emulated together, so the warp counts as converged, as in the lowering
+// (lower_to_maxwell.h): DIV is never taken and CONV always. Only the unguarded form is accepted.
+WarpStateBranch WarpStateBranchOf(const Instruction& instruction) {
+    if (instruction.words[0] != 0x7f007947U || (instruction.words[2] & ~0x3ffffU) != 0x0b800000U) {
+        return WarpStateBranch::None;
+    }
+    switch (instruction.words[1] & 3) {
+    case 2:
+        return WarpStateBranch::Diverged;
+    case 3:
+        return WarpStateBranch::Converged;
+    default:
+        return WarpStateBranch::None;
+    }
+}
+
 std::optional<u32> BranchTarget(const Instruction& instruction, u32 index) {
     const u32 op = instruction.Bits(0, 12);
     const s64 relative = op == 0x945 ? RelativeOffset30(instruction) : RelativeOffset48(instruction);
@@ -281,12 +301,19 @@ FlowAnalysis AnalyzeFlowImpl(std::span<const Instruction> code, std::span<const 
             result.function_of[index] = function;
             const Instruction& insn = code[index];
             const u32 op = insn.Bits(0, 12);
+            const WarpStateBranch warp_state = WarpStateBranchOf(insn);
+            if (warp_state == WarpStateBranch::Diverged) {
+                ++index; // never taken (WarpStateBranchOf)
+                continue;
+            }
             const IsaRow* const row = LookupRow(op);
             if (!row) {
                 throw UnsupportedError(index, fmt::format("unsupported native opcode {:#x}", op));
             }
-            if (const int bit = FirstUnknownBit(insn, *row); bit >= 0) {
-                throw UnsupportedError(index, fmt::format("unknown bit {} in op {:#x}", bit, op));
+            if (warp_state == WarpStateBranch::None) {
+                if (const int bit = FirstUnknownBit(insn, *row); bit >= 0) {
+                    throw UnsupportedError(index, fmt::format("unknown bit {} in op {:#x}", bit, op));
+                }
             }
             OpInfo info = Classify(op);
             if (info.kind == OpKind::Call && IsSkipCall(code, index)) {
@@ -346,8 +373,8 @@ FlowAnalysis AnalyzeFlowImpl(std::span<const Instruction> code, std::span<const 
                 if (!target) {
                     throw UnsupportedError(index, "native branch destination alignment");
                 }
-                if (insn.Bits(32, 1)) {
-                    throw UnsupportedError(index, "native uniform branch");
+                if (insn.Bits(32, 1) && warp_state != WarpStateBranch::Converged) {
+                    throw UnsupportedError(index, "native uniform branch"); // CONV keeps its mode there
                 }
                 mark_leader(*target, index);
                 work.push_back({*target, stack, function});
@@ -649,7 +676,7 @@ struct Builder {
             }
             const Guard guard = GuardOf(insn);
             const Guard second = SecondOf(insn);
-            if (guard.Never()) {
+            if (guard.Never() || WarpStateBranchOf(insn) == WarpStateBranch::Diverged) {
                 ++index;
                 continue;
             }

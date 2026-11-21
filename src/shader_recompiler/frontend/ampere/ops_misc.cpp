@@ -132,13 +132,15 @@ void Visitor::OUT() {
     X(dest, ir.Imm32(0U));
 }
 
-// LEPC (geometry programs): this instruction's address as a register pair. The host has no guest
-// GPU address for the program, so the pair holds the instruction's byte offset from the first native
-// instruction (index * 16, high word zero). That depends on the instructions alone, so identical
-// programs at different addresses share their verdict, layout and IR safely. The only consumer seen
-// is the geometry exit stub setup (0x357), which the host drops.
+// LEPC (geometry and compute programs): this instruction's address as a register pair. The host has
+// no guest GPU address for the program, so the pair holds the instruction's byte offset from the
+// first native instruction (index * 16, high word zero). That depends on the instructions alone, so
+// identical programs at different addresses share their verdict, layout and IR safely. The consumers
+// seen are the geometry exit stub setup (0x357), which the host drops, and the return address CUDA
+// kernels build for CALL.ABS.NOINC to an external function, which ends the thread (CallAbsolute).
 void Visitor::LEPC() {
-    if (env.ShaderStage() != Stage::Geometry || !NativeExtensions()) {
+    if (env.ShaderStage() != Stage::Compute &&
+        (env.ShaderStage() != Stage::Geometry || !NativeExtensions())) {
         Unsupported(fmt::format("unsupported native opcode {:#x}", op)); // as before these existed
     }
     const u32 dest = Take(16, 8);

@@ -44,7 +44,7 @@ enum class FrontendMode {
 
 // Salt mixed into the pipeline cache identity of native-translated programs. Bump it whenever the
 // native translation changes so cached results of an older translator are never reused.
-inline constexpr u64 NATIVE_TRANSLATOR_SALT = 0x4f554e4345a00028ULL;
+inline constexpr u64 NATIVE_TRANSLATOR_SALT = 0x4f554e4345a00029ULL;
 
 // Maxwell Location offset of native instruction `index` (same mapping the lowering uses).
 [[nodiscard]] constexpr u32 LocationOf(u32 index) {

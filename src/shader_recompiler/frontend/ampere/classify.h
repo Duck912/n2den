@@ -43,6 +43,7 @@ struct OpInfo {
     case 0x94d: return {OpKind::Exit, false};
     case 0x95b: return {OpKind::Kill, false};
     case 0x95c: return {OpKind::Exit, false}; // BPT.TRAP stops the thread
+    case 0x343: return {OpKind::Exit, false}; // CALL.ABS to an external function: ends the thread
     case 0x945: return {OpKind::Bssy, false};
     case 0x941: return {OpKind::Bsync, false};
     case 0x949: return {OpKind::Brx, false};
@@ -51,6 +52,7 @@ struct OpInfo {
     case 0x950: return {OpKind::Ret, false};
     case 0x942: // BREAK
     case 0x948: // WARPSYNC
+    case 0x348: // WARPSYNC with the mask in a register
     case 0x918: // NOP
     case 0x91a: // DEPBAR: IR data dependencies replace scoreboards
         return {OpKind::Nop, false};

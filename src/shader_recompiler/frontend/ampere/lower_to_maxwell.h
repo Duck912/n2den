@@ -2217,9 +2217,11 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             const u32 descriptor = insn.Bits(64, 6);
             if (native_predicate != 7 || (global_address & 1) || global_address + 2 > reserved_register ||
                 descriptor >= 63 || (descriptor & 1) || (insn.words[1] & 0xf000U) ||
-                (insn.words[2] & ~(0x03800000U | 0x7fU)) != 0x0c101c00)
+                (insn.words[2] & ~(0x07800000U | 0x3fU | 0x180U)) != 0x08101c40)
                 return fail(index, "native global-to-shared copy mode");
-            const u32 enable = insn.Bits(87, 3) | (insn.Bits(70, 1) << 3);
+            // Enable predicate 87..89, negated by bit 90; bit 70 is always set and bits 71/72 are L2
+            // prefetch hints (nvdisasm).
+            const u32 enable = insn.Bits(87, 3) | (insn.Bits(90, 1) << 3);
             const u32 global_immediate = insn.words[1] & 0xfff;
             const s32 global_offset = static_cast<s32>(global_immediate) - (global_immediate & 0x800 ? 0x1000 : 0);
             const s32 shared_offset = static_cast<s32>(static_cast<s16>(insn.words[1] >> 16)) * 16;

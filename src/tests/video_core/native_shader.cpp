@@ -4654,6 +4654,19 @@ TEST_CASE("Native capture distinguishes forward branches from call targets beyon
     REQUIRE(invalid.Observe(Native{{0x7947, 1, 0x03800000, 0}}, 0) == Capture::Result::InvalidTarget);
 }
 
+TEST_CASE("Native capture takes BRA.DIV and BRA.CONV mode bits out of the branch offset", "[native-shader]") {
+    using Capture = Shader::Ampere::ProgramCaptureState;
+    // BRA.DIV ~URZ, +48 bytes (mode 2 in the low offset bits, bit 91, ~URZ): CUDA's shuffle fallback branch.
+    Capture diverged;
+    REQUIRE(diverged.Observe(Native{{0x7f007947, 48 | 2, 0x0b800000, 0}}, 0) == Capture::Result::Continue);
+    REQUIRE(diverged.Observe(VertexTransform.back(), 1) == Capture::Result::Continue);
+    REQUIRE(diverged.Observe(VertexTransform.back(), 4) == Capture::Result::Complete);
+    // BRA.CONV ~URZ (mode 3).
+    Capture converged;
+    REQUIRE(converged.Observe(Native{{0x7f007947, 48 | 3, 0x0b800000, 0}}, 0) == Capture::Result::Continue);
+    REQUIRE(converged.Observe(VertexTransform.back(), 4) == Capture::Result::Complete);
+}
+
 
 TEST_CASE("Native implicit volume sample preserves XYZ and all four split channels", "[native-shader]") {
     const std::array<Native, 2> input{{{{0x0a0a7b60, 0x5080400e, 0x041e0f0c, 0}}, VertexTransform.back()}};
@@ -6810,7 +6823,7 @@ TEST_CASE("Native global-to-shared copies transfer four words or zero-fill witho
     const s32 shared_offset = GENERATE(0, 16, 4096, -16);
     const std::array<Native, 4> input{{
         {{0x02047fae, ((static_cast<u32>(shared_offset / 16) & 0xffffU) << 16) | (static_cast<u32>(global_offset) & 0xfffU),
-            0x0f901c08U | (zero_fill ? 0x40U : 0U), 0}},
+            0x0b901c48U | (zero_fill ? 0x04000000U : 0U), 0}},
         {{0x79af, 0, 0, 0}},
         {{0x791a, 0x8000, 0, 0}},
         VertexTransform.back(),
@@ -6847,7 +6860,7 @@ TEST_CASE("Native global-to-shared copies transfer four words or zero-fill witho
 TEST_CASE("Native global-to-shared copy retains its source predicate and rejects other modes", "[native-shader]") {
     const u32 condition = GENERATE(0U, 4U, 7U, 8U, 12U);
     std::array<Native, 2> input{{
-        {{0x02047fae, 0, 0x0c101c08U | ((condition & 7) << 23) | ((condition >> 3) << 6), 0}},
+        {{0x02047fae, 0, 0x08101c48U | ((condition & 7) << 23) | ((condition >> 3) << 26), 0}},
         VertexTransform.back(),
     }};
     const auto result = Shader::Ampere::LowerToMaxwell(input);

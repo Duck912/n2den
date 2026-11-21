@@ -83,7 +83,18 @@ void Visitor::LDG() {
     }
     const u32 offset = Take(40, 24);
     const u32 type = Take(73, 3);
-    Ignore(76, 4); // memory ordering
+    // Bit 76 on the uniform form: the uniform register is the memory descriptor (CUDA's desc[URn],
+    // loaded from c[0x0][0x118]), not an address term; nvdisasm prints [R8.64] with it set and
+    // [R8.64+UR12] with it clear. Every LDG/STG of the CUDA DLSS libraries sets it: adding the
+    // descriptor made the storage buffer pass bind c[0x118] as the buffer of Fast Fusion's upscaler
+    // coefficient table (2x2-blocky DLSS output).
+    if (uniform_form && Take(76, 1) != 0) {
+        Require(reg != 255, "native descriptor global load without register address");
+        use_uniform = false;
+    } else if (!uniform_form) {
+        Ignore(76, 1);
+    }
+    Ignore(77, 3); // memory ordering
     Require(Take(81, 3) == 7, "native global load residency");
     Ignore(84, 3); // cache eviction priority
     Require(type <= 6, "native global load type");
@@ -151,7 +162,14 @@ void Visitor::STG() {
         Require(Take(91, 1) == 0, "native global store flags");
     }
     const u32 type = Take(73, 3);
-    Ignore(76, 4); // memory ordering
+    // Bit 76 on the uniform form: memory descriptor, not an address term (see LDG).
+    if (uniform_form && Take(76, 1) != 0) {
+        Require(reg != 255, "native descriptor global store without register address");
+        use_uniform = false;
+    } else if (!uniform_form) {
+        Ignore(76, 1);
+    }
+    Ignore(77, 3); // memory ordering
     Ignore(84, 3); // cache eviction priority
     Require(type <= 6, "native global store type");
     const IR::U64 address{GlobalAddress(reg, reg_pair, use_uniform, uniform, uniform_pair, offset)};
@@ -291,17 +309,24 @@ void Visitor::STS() {
 
 // SHFL with an immediate lane and segmentation mask: bits 40..52 hold clamp (low 5) and segment mask
 // (bits 8..12), 53..57 the lane, 58..59 the mode (index, up, down, butterfly). 0x989 keeps the
-// immediate lane and takes the mask from a register (64..71), with the same two fields.
+// immediate lane and takes the mask from a register (64..71), with the same two fields. 0x389 takes
+// both from registers (lane 32..39, mask 64..71): CUDA's __cuda_sm70_shflsync_bfly helper
+// (SHFL.BFLY PT, R12, R12, R13, R5 with R5 = 0x1f) in the upscaling network's attention layers.
 void Visitor::SHFL() {
-    const bool register_lane = op == 0x589; // lane in a register (32..39), mask immediate at 40..52
-    const bool register_mask = op == 0x989; // lane immediate at 53..57, mask in a register (64..71)
+    // Lane in a register (32..39): 0x589 (mask immediate at 40..52) and 0x389.
+    const bool register_lane = op == 0x589 || op == 0x389;
+    // Mask in a register (64..71): 0x989 (lane immediate at 53..57) and 0x389.
+    const bool register_mask = op == 0x989 || op == 0x389;
     const u32 dest = Take(16, 8);
     const u32 source = Take(24, 8);
     u32 mask = 0;
     u32 lane = 0;
     u32 lane_register = 0;
     u32 mask_register = 0;
-    if (register_lane) {
+    if (register_lane && register_mask) {
+        lane_register = Take(32, 8);
+        mask_register = Take(64, 8);
+    } else if (register_lane) {
         lane_register = Take(32, 8);
         mask = Take(40, 13);
     } else if (register_mask) {
@@ -518,7 +543,7 @@ void Visitor::VOTE() {
 // copy completes synchronously: the global address is the register pair at 24, the shared address the
 // register at 16, the signed global offset the low 12 bits of the second word and the shared offset
 // its upper half in units of 16 bytes; the memory descriptor selector is ignored, and the enable
-// predicate (87..89 plus the negate bit 70) zero-fills the destination when false.
+// predicate (87..89 plus the negate bit 90) zero-fills the destination when false.
 void Visitor::LDGSTS() {
     const u32 shared_reg = Take(16, 8);
     const u32 global_reg = Take(24, 8);
@@ -526,12 +551,17 @@ void Visitor::LDGSTS() {
     Require(Take(44, 4) == 0, "native global-to-shared copy mode");
     const s32 shared_offset = static_cast<s32>(static_cast<s16>(Take(48, 16))) * 16;
     Ignore(64, 6); // memory descriptor selector
-    const bool negate_enable = Take(70, 1) != 0;
-    // Bits 87..89 are the enable predicate, so only 85..86 are reserved.
-    Require(Take(72, 2) == 0 && Take(74, 3) == 7 && Take(77, 7) == 0 && Take(84, 1) == 1 &&
-                Take(85, 2) == 0 && Take(90, 2) == 3,
+    // Bit 70 must be set (nvdisasm: illegal instruction when clear); it is not the predicate negation,
+    // which is bit 90 (the enable predicate is 87..89). Bits 71 and 72 are the .LTC64B / .LTC128B L2
+    // prefetch hints, no effect on the copied data.
+    Require(Take(70, 1) == 1, "native global-to-shared copy mode");
+    Ignore(71, 1);
+    Ignore(72, 1);
+    Require(Take(73, 1) == 0 && Take(74, 3) == 7 && Take(77, 7) == 0 && Take(84, 1) == 1 &&
+                Take(85, 2) == 0 && Take(91, 1) == 1,
             "native global-to-shared copy mode");
     const u32 enable_index = Take(87, 3);
+    const bool negate_enable = Take(90, 1) != 0;
     Require(global_reg % 2 == 0 && global_reg + 1 < 255 && shared_reg < 255, "native global-to-shared copy registers");
     const s32 global_offset = static_cast<s32>(global_immediate) - ((global_immediate & 0x800) != 0 ? 0x1000 : 0);
     const IR::U1 enabled{Pred(enable_index, negate_enable)};
@@ -584,6 +614,24 @@ void Visitor::BAR() {
 }
 
 // LDL: local (per-thread) memory load, one 32-bit word at a time.
+// CUDA kernels address local memory inside a 16 MiB per-thread window and use its top: the guest CUDA
+// driver sets the stack pointer c[0x0][0x28] to 0x1000000 - 0x240 and each kernel subtracts its
+// frame (MOV R1, c[0x0][0x28]; IADD3 R1, R1, -frame), while the QMD allocates exactly 0x240 + frame
+// bytes (Fast Fusion, seen live: c0[0x28] 0xfffdc0, local sizes 0x240 and 0x290). So the program's
+// local memory is the window's top local_memory_size bytes; an address there maps to its offset from
+// 0x1000000 - local_memory_size. Lower addresses (programs that address local memory from 0) keep
+// their meaning.
+IR::U32 Visitor::LocalAddress(const IR::U32& address) {
+    constexpr u32 window_top = 0x1000000;
+    const u32 size = env.LocalMemorySize();
+    if (size == 0 || size > window_top) {
+        return address;
+    }
+    const IR::U32 base{ir.Imm32(window_top - size)};
+    const IR::U1 in_window{ir.IGreaterThanEqual(address, base, false)};
+    return IR::U32{ir.Select(in_window, ir.ISub(address, base), address)};
+}
+
 void Visitor::LDL() {
     const u32 dest = Take(16, 8);
     const u32 reg = Take(24, 8);
@@ -592,7 +640,7 @@ void Visitor::LDL() {
     const u32 type = Take(73, 3);
     Ignore(84, 3); // cache eviction priority
     Require(type <= 6, "native local load type");
-    const IR::U32 offset{SharedOffset(reg, 0, offset_field)};
+    const IR::U32 offset{LocalAddress(SharedOffset(reg, 0, offset_field))};
     const IR::U32 limit{ir.Imm32(env.LocalMemorySize())};
     const auto load_word = [&](u32 k) -> IR::U32 {
         const IR::U32 byte_offset{k == 0 ? offset : IR::U32{ir.IAdd(offset, ir.Imm32(k * 4))}};
@@ -636,27 +684,48 @@ void Visitor::STL() {
     const u32 type = Take(73, 3);
     Ignore(84, 3); // cache eviction priority
     Require(type <= 6, "native local store type");
-    const IR::U32 offset{SharedOffset(reg, 0, offset_field)};
+    const IR::U32 offset{LocalAddress(SharedOffset(reg, 0, offset_field))};
     const IR::U32 word_offset{ir.ShiftRightArithmetic(offset, ir.Imm32(2))};
+    // As LDL reads zero there, a store outside the program's local memory is dropped: the host array
+    // has local_memory_size bytes, and an index past it is undefined behaviour in SPIR-V (a GPU fault
+    // on some drivers). The read-modify-write forms reuse the guarded load.
+    const IR::U32 limit{ir.Imm32(env.LocalMemorySize())};
+    const auto in_bounds = [&](const IR::U32& byte_offset) {
+        return IR::U1{ir.ILessThan(byte_offset, limit, false)};
+    };
+    const auto store_word = [&](const IR::U32& word, const IR::U32& value) {
+        const IR::U32 byte_offset{ir.ShiftLeftLogical(word, ir.Imm32(2))};
+        // Out of bounds, the store goes to word 0 with its own value (read back first): no effect.
+        const IR::U1 inside{in_bounds(byte_offset)};
+        const IR::U32 target{ir.Select(inside, word, ir.Imm32(0U))};
+        const IR::U32 kept{ir.LoadLocal(ir.Imm32(0U))};
+        ir.WriteLocal(target, IR::U32{ir.Select(inside, value, kept)});
+    };
+    const auto load_word = [&](const IR::U32& word) {
+        const IR::U32 byte_offset{ir.ShiftLeftLogical(word, ir.Imm32(2))};
+        const IR::U1 inside{in_bounds(byte_offset)};
+        const IR::U32 safe_word{ir.Select(inside, word, ir.Imm32(0U))};
+        return IR::U32{ir.Select(inside, ir.LoadLocal(safe_word), ir.Imm32(0U))};
+    };
     switch (static_cast<MemType>(type)) {
     case MemType::U8:
     case MemType::S8: {
         const IR::U32 bit{ir.BitwiseAnd(ir.ShiftLeftLogical(offset, ir.Imm32(3)), ir.Imm32(24))};
-        ir.WriteLocal(word_offset, ir.BitFieldInsert(ir.LoadLocal(word_offset), X(data), bit, ir.Imm32(8)));
+        store_word(word_offset, ir.BitFieldInsert(load_word(word_offset), X(data), bit, ir.Imm32(8)));
         break;
     }
     case MemType::U16:
     case MemType::S16: {
         const IR::U32 bit{ir.BitwiseAnd(ir.ShiftLeftLogical(offset, ir.Imm32(3)), ir.Imm32(16))};
-        ir.WriteLocal(word_offset, ir.BitFieldInsert(ir.LoadLocal(word_offset), X(data), bit, ir.Imm32(16)));
+        store_word(word_offset, ir.BitFieldInsert(load_word(word_offset), X(data), bit, ir.Imm32(16)));
         break;
     }
     default: {
         const u32 count = type == 4 ? 1 : type == 5 ? 2 : 4;
         Require(data == 255 || (data % count == 0 && data + count - 1 < 255), "native local store data");
         for (u32 k = 0; k < count; ++k) {
-            ir.WriteLocal(k == 0 ? word_offset : IR::U32{ir.IAdd(word_offset, ir.Imm32(k))},
-                          data == 255 ? X(255) : X(data + k));
+            store_word(k == 0 ? word_offset : IR::U32{ir.IAdd(word_offset, ir.Imm32(k))},
+                       data == 255 ? X(255) : X(data + k));
         }
         break;
     }

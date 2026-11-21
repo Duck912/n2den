@@ -20,12 +20,16 @@ public:
     Result Observe(const Instruction& instruction, u32 index) {
         const u32 opcode = instruction.Bits(0, 12);
         if (opcode == 0x944 || opcode == 0x947 || opcode == 0x945) {
-            const u64 raw = instruction.words[1] | (u64{instruction.words[2] & 0x3ffff} << 32);
-            // BRA.DIV (bit 91 and a uniform register) carries two mode bits below its word offset.
-            const bool divergence = opcode == 0x947 && (instruction.words[2] & ~0x3ffffU) == 0x0b800000U &&
-                                    (instruction.words[1] & 3) == 3;
+            // BRA.DIV / BRA.CONV (bit 91 and a uniform register) keep their mode in the low two bits of
+            // the word offset (2 = DIV, 3 = CONV); they are not part of the displacement. Only CONV was
+            // masked before, so every BRA.DIV (the DLSS library's attention layers) read as a misaligned
+            // target and failed the capture. Other branches keep the check on those bits.
+            const bool warp_state = opcode == 0x947 && (instruction.words[2] & ~0x3ffffU) == 0x0b800000U &&
+                                    (instruction.words[1] & 3) >= 2;
+            const u32 low = warp_state ? instruction.words[1] & ~3U : instruction.words[1];
+            const u64 raw = low | (u64{instruction.words[2] & 0x3ffff} << 32);
             const s64 relative = opcode == 0x945 ? static_cast<s32>(instruction.words[1])
-                                                : (static_cast<s64>(raw << 14) >> 14) - (divergence ? 3 : 0);
+                                                : static_cast<s64>(raw << 14) >> 14;
             const s64 target = s64{index} * 16 + 16 + relative;
             if (target < 0 || target % 16 || target >= MaximumInstructions * 16)
                 return Result::InvalidTarget;

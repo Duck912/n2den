@@ -169,7 +169,10 @@ void Visitor::F2I() {
     X(dest, result);
 }
 
-// I2FP / I2F: 32-bit (or small) integer to F32.
+// I2FP / I2F: 32-bit (or small) integer to F32, or to F16 (destination size 1, I2F.F16: the half
+// in the low 16 bits of the destination, the high half zero, as F2F.F16 writes it). The F16 form is
+// in the output pass of the newer upscaling library (Fast Fusion's hiluma_engine_output_*), whose
+// consumers read only .H0_H0.
 void Visitor::I2F() {
     const u32 dest = Take(16, 8);
     const Operand source = Source(1, false);
@@ -177,12 +180,15 @@ void Visitor::I2F() {
     const u32 dst_size = Take(75, 2);
     const u32 rounding = Take(78, 2);
     const u32 src_size = Take(84, 2);
-    Require(dst_size == 2, "native integer-to-float destination size");
     // The 64-bit form (base 0x112) reads a register pair: Fortune's Weave's I2F.U64 R2, R2.
     const bool wide = (op & 0x1ff) == 0x112;
+    const bool half_dest = dst_size == 1;
+    Require(dst_size == 2 || (half_dest && !wide && (op & 0x1ff) == 0x106),
+            "native integer-to-float destination size");
     Require(wide ? src_size == 3 : src_size <= 2, "native integer-to-float source size");
-    // Bits 60..61 pick which byte or half of the register is converted (zero for a full word).
-    const u32 select = Take(60, 2);
+    // Bits 60..61 pick which byte or half of the register is converted (zero for a full word). In
+    // the immediate form (0x906) they are bits 28..29 of the 32-bit immediate instead.
+    const u32 select = source.kind == Operand::Kind::Imm ? 0 : Take(60, 2);
     Require(src_size < 2 || select == 0, "native integer-to-float source select");
     Require(src_size >= 2 || select < (32U >> (3 + src_size)), "native integer-to-float source select");
     if (wide) {
@@ -209,39 +215,60 @@ void Visitor::I2F() {
         .rounding = RoundingOf(rounding),
         .fmz_mode = IR::FmzMode::DontCare,
     };
+    if (half_dest) {
+        const IR::F16F32F64 half{ir.ConvertIToF(16, 32, is_signed, value, control)};
+        const IR::F16 zero{ir.FPConvert(16, ir.Imm32(0.0f))};
+        X(dest, ir.PackFloat2x16(ir.CompositeConstruct(half, zero)));
+        return;
+    }
     F(dest, IR::F32{ir.ConvertIToF(32, 32, is_signed, value, control)});
 }
 
-// FRND: round a float to an integral float.
+// FRND: round a float to an integral float. F32 to F32, or F16 to F16 (sizes 1, FRND.F16: bit 60
+// selects the source's high half, .H1; the result is the low half of the destination with the high
+// half zero, as F2F.F16 writes it). Fast Fusion's upscaling output pass uses FRND.F16(.TRUNC).
 void Visitor::FRND() {
     const u32 dest = Take(16, 8);
     const Operand source = Source(1, true);
-    Require(Take(75, 2) == 2, "native float round destination size");
+    const u32 dst_size = Take(75, 2);
     const u32 rounding = Take(78, 2);
     const bool ftz = Take(80, 1) != 0;
-    Require(Take(84, 2) == 2, "native float round source size");
+    const u32 src_size = Take(84, 2);
+    const bool half = dst_size == 1;
+    Require(dst_size == 2 || half, "native float round destination size");
+    Require(src_size == dst_size, "native float round source size");
+    const auto round = [&](const IR::F16F32F64& input, const IR::FpControl& control) {
+        switch (rounding) {
+        case 0:
+            return ir.FPRoundEven(input, control);
+        case 1:
+            return ir.FPFloor(input, control);
+        case 2:
+            return ir.FPCeil(input, control);
+        default:
+            return ir.FPTrunc(input, control);
+        }
+    };
+    if (half) {
+        Require(source.kind == Operand::Kind::Reg, "native half-precision float round source");
+        const bool high = Take(60, 1) != 0;
+        auto [lhs, rhs] = Maxwell::Extract(ir, X(source.reg), Maxwell::Swizzle::H1_H0);
+        const IR::F16F32F64 input{ir.FPAbsNeg(high ? rhs : lhs, source.abs, source.negate)};
+        const IR::FpControl control{
+            .no_contraction = false,
+            .rounding = IR::FpRounding::DontCare,
+            .fmz_mode = IR::FmzMode::DontCare, // half precision keeps denormals
+        };
+        const IR::F16 zero{ir.FPConvert(16, ir.Imm32(0.0f))};
+        X(dest, ir.PackFloat2x16(ir.CompositeConstruct(round(input, control), zero)));
+        return;
+    }
     const IR::FpControl control{
         .no_contraction = false,
         .rounding = IR::FpRounding::DontCare,
         .fmz_mode = ftz ? IR::FmzMode::FTZ : IR::FmzMode::None,
     };
-    const IR::F32 input{FloatValue(source)};
-    IR::F32 result;
-    switch (rounding) {
-    case 0:
-        result = IR::F32{ir.FPRoundEven(input, control)};
-        break;
-    case 1:
-        result = IR::F32{ir.FPFloor(input, control)};
-        break;
-    case 2:
-        result = IR::F32{ir.FPCeil(input, control)};
-        break;
-    default:
-        result = IR::F32{ir.FPTrunc(input, control)};
-        break;
-    }
-    F(dest, result);
+    F(dest, IR::F32{round(FloatValue(source), control)});
 }
 
 // F2F: F32 to F16 conversion into the low half of the destination.

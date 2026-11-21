@@ -121,6 +121,8 @@ private:
     void TEX();
     void TLD();
     void SUST();
+    void SUST_D();
+    [[nodiscard]] IR::U32 LocalAddress(const IR::U32& address);
     void LDG();
     void R2UR();
     void LDS();
@@ -213,6 +215,7 @@ private:
     void LEPC();
     void GeometryExitStub();
     void Trap();
+    void CallAbsolute();
     void LDC();
     void CS2R();
     void S2R();

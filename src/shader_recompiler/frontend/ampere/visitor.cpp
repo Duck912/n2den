@@ -338,12 +338,18 @@ void Visitor::Run() {
     // LEPC and the geometry exit stub (0x34e, 0x357, 0x957) used to have no ISA row, so the flow
     // analysis rejected them even behind @!PT. Their rows exist now for nvn-hle geometry programs;
     // reject them here before the never-taken guard is skipped, so every other program still is.
-    if ((op == 0x34e || op == 0x357 || op == 0x957) &&
+    // LEPC is also taken in compute programs: CUDA kernels compute the return address of a call to
+    // an external function from it (LEPC, IADD3, CALL.ABS.NOINC; see CallAbsolute).
+    const bool lepc_allowed = op == 0x34e && env.ShaderStage() == Stage::Compute;
+    if ((op == 0x34e || op == 0x357 || op == 0x957) && !lepc_allowed &&
         (env.ShaderStage() != Stage::Geometry || !NativeExtensions())) {
         Unsupported(fmt::format("unsupported native opcode {:#x}", op));
     }
     if (guard.Never()) {
         return;
+    }
+    if (WarpStateBranchOf(insn) == WarpStateBranch::Diverged) {
+        return; // BRA.DIV ~URZ: never taken (the warp counts as converged), so it stays in its block
     }
     const OpInfo info = Classify(op);
     uniform_op = info.uniform;
@@ -501,10 +507,14 @@ void Visitor::Run() {
     case 0x95c: // BPT.TRAP: the thread stops (an assertion path); the flow builder ends it like EXIT
         Trap();
         break;
+    case 0x343: // CALL.ABS.NOINC to an external function: the flow builder ends the thread here
+        CallAbsolute();
+        break;
     case 0xf8c:
         ATOMS_POPC();
         break;
     case 0xf89:
+    case 0x389:
     case 0x589:
     case 0x989:
         SHFL();
@@ -573,6 +583,9 @@ void Visitor::Run() {
     case 0xb9b:
         SUST();
         break;
+    case 0xb9d:
+        SUST_D();
+        break;
     case 0x593:
         SUATOM();
         break;
@@ -636,6 +649,12 @@ void Visitor::Run() {
         Require(Take(32, 32) == 0xffffffffU, "native partial warp sync");
         Require(Take(87, 4) == 7, "native predicated warp sync");
         break;
+    case 0x348: // WARPSYNC Rn: the mask is a register. Lanes are executed independently and a
+                // subgroup operation reads every active lane, so any mask has no effect here, as
+                // for the immediate form. CUDA's __cuda_sm70_shflsync_* helpers load -1 into it.
+        Take(32, 8);
+        Require(Take(87, 4) == 7, "native predicated warp sync");
+        break;
     case 0x91a: { // DEPBAR.LE SB5/SB0, n: scoreboards are replaced by IR data dependencies
         // SB0 (field 8) waits for LDGSTS copy groups, which complete synchronously here.
         Take(38, 6);
@@ -697,6 +716,23 @@ void Visitor::Trap() {
     }
     Require(NativeExtensions(), "native fragment trap");
     ir.DemoteToHelperInvocation();
+}
+
+// CALL.ABS.NOINC Rn: a call to an absolute address in Rn:Rn+1, with the return address set up by
+// the caller (LEPC + IADD3 into R20:R21 in CUDA's ABI). Every such call in the CUDA kernels of the
+// games' upscaling libraries (85 in Fast Fusion's) loads its target from c[0x4][...], the table of
+// external functions the CUDA loader fills, and passes a line number and string pointers: it is
+// __assertfail, behind a branch the kernel takes only when an assertion fails. The external
+// function is not in the program and does not return (the kernel traps), so the thread ends here,
+// as for BPT.TRAP (Trap): the flow builder classifies 0x343 as an exit (Classify).
+// It is accepted in compute programs only; the uniform trap-guard proof the emulated path runs for
+// BPT.TRAP (VerifyTrapGuards) does not apply, since an assertion's guard depends on data.
+void Visitor::CallAbsolute() {
+    Require(env.ShaderStage() == Stage::Compute, "native absolute call outside compute");
+    Take(24, 8); // target register pair
+    Require(Take(84, 2) == 0, "native absolute call mode");
+    Require(Take(86, 1) == 1, "native absolute call increment mode"); // .NOINC
+    Take(87, 4);
 }
 
 void Visitor::CheckConsumed() {
