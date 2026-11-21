@@ -854,8 +854,10 @@ private:
     void LogOnce(const std::string& message);
 
     [[nodiscard]] Texture* FindTexture(u64 serial) const;
+    /// `slice_of_3d`: a 3D texture's `layer` is a Z slice (a view that selects slices, as games
+    /// clear volumes slice by slice), bounded by the level's depth instead of the layer count.
     bool ResolveRef(const VC::TextureRef& ref, Storage*& storage, std::shared_ptr<Storage>& owner,
-                    u32& level, u32& layer, std::string_view op);
+                    u32& level, u32& layer, std::string_view op, bool slice_of_3d = false);
     /// `flush_shadows`: the caller reads or writes the range through host memory (draw-path callers
     /// decide for themselves, see DrawContext::ShadowPolicy).
     bool ResolvePoolRange(u64 address, u64 size, Pool*& pool, u64& offset, std::string_view op,
@@ -1950,7 +1952,7 @@ Texture* Recorder::FindTexture(u64 serial) const {
 
 bool Recorder::ResolveRef(const VC::TextureRef& ref, Storage*& storage,
                           std::shared_ptr<Storage>& owner, u32& level, u32& layer,
-                          std::string_view op) {
+                          std::string_view op, bool slice_of_3d) {
     Texture* texture = FindTexture(ref.serial);
     if (!texture) {
         Failed(op, fmt::format("unknown texture {:#x}", ref.serial));
@@ -1969,7 +1971,9 @@ bool Recorder::ResolveRef(const VC::TextureRef& ref, Storage*& storage,
     level = ref.level;
     layer = ref.layer;
     // TextureRef level/layer already include the view's base level and layer.
-    if (level >= storage->levels || layer >= storage->layers) {
+    const bool slice_ok = slice_of_3d && storage->type == VK_IMAGE_TYPE_3D && level < storage->levels &&
+                          layer < ExtentOfLevel(*storage, level).depth;
+    if (level >= storage->levels || (layer >= storage->layers && !slice_ok)) {
         Failed(op, fmt::format("texture {:#x} level {} layer {} out of range", ref.serial, level,
                                layer));
         return false;
@@ -4001,7 +4005,7 @@ void Recorder::ClearTexture(const VC::ClearTexturePayload& p) {
     std::shared_ptr<Storage> owner;
     u32 level{};
     u32 ref_layer{};
-    if (!ResolveRef(p.texture, storage, owner, level, ref_layer, "ClearTexture")) {
+    if (!ResolveRef(p.texture, storage, owner, level, ref_layer, "ClearTexture", true)) {
         return;
     }
     Storage& s = *storage;
@@ -4037,13 +4041,17 @@ void Recorder::ClearTexture(const VC::ClearTexturePayload& p) {
     u32 z = 0;
     u32 depth = 1;
     if (is_3d) {
-        z = static_cast<u32>((std::max)(p.region.z, 0));
+        // The view's layer selects the first Z slice (a slice view); the region's z adds to it.
+        z = ref_layer + static_cast<u32>((std::max)(p.region.z, 0));
+        first_layer = 0;
         if (z >= extent.depth) {
             Failed("ClearTexture", "slice outside the texture");
             return;
         }
-        depth = p.region.depth > 0 ? (std::min)(static_cast<u32>(p.region.depth), extent.depth - z)
-                                   : extent.depth - z;
+        const u32 slices = p.region.depth > 0 ? static_cast<u32>(p.region.depth)
+                           : (ref_layer != 0 || p.layer_count != 0) ? (std::max)(p.layer_count, 1u)
+                                                                     : extent.depth - z;
+        depth = (std::min)(slices, extent.depth - z);
     } else if (p.layer_count != 0) {
         layer_count = p.layer_count;
     } else {
@@ -4092,7 +4100,11 @@ void Recorder::ClearTexture(const VC::ClearTexturePayload& p) {
         return;
     }
     if (is_3d) {
-        Unsupported("ClearTexture", "partial clear of a 3D texture");
+        // Slices [z, z + depth) through a 2D-array view of the 3D level (3D storages are created
+        // 2D_ARRAY_COMPATIBLE; the draw path attaches slices the same way). Fast Fusion clears its
+        // 160x90x64 fog volumes slice by slice: dropped, they kept stale pool bytes that decoded
+        // as NaN and blacked out the race through the lighting.
+        ClearTexturePartial(s, level, z, depth, x, y, width, height, p);
         return;
     }
     ClearTexturePartial(s, level, first_layer, layer_count, x, y, width, height, p);
