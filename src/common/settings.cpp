@@ -670,6 +670,13 @@ bool IsOpenGL() {
 
 static bool current_program_is_switch2 = false;
 
+bool DockedDisplayIs4K() {
+    if (const char* const value = std::getenv("EDEN_NX2_DOCKED_DEFAULT_4K"); value && value[0] != '\0') {
+        return value[0] == '1';
+    }
+    return CurrentProgramIsSwitch2();
+}
+
 void SetCurrentProgramIsSwitch2(bool is_switch2) {
     current_program_is_switch2 = is_switch2;
 }

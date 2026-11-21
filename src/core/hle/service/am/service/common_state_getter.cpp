@@ -254,9 +254,9 @@ Result ICommonStateGetter::GetDefaultDisplayResolution(Out<s32> out_width, Out<s
     if (Settings::IsDockedMode()) {
         *out_width = static_cast<u32>(Service::VI::DisplayResolution::DockedWidth);
         *out_height = static_cast<u32>(Service::VI::DisplayResolution::DockedHeight);
-        // EDEN_NX2_DOCKED_DEFAULT_4K=1: report a 4K docked display, for Switch 2 titles that size their
-        // output from it (Fast Fusion). Opt-in: Switch 1 titles size framebuffers from it.
-        if (const char* env = std::getenv("EDEN_NX2_DOCKED_DEFAULT_4K"); env && env[0] == '1') {
+        // Switch 2 titles see a 4K TV when docked and size their output from it (Fast Fusion);
+        // Switch 1 titles keep 1080p, they size framebuffers from it.
+        if (Settings::DockedDisplayIs4K()) {
             *out_width = 3840;
             *out_height = 2160;
         }

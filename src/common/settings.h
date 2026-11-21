@@ -1113,6 +1113,11 @@ bool IsGPULevelHigh();
 void SetCurrentProgramIsSwitch2(bool is_switch2);
 bool CurrentProgramIsSwitch2();
 
+// Whether the docked display reports 3840x2160 to the program: on for Switch 2 programs (the
+// console docks to a 4K TV), off for Switch 1 programs, which size their framebuffers from the
+// default display resolution. EDEN_NX2_DOCKED_DEFAULT_4K=0/1 forces it for any program.
+[[nodiscard]] bool DockedDisplayIs4K();
+
 // Why nvn-hle (the NVN high-level emulation) is on or off for the program being started.
 enum class NvnHleReason {
     EnvironmentOn,   // EDEN_NVN_HLE set to anything but "0": on for any program
