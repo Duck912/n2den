@@ -784,10 +784,13 @@ void EmitContext::DefineInterfaces(const IR::Program& program) {
 }
 
 void EmitContext::DefineLocalMemory(const IR::Program& program) {
-    if (program.local_memory_size == 0) {
+    if (program.local_memory_size == 0 && !program.info.uses_local_memory) {
         return;
     }
-    const u32 num_elements{Common::DivCeil(program.local_memory_size, 4U)};
+    // A program that reads or writes local memory always gets the array, at least one word: with a
+    // zero local size (no QMD/header allocation) the front ends' bounds checks send every access to
+    // word 0, and an access chain on an undefined variable aborts the SPIR-V assembler.
+    const u32 num_elements{(std::max)(Common::DivCeil(program.local_memory_size, 4U), 1U)};
     const Id element_type{TypeStruct(U32[1])};
     const Id type{TypeArray(element_type, Const(num_elements))};
     const Id pointer{TypePointer(spv::StorageClass::Private, type)};

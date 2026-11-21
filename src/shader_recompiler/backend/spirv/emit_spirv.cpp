@@ -553,6 +553,19 @@ void SetupCapabilities(const Profile& profile, const Info& info, EmitContext& ct
     if (info.uses_typeless_image_writes) {
         ctx.AddCapability(spv::Capability::StorageImageWriteWithoutFormat);
     }
+    // Typed storage images in the formats SPIR-V lists as extended (R8ui/i, R16ui/i, Rg32ui; R32ui and
+    // Rgba32ui are core) need StorageImageExtendedFormats: the Maxwell typed SULD.D/SUST.D sizes and the
+    // native SUST.D split into narrow texels.
+    const auto is_extended = [](ImageFormat format) {
+        return format == ImageFormat::R8_UINT || format == ImageFormat::R8_SINT ||
+               format == ImageFormat::R16_UINT || format == ImageFormat::R16_SINT ||
+               format == ImageFormat::R32G32_UINT;
+    };
+    if (std::ranges::any_of(info.image_descriptors, [&](const auto& desc) { return is_extended(desc.format); }) ||
+        std::ranges::any_of(info.image_buffer_descriptors,
+                            [&](const auto& desc) { return is_extended(desc.format); })) {
+        ctx.AddCapability(spv::Capability::StorageImageExtendedFormats);
+    }
     if (info.uses_image_buffers) {
         ctx.AddCapability(spv::Capability::ImageBuffer);
     }
