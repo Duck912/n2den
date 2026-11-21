@@ -1,0 +1,738 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+#include <array>
+#include <chrono>
+#include <deque>
+#include <memory>
+#include <optional>
+#include <span>
+
+#include "video_core/texture_cache/texture_cache_base.h"
+
+#include "shader_recompiler/shader_info.h"
+#include "video_core/renderer_vulkan/vk_compute_pass.h"
+#include "video_core/renderer_vulkan/vk_render_pass_cache.h"
+#include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
+#include "video_core/texture_cache/image_view_base.h"
+#include "video_core/textures/astc.h"
+#include "video_core/vulkan_common/vulkan_memory_allocator.h"
+#include "video_core/vulkan_common/vulkan_wrapper.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/renderer_vulkan/vk_streamline_dlss.h"
+#endif
+#include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
+#include "video_core/renderer_vulkan/vk_fsr4_upscaler.h"
+
+namespace Settings {
+struct ResolutionScalingInfo;
+}
+
+namespace Vulkan {
+
+using Common::SlotVector;
+using VideoCommon::ImageId;
+using VideoCommon::NUM_RT;
+using VideoCommon::Region2D;
+using VideoCore::Surface::PixelFormat;
+
+class BlitImageHelper;
+class DescriptorPool;
+class Device;
+class Image;
+class ImageView;
+class Framebuffer;
+class RenderPassCache;
+class StagingBufferPool;
+class Scheduler;
+
+class TextureCacheRuntime {
+public:
+    explicit TextureCacheRuntime(const Device& device_, Scheduler& scheduler_,
+                                 MemoryAllocator& memory_allocator_,
+                                 StagingBufferPool& staging_buffer_pool_,
+                                 BlitImageHelper& blit_image_helper_,
+                                 RenderPassCache& render_pass_cache_,
+                                 DescriptorPool& descriptor_pool,
+                                 ComputePassDescriptorQueue& compute_pass_descriptor_queue);
+
+    void Finish();
+
+    StagingBufferRef UploadStagingBuffer(size_t size, bool deferred = false);
+
+    StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
+
+    void FreeDeferredStagingBuffer(StagingBufferRef& ref);
+
+    void TickFrame();
+
+    void FlushDeferredClear();
+
+    u64 GetDeviceLocalMemory() const;
+
+    u64 GetDeviceMemoryUsage() const;
+
+    bool CanReportMemoryUsage() const;
+
+    bool CanDownloadMsaa(const VideoCommon::ImageInfo& info) const;
+
+    [[nodiscard]] VkImage AcquireMsaaScratchImage(const VkImageCreateInfo& image_ci);
+
+    void ReleaseMsaaScratchImage(VkImage image);
+
+    void BlitImage(Framebuffer* dst_framebuffer, ImageView& dst, ImageView& src,
+                   const Region2D& dst_region, const Region2D& src_region,
+                   Tegra::Engines::Fermi2D::Filter filter,
+                   Tegra::Engines::Fermi2D::Operation operation);
+
+    /// A replacement for a game's DLSS evaluation (AMD FSR 4 or NVIDIA DLSS when ticked, else
+    /// AMD FSR 3.1): temporal upscale of input_color (render_size on the host) into dst. False
+    /// when none can run; the caller then blits.
+    bool TemporalUpscale(Framebuffer* dst_framebuffer, ImageView& dst, ImageView& input_color,
+                         ImageView& motion_vectors, ImageView& depth,
+                         std::array<u32, 2> render_size, std::array<f32, 2> jitter,
+                         std::array<f32, 2> motion_scale);
+
+    /// True while TemporalUpscale would replace the game's DLSS: AMD FSR 4 or NVIDIA DLSS (on in
+    /// the settings, the provider loaded, not failed), else AMD FSR 3.1 (ticked, not failed).
+    [[nodiscard]] bool UsesReplacementUpscaler() const;
+
+    void CopyImage(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
+
+    void CopyImageMSAA(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
+
+    bool ShouldReinterpret(Image& dst, Image& src);
+
+    void ReinterpretImage(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
+
+    void ConvertImage(Framebuffer* dst, ImageView& dst_view, ImageView& src_view);
+
+    bool CanAccelerateImageUpload(Image&) const noexcept {
+        return false;
+    }
+
+    bool CanUploadMSAA() const noexcept {
+        return true;
+    }
+
+    void AccelerateImageUpload(Image&, const StagingBufferRef&,
+                               std::span<const VideoCommon::SwizzleParameters>,
+                               u32 z_start, u32 z_count);
+
+    void InsertUploadMemoryBarrier() {}
+
+    void TransitionImageLayout(Image& image);
+
+    bool HasBrokenTextureViewFormats() const noexcept {
+        // No known Vulkan driver has broken image views
+        return false;
+    }
+
+    bool HasNativeBgr() const noexcept {
+        // All known Vulkan drivers can natively handle BGR textures
+        return true;
+    }
+
+    [[nodiscard]] VkBuffer GetTemporaryBuffer(size_t needed_size);
+
+    struct ResolveShadow {
+        vk::Image image;
+        vk::ImageView view;
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        VkExtent2D extent{};
+        u32 layers = 0;
+        VkImageAspectFlags aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT;
+        bool up_to_date = false;
+    };
+
+    [[nodiscard]] VkImageView GetOrCreateResolveShadow(VkImage msaa_image, VkFormat format,
+                                                       VkExtent2D extent, u32 layers,
+                                                       VkImageAspectFlags aspect_mask);
+
+    [[nodiscard]] const ResolveShadow* GetValidResolveShadow(VkImage msaa_image) const;
+
+    void InvalidateResolveShadow(VkImage msaa_image);
+
+    void MarkResolveShadowUpToDate(VkImage msaa_image);
+
+    void EraseResolveShadow(VkImage msaa_image);
+
+    std::span<const VkFormat> ViewFormats(PixelFormat format) {
+        return view_formats[static_cast<std::size_t>(format)];
+    }
+
+    void BarrierFeedbackLoop();
+
+    bool IsFormatDitherable(VideoCore::Surface::PixelFormat format);
+    bool IsFormatScalable(VideoCore::Surface::PixelFormat format);
+
+    VkFormat GetSupportedFormat(VkFormat requested_format, VkFormatFeatureFlags required_features) const;
+
+    const Device& device;
+    Scheduler& scheduler;
+    MemoryAllocator& memory_allocator;
+    StagingBufferPool& staging_buffer_pool;
+    BlitImageHelper& blit_image_helper;
+    RenderPassCache& render_pass_cache;
+
+    /// Draws an upscaler's RGBA16F output into the DLSS output and returns it to GENERAL.
+    void DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkImageView view, VkImage image,
+                            VkSampler sampler);
+    bool NvidiaDlssUpscale(Framebuffer* dst_framebuffer, ImageView& dst, ImageView& input_color,
+                           ImageView& motion_vectors, ImageView& depth,
+                           std::array<u32, 2> render_size, std::array<f32, 2> jitter,
+                           std::array<f32, 2> motion_scale);
+    bool Fsr3Upscale(Framebuffer* dst_framebuffer, ImageView& input_color,
+                     ImageView& motion_vectors, ImageView& depth, std::array<u32, 2> render_size,
+                     std::array<f32, 2> jitter, std::array<f32, 2> motion_scale);
+    DescriptorPool& descriptor_pool;
+    ComputePassDescriptorQueue& compute_pass_descriptor_queue;
+    std::unique_ptr<Fsr3Upscaler> fsr3_upscaler;
+    bool fsr3_unsupported{};
+    std::optional<std::chrono::steady_clock::time_point> fsr3_last_evaluation;
+    bool Fsr4Upscale(Framebuffer* dst_framebuffer, ImageView& dst, ImageView& input_color,
+                     ImageView& motion_vectors, ImageView& depth, std::array<u32, 2> render_size,
+                     std::array<f32, 2> jitter, std::array<f32, 2> motion_scale);
+    std::unique_ptr<Fsr4Upscaler> fsr4_upscaler;
+    bool fsr4_unsupported{};
+    std::optional<std::chrono::steady_clock::time_point> fsr4_last_evaluation;
+#ifdef EGLANTINE_STREAMLINE
+    std::unique_ptr<StreamlineDlssUpscaler> dlss_upscaler;
+    bool dlss_unsupported{};
+    std::optional<std::chrono::steady_clock::time_point> dlss_last_evaluation;
+#endif
+    std::optional<ASTCDecoderPass> astc_decoder_pass;
+    std::optional<BcEncoderPass> bc_encoder_pass;
+
+    /// Smart BC (astc_recompression = Smart): whether an ASTC image of `info` would be made in the
+    /// BC format its channels need, so the texture cache classifies its guest bytes first.
+    [[nodiscard]] bool WantsSmartAstcClass(const VideoCommon::ImageInfo& info) const;
+    /// Textures over this many guest bytes stay BC3 without a scan (Mario Kart World's 1.4 GiB
+    /// ASTC arrays would be read whole when they are luminance or opaque).
+    [[nodiscard]] static constexpr u64 SmartClassifyMaxBytes() {
+        return u64{256} << 20;
+    }
+    /// Classifies the guest bytes of the ASTC image the texture cache makes next (empty: too big
+    /// to scan); the Image constructor takes the class.
+    void ClassifySmartAstc(const VideoCommon::ImageInfo& info, std::span<const u8> guest);
+    std::optional<Tegra::Texture::ASTC::Channels> next_smart_class;
+    bool has_next_smart_class = false;
+    /// Smart BC counts since boot, logged as they grow.
+    struct SmartBcStats {
+        u64 images[4]{};     ///< made as BC1, BC3, BC4, BC5
+        u64 bytes[4]{};      ///< their size in that format
+        u64 bc3_bytes = 0;   ///< what they would have taken as BC3
+        u64 unknown = 0;     ///< guest bytes all zero when made: BC3
+        u64 too_big = 0;     ///< over the classification size cap: BC3
+        u64 refits = 0;      ///< a later upload no longer fit: recreated
+        u64 copies_skipped = 0;
+        u64 next_log = 64;
+    } smart_stats;
+    void NoteSmartImage(VkFormat format, const VideoCommon::ImageInfo& info);
+
+    /// ASTC decoded on the GPU and re-compressed to BC1/BC3 there (accelerate_astc=Gpu with BC1 or
+    /// BC3 recompression): decode into a temporary RGBA8 image, encode into a buffer, copy.
+    void TranscodeAstcToBcn(Image& image, const StagingBufferRef& map,
+                            std::span<const VideoCommon::SwizzleParameters> swizzles);
+
+    /// Temporary decode images, reusable once the GPU is past `tick`.
+    struct PendingTranscode {
+        u64 tick;
+        vk::Image image;
+        std::vector<vk::ImageView> views;
+        u32 width;
+        u32 height;
+        u32 levels;
+        u32 layers;
+        u32 unused_frames;
+        u64 bytes; ///< Size of the decode image (all levels and layers, RGBA8).
+    };
+    std::deque<PendingTranscode> pending_transcodes;
+    u64 pending_transcode_bytes = 0;
+    u64 free_transcode_bytes = 0;
+    /// Video memory the decode images in flight, and the free ones, may each use.
+    [[nodiscard]] u64 TranscodeMemoryCap() const;
+    /// Moves decode images the GPU is done with to the free list (waiting for the oldest first
+    /// when asked), freeing those over the cap.
+    void RecycleTranscodes(bool wait_for_oldest);
+    /// Decode images the GPU is done with, for the next texture of the same shape.
+    std::vector<PendingTranscode> free_transcodes;
+
+    std::optional<BlockLinearUnswizzle3DPass> bl3d_unswizzle_pass;
+    const Settings::ResolutionScalingInfo& resolution;
+    std::array<std::vector<VkFormat>, VideoCore::Surface::MaxPixelFormat> view_formats;
+
+    static constexpr size_t indexing_slots = 8 * sizeof(size_t);
+    std::array<vk::Buffer, indexing_slots> buffers{};
+    struct MsaaScratchKey {
+        VkFormat format;
+        VkImageType type;
+        u32 width;
+        u32 height;
+        u32 depth;
+        u32 levels;
+        u32 layers;
+        VkImageUsageFlags usage;
+        VkImageCreateFlags flags;
+
+        bool operator==(const MsaaScratchKey&) const noexcept = default;
+    };
+
+    struct MsaaScratchImage {
+        MsaaScratchKey key;
+        vk::Image image;
+        u64 tick;
+        u32 unused_frames;
+    };
+
+    std::vector<MsaaScratchImage> msaa_scratch_images;
+    ::Common::unordered_map<VkImage, ResolveShadow> resolve_shadows;
+    std::vector<std::pair<u64, ResolveShadow>> pending_resolve_shadows;
+};
+
+class Framebuffer {
+public:
+    explicit Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM_RT> color_buffers,
+                         ImageView* depth_buffer, const VideoCommon::RenderTargets& key);
+
+    explicit Framebuffer(TextureCacheRuntime& runtime, ImageView* color_buffer,
+                         ImageView* depth_buffer, VkExtent2D extent, bool is_rescaled);
+
+    ~Framebuffer();
+
+    Framebuffer(const Framebuffer&) = delete;
+    Framebuffer& operator=(const Framebuffer&) = delete;
+
+    Framebuffer(Framebuffer&&) = default;
+    Framebuffer& operator=(Framebuffer&&) = default;
+
+    void CreateFramebuffer(TextureCacheRuntime& runtime,
+                           std::span<ImageView*, NUM_RT> color_buffers, ImageView* depth_buffer,
+                           bool is_rescaled = false);
+
+    [[nodiscard]] VkFramebuffer Handle() const noexcept {
+        return *framebuffer;
+    }
+
+    [[nodiscard]] VkRenderPass RenderPass() const noexcept {
+        return renderpass;
+    }
+
+    [[nodiscard]] const RenderPassKey& RenderPassKeyBase() const noexcept {
+        return render_pass_key;
+    }
+
+    [[nodiscard]] VkRenderPass RenderPassVariant(u32 color_clear_mask, bool depth_stencil_clear,
+                                                 u32 color_discard_mask,
+                                                 bool depth_stencil_discard) const;
+
+    [[nodiscard]] VkExtent2D RenderArea() const noexcept {
+        return render_area;
+    }
+
+    [[nodiscard]] VkSampleCountFlagBits Samples() const noexcept {
+        return samples;
+    }
+
+    [[nodiscard]] u32 NumColorBuffers() const noexcept {
+        return num_color_buffers;
+    }
+
+    [[nodiscard]] u32 NumImages() const noexcept {
+        return num_images;
+    }
+
+    /// Layers of the VkFramebuffer: a render pass load-op clear clears all of them.
+    [[nodiscard]] u32 NumLayers() const noexcept {
+        return framebuffer_layers;
+    }
+
+    [[nodiscard]] const std::array<VkImage, 9>& Images() const noexcept {
+        return images;
+    }
+
+    [[nodiscard]] const std::array<VkImageSubresourceRange, 9>& ImageRanges() const noexcept {
+        return image_ranges;
+    }
+
+    [[nodiscard]] bool HasAspectColorBit(size_t index) const noexcept {
+        return (image_ranges.at(rt_map[index]).aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
+    }
+
+    [[nodiscard]] bool HasAspectDepthBit() const noexcept {
+        return has_depth;
+    }
+
+    [[nodiscard]] bool HasAspectStencilBit() const noexcept {
+        return has_stencil;
+    }
+
+    [[nodiscard]] bool IsRescaled() const noexcept {
+        return is_rescaled;
+    }
+
+    [[nodiscard]] bool DiscardsMsaaColor() const noexcept {
+        return discard_msaa_color;
+    }
+
+    [[nodiscard]] bool DiscardsMsaaDepthStencil() const noexcept {
+        return discard_msaa_depth_stencil;
+    }
+
+    /// Records that a render pass has begun, so its resolve attachments will hold valid contents
+    /// once it ends.
+    void MarkResolveShadowsUpToDate() const;
+
+private:
+    static constexpr size_t NUM_MEMOIZED_RENDER_PASS_VARIANTS = 8;
+
+    vk::Framebuffer framebuffer;
+    VkRenderPass renderpass{};
+    VkExtent2D render_area{};
+    VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+    u32 num_color_buffers = 0;
+    u32 num_images = 0;
+    u32 framebuffer_layers = 1;
+    std::array<VkImage, 9> images{};
+    std::array<VkImageSubresourceRange, 9> image_ranges{};
+    std::array<size_t, NUM_RT> rt_map{};
+    bool has_depth{};
+    bool has_stencil{};
+    bool is_rescaled{};
+    std::array<VkImage, 9> resolve_shadow_images{};
+    u32 num_resolve_shadows = 0;
+    TextureCacheRuntime* runtime_ptr{nullptr};
+    RenderPassKey render_pass_key{};
+    RenderPassCache* render_pass_cache{nullptr};
+    bool discard_msaa_color{};
+    bool discard_msaa_depth_stencil{};
+    mutable std::array<u32, NUM_MEMOIZED_RENDER_PASS_VARIANTS> variant_keys{};
+    mutable std::array<VkRenderPass, NUM_MEMOIZED_RENDER_PASS_VARIANTS> variant_render_passes{};
+    mutable u32 num_memoized_variants{};
+};
+
+class Image : public VideoCommon::ImageBase {
+public:
+    explicit Image(TextureCacheRuntime&, const VideoCommon::ImageInfo& info, GPUVAddr gpu_addr,
+                   VAddr cpu_addr);
+    explicit Image(const VideoCommon::NullImageParams&);
+
+    ~Image();
+
+    Image(const Image&) = delete;
+    Image& operator=(const Image&) = delete;
+
+    Image(Image&&) = default;
+    Image& operator=(Image&&) = default;
+
+    void UploadMemory(VkBuffer buffer, VkDeviceSize offset,
+                      std::span<const VideoCommon::BufferImageCopy> copies);
+
+    void UploadMemory(const StagingBufferRef& map,
+                      std::span<const VideoCommon::BufferImageCopy> copies);
+
+    void DownloadMemory(VkBuffer buffer, size_t offset,
+                        std::span<const VideoCommon::BufferImageCopy> copies);
+
+    void DownloadMemory(std::span<VkBuffer> buffers, std::span<size_t> offsets,
+                        std::span<const VideoCommon::BufferImageCopy> copies);
+
+    void DownloadMemory(const StagingBufferRef& map,
+                        std::span<const VideoCommon::BufferImageCopy> copies);
+
+    void AllocateComputeUnswizzleImage();
+
+    [[nodiscard]] VkImage Handle() const noexcept {
+        return *(this->*current_image);
+    }
+
+    [[nodiscard]] VkImageAspectFlags AspectMask() const noexcept {
+        return aspect_mask;
+    }
+
+    [[nodiscard]] VkImageUsageFlags UsageFlags() const noexcept {
+        return (this->*current_image).UsageFlags();
+    }
+
+    /// Returns true when the image is already initialized and mark it as initialized
+    [[nodiscard]] bool ExchangeInitialization() noexcept {
+        return std::exchange(initialized, true);
+    }
+
+    VkImageView StorageImageView(s32 level) noexcept;
+
+    bool IsRescaled() const noexcept;
+
+    bool ScaleUp(bool ignore = false);
+
+    bool ScaleDown(bool ignore = false);
+
+    /// Smart BC: the BC format this ASTC image holds instead of BC3 (BC1, BC4 or BC5, UNORM or
+    /// sRGB as made), or VK_FORMAT_UNDEFINED when it holds what its pixel format maps to.
+    [[nodiscard]] VkFormat SmartFormat() const noexcept {
+        return smart_format;
+    }
+    /// Set by an upload whose blocks no longer fit SmartFormat(); the texture cache then drops the
+    /// image at the next frame, and the next lookup makes it again in the format its bytes need.
+    void MarkSmartRefit() noexcept {
+        smart_refit = true;
+    }
+    [[nodiscard]] bool SmartRefit() const noexcept {
+        return smart_refit;
+    }
+
+    u64 allocation_tick;
+
+    friend class BlockLinearUnswizzle3DPass;
+
+private:
+    bool BlitScaleHelper(bool scale_up);
+
+    bool NeedsScaleHelper() const;
+
+    Scheduler* scheduler{};
+    TextureCacheRuntime* runtime{};
+    VkFormat smart_format{VK_FORMAT_UNDEFINED}; // before original_image, which is made with it
+    bool smart_refit = false;
+
+    vk::Image original_image;
+    vk::Image scaled_image;
+
+    vk::Buffer compute_unswizzle_buffer;
+    VkDeviceSize compute_unswizzle_buffer_size = 0;
+    bool has_compute_unswizzle_buffer = false;
+
+    void AllocateComputeUnswizzleBuffer(u32 max_slices);
+
+    // Use a pointer to field because it is relative, so that the object can be
+    // moved without breaking the reference.
+    vk::Image Image::*current_image{};
+
+    std::vector<vk::ImageView> storage_image_views;
+    VkImageAspectFlags aspect_mask = 0;
+    bool initialized = false;
+
+    std::optional<Framebuffer> scale_framebuffer;
+    std::optional<Framebuffer> normal_framebuffer;
+    std::unique_ptr<ImageView> scale_view;
+    std::unique_ptr<ImageView> normal_view;
+};
+
+class ImageView : public VideoCommon::ImageViewBase {
+public:
+    explicit ImageView(TextureCacheRuntime&, const VideoCommon::ImageViewInfo&, ImageId, Image&);
+    explicit ImageView(TextureCacheRuntime&, const VideoCommon::ImageViewInfo&, ImageId, Image&,
+                       const SlotVector<Image>&);
+    explicit ImageView(TextureCacheRuntime&, const VideoCommon::ImageInfo&,
+                       const VideoCommon::ImageViewInfo&, GPUVAddr);
+    explicit ImageView(TextureCacheRuntime&, const VideoCommon::NullImageViewParams&);
+
+    ~ImageView();
+
+    ImageView(const ImageView&) = delete;
+    ImageView& operator=(const ImageView&) = delete;
+
+    ImageView(ImageView&&) = default;
+    ImageView& operator=(ImageView&&) = default;
+
+    [[nodiscard]] VkImageView DepthView();
+
+    [[nodiscard]] VkImageView StencilView();
+
+    [[nodiscard]] VkImageView ColorView();
+
+    [[nodiscard]] VkImageView StorageView(Shader::TextureType texture_type,
+                                          Shader::ImageFormat image_format);
+
+    [[nodiscard]] bool IsRescaled() const noexcept;
+
+    [[nodiscard]] VkImageView Handle(Shader::TextureType texture_type) const noexcept {
+        return *image_views[static_cast<size_t>(texture_type)];
+    }
+
+    [[nodiscard]] VkImage ImageHandle() const noexcept {
+        return image_handle;
+    }
+
+    [[nodiscard]] VkImageView RenderTarget() const noexcept {
+        return render_target;
+    }
+
+    [[nodiscard]] VkSampleCountFlagBits Samples() const noexcept {
+        return samples;
+    }
+
+    [[nodiscard]] bool SupportsDepthComparison() const noexcept {
+        return supports_depth_comparison;
+    }
+
+    [[nodiscard]] bool RequiresBorderColorFormat() const noexcept {
+        return requires_border_color_format;
+    }
+
+    [[nodiscard]] bool SupportsMinmaxFilter() const noexcept {
+        return supports_minmax_filter;
+    }
+
+    [[nodiscard]] const VkComponentMapping& Swizzle() const noexcept {
+        return swizzle_mapping;
+    }
+
+    [[nodiscard]] bool HasIdentitySwizzle() const noexcept {
+        return has_identity_swizzle;
+    }
+
+    [[nodiscard]] GPUVAddr GpuAddr() const noexcept {
+        return gpu_addr;
+    }
+
+    [[nodiscard]] const Image* BackingImage() const noexcept;
+
+    [[nodiscard]] u32 BufferSize() const noexcept {
+        return buffer_size;
+    }
+
+private:
+    struct StorageViews {
+        std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> signeds;
+        std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> unsigneds;
+    };
+
+    [[nodiscard]] vk::ImageView MakeView(VkFormat vk_format, VkImageAspectFlags aspect_mask,
+                                         std::optional<Shader::TextureType> texture_type = std::nullopt);
+
+    const Device* device = nullptr;
+    const SlotVector<Image>* slot_images = nullptr;
+
+    std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> image_views;
+    std::optional<StorageViews> storage_views;
+    vk::ImageView typeless_storage_view;
+    vk::ImageView depth_view;
+    vk::ImageView stencil_view;
+    vk::ImageView color_view;
+    vk::Image null_image;
+    VkImage image_handle = VK_NULL_HANDLE;
+    VkImageView render_target = VK_NULL_HANDLE;
+    VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+    u32 buffer_size = 0;
+
+    VkComponentMapping swizzle_mapping{};
+
+    bool supports_depth_comparison = false;
+    bool requires_border_color_format = false;
+    bool supports_minmax_filter = false;
+    bool has_identity_swizzle = true;
+};
+
+class ImageAlloc : public VideoCommon::ImageAllocBase {};
+
+class CustomBorderColorBudget {
+public:
+    CustomBorderColorBudget() = default;
+    ~CustomBorderColorBudget();
+
+    CustomBorderColorBudget(const CustomBorderColorBudget&) = delete;
+    CustomBorderColorBudget& operator=(const CustomBorderColorBudget&) = delete;
+
+    CustomBorderColorBudget(CustomBorderColorBudget&& rhs) noexcept;
+    CustomBorderColorBudget& operator=(CustomBorderColorBudget&& rhs) noexcept;
+
+    bool TryAcquire(const Device& device, size_t count);
+
+private:
+    void Release() noexcept;
+
+    const Device* device_ptr = nullptr;
+    size_t held = 0;
+};
+
+class Sampler {
+public:
+    explicit Sampler(TextureCacheRuntime&, const Tegra::Texture::TSCEntry&);
+    const VkSamplerCreateInfo& CreateInfo() const noexcept {
+        return base_ci;
+    }
+    const Tegra::Texture::TSCEntry& Descriptor() const noexcept {
+        return descriptor;
+    }
+
+    [[nodiscard]] VkSampler Handle() const noexcept {
+        return *variants.front().sampler;
+    }
+
+    [[nodiscard]] VkSampler HandleFor(const ImageView& image_view, bool is_depth);
+
+private:
+    struct VariantKey {
+        bool reduce_anisotropy;
+        bool force_nearest;
+        bool drop_reduction;
+        bool drop_custom_border;
+        bool srgb_border;
+        bool drop_compare;
+        std::array<VkComponentSwizzle, 4> swizzle;
+
+        bool operator==(const VariantKey&) const noexcept = default;
+
+        [[nodiscard]] bool HasSwizzle() const noexcept {
+            return swizzle != std::array<VkComponentSwizzle, 4>{};
+        }
+    };
+
+    struct Variant {
+        VariantKey key;
+        vk::Sampler sampler;
+    };
+
+    static constexpr size_t MAX_VARIANTS = 32;
+
+    [[nodiscard]] VariantKey MakeKey(const ImageView& image_view, bool is_depth) const noexcept;
+    [[nodiscard]] VkSampler Find(const VariantKey& key) const noexcept;
+    VkSampler Emplace(VariantKey key);
+
+    CustomBorderColorBudget custom_border_color_budget;
+    std::vector<Variant> variants;
+
+    const Device* device_ptr{nullptr};
+    Tegra::Texture::TSCEntry descriptor{};
+    VkSamplerCreateInfo base_ci{};
+    VkSamplerReductionModeEXT reduction_mode{VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT};
+    std::array<float, 4> border_color{};
+    std::array<float, 4> srgb_border_color{};
+    f32 default_anisotropy{1.0f};
+
+    bool has_added_anisotropy{};
+    bool has_linear_filtering{};
+    bool has_depth_comparison{};
+    bool has_minmax_reduction{};
+    bool has_custom_border_colors{};
+    bool has_srgb_border_color{};
+    bool needs_swizzle_mapping{};
+};
+
+struct TextureCacheParams {
+    static constexpr bool ENABLE_VALIDATION = true;
+    static constexpr bool FRAMEBUFFER_BLITS = false;
+    static constexpr bool HAS_EMULATED_COPIES = false;
+    static constexpr bool HAS_DEVICE_MEMORY_INFO = true;
+    static constexpr bool IMPLEMENTS_ASYNC_DOWNLOADS = true;
+    static constexpr bool HAS_MSAA_DOWNLOADS = true;
+
+    using Runtime = Vulkan::TextureCacheRuntime;
+    using Image = Vulkan::Image;
+    using ImageAlloc = Vulkan::ImageAlloc;
+    using ImageView = Vulkan::ImageView;
+    using Sampler = Vulkan::Sampler;
+    using Framebuffer = Vulkan::Framebuffer;
+    using AsyncBuffer = Vulkan::StagingBufferRef;
+    using BufferType = VkBuffer;
+};
+
+using TextureCache = VideoCommon::TextureCache<TextureCacheParams>;
+
+} // namespace Vulkan

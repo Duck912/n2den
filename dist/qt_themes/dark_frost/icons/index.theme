@@ -1,0 +1,8 @@
+[Icon Theme]
+Name=Dark Frost
+Comment=Neutral dark grey theme
+Inherits=qdarkstyle,colorful
+Directories=16x16
+
+[16x16]
+Size=16

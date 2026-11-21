@@ -1,0 +1,219 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#pragma once
+
+#include <array>
+#include <span>
+#include "common/container/unordered_map.h"
+
+#include "common/common_types.h"
+#include "shader_recompiler/frontend/ampere/instruction.h"
+#include "shader_recompiler/program_header.h"
+#include "shader_recompiler/shader_info.h"
+#include "shader_recompiler/stage.h"
+#include "shader_recompiler/frontend/ir/value.h"
+
+namespace Shader::IR {
+class Inst;
+}
+
+namespace Shader {
+
+struct CbufWordKey {
+    u32 index;
+    u32 offset;
+    constexpr bool operator==(const CbufWordKey& o) const noexcept {
+        return index == o.index && offset == o.offset;
+    }
+};
+
+struct CbufWordKeyHash {
+    constexpr size_t operator()(const CbufWordKey& k) const noexcept {
+        return (size_t(k.index) << 32) ^ k.offset;
+    }
+};
+
+struct HandleKey {
+    u32 index, offset, shift_left;
+    u32 sec_index, sec_offset, sec_shift_left;
+    u32 count;
+    bool has_secondary;
+    constexpr bool operator==(const HandleKey& o) const noexcept {
+        return std::tie(index, offset, shift_left, sec_index, sec_offset, sec_shift_left, count, has_secondary)
+            == std::tie(o.index, o.offset, o.shift_left, o.sec_index, o.sec_offset, o.sec_shift_left, o.count, o.has_secondary);
+    }
+};
+struct HandleKeyHash {
+    constexpr size_t operator()(const HandleKey& k) const noexcept {
+        size_t h = (size_t(k.index) << 32) ^ k.offset;
+        h ^= (size_t(k.shift_left) << 1);
+        h ^= (size_t(k.sec_index) << 33) ^ (size_t(k.sec_offset) << 2);
+        h ^= (size_t(k.sec_shift_left) << 3);
+        h ^= (size_t(k.count) << 7);
+        return h ^ (k.has_secondary ? 0x9e3779b97f4a7c15ULL : 0ULL);
+    }
+};
+
+struct ConstBufferAddr {
+    u32 index;
+    u32 offset;
+    u32 shift_left;
+    u32 secondary_index;
+    u32 secondary_offset;
+    u32 secondary_shift_left;
+    IR::U32 dynamic_offset;
+    u32 count;
+    bool has_secondary;
+    BufferTextureSource buffer_source{};
+    u32 handle_program{~0U};
+    bool pool{}; ///< Looked up in the texture pool at run time; no word names it
+};
+
+/// nvn-hle: window of 16-byte {u64 address, u32 size, u32 pad} buffer entries in the driver bank
+/// (c0) of an NVN2 compute program: `count` consecutive entries starting at byte `base`. NVN2 lays
+/// this bank out per compute shader (push constants, uniform entries, storage entries, ...), so
+/// there is no fixed base for it. `active == false` (every emulated GPU environment) keeps the
+/// fixed per-stage table; an active window with `count == 0` means the program has no buffer
+/// entries at all.
+struct NvnBufferWindow {
+    u32 base{};
+    u32 count{};
+    bool active{};
+};
+
+class Environment {
+public:
+    virtual ~Environment() = default;
+
+    [[nodiscard]] virtual u64 ReadInstruction(u32 address) = 0;
+
+    [[nodiscard]] virtual bool HasNativeRegisterCopies() const { return false; }
+
+    /// A Switch 2 native program (upstream's name for HasNativeRegisterCopies).
+    [[nodiscard]] bool IsNativeProgram() const { return HasNativeRegisterCopies(); }
+
+    [[nodiscard]] virtual u32 TranslateProgramAddress(u32 address) const { return address; }
+
+    // Native raw-pointer layouts can mix addresses and scalar parameters.
+    [[nodiscard]] virtual bool IsCbufStorageBufferPointer(u32, u32) { return true; }
+
+    /// Native programs: whether the 8 bytes at `indirect` past the pointer at (index, offset) are
+    /// a mapped GPU address (a pointer table the program loads its buffer pointer from).
+    [[nodiscard]] virtual bool IsCbufIndirectStorageBufferPointer(u32, u32, u32) {
+        return true;
+    }
+
+    [[nodiscard]] virtual u32 ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) = 0;
+
+    [[nodiscard]] virtual TextureType ReadTextureType(u32 raw_handle) = 0;
+
+    [[nodiscard]] virtual TexturePixelFormat ReadTexturePixelFormat(u32 raw_handle) = 0;
+
+    [[nodiscard]] virtual bool IsTexturePixelFormatInteger(u32 raw_handle) = 0;
+
+    [[nodiscard]] virtual u32 ReadViewportTransformState() = 0;
+
+    [[nodiscard]] virtual u32 TextureBoundBuffer() const = 0;
+
+    [[nodiscard]] virtual u32 LocalMemorySize() const = 0;
+
+    [[nodiscard]] virtual u32 SharedMemorySize() const = 0;
+
+    [[nodiscard]] virtual std::array<u32, 3> WorkgroupSize() const = 0;
+
+    [[nodiscard]] virtual bool HasHLEMacroState() const = 0;
+
+    [[nodiscard]] virtual std::optional<ReplaceConstant> GetReplaceConstBuffer(u32 bank,
+                                                                               u32 offset) = 0;
+
+    /// nvn-hle's compute programs override this; every other environment keeps the fixed
+    /// per-stage storage buffer table.
+    [[nodiscard]] virtual NvnBufferWindow NvnComputeBufferWindow() const {
+        return {};
+    }
+
+    /// A program nvn-hle (the NVN2 high-level emulation) replays: it lays out the driver bank (c0)
+    /// itself, with storage tables of their own for the task and mesh stages. The emulated GPU
+    /// never sets it.
+    [[nodiscard]] virtual bool IsNvnHleProgram() const {
+        return false;
+    }
+
+    virtual void Dump(u64 pipeline_hash, u64 shader_hash) = 0;
+
+    /// True when the program is translated by the native Ampere frontend instead of the Maxwell one.
+    [[nodiscard]] virtual bool IsNativeAmpere() const {
+        return false;
+    }
+
+    /// Native Ampere instructions of the program; only valid when IsNativeAmpere() is true.
+    [[nodiscard]] virtual std::span<const Ampere::Instruction> NativeProgram() const {
+        return {};
+    }
+
+    /// Instruction indices a native computed branch (BRX) may reach, resolved by the environment.
+    [[nodiscard]] virtual std::span<const u32> NativeIndirectTargets() const {
+        return {};
+    }
+
+    /// Instruction indices the native computed branch (BRX) at instruction `index` may reach. Environments
+    /// that capture one table per branch return it here; the default is the program-wide table.
+    [[nodiscard]] virtual std::span<const u32> NativeIndirectTargetsAt([[maybe_unused]] u32 index) const {
+        return NativeIndirectTargets();
+    }
+
+    /// Guest address of native instruction 0, relative to the program base.
+    [[nodiscard]] virtual u32 NativeSourceBase() const {
+        return 0;
+    }
+
+    [[nodiscard]] const ProgramHeader& SPH() const noexcept {
+        return sph;
+    }
+
+    [[nodiscard]] const std::array<u32, 8>& GpPassthroughMask() const noexcept {
+        return gp_passthrough_mask;
+    }
+
+    [[nodiscard]] Stage ShaderStage() const noexcept {
+        return stage;
+    }
+
+    [[nodiscard]] u32 StartAddress() const noexcept {
+        return start_address;
+    }
+
+    [[nodiscard]] bool IsProprietaryDriver() const noexcept {
+        return is_proprietary_driver;
+    }
+
+    /// Task and mesh programs: SET_MESH_SHADER_A, SET_MESH_SHADER_B and SET_MESH_INIT_SHADER.
+    [[nodiscard]] const std::array<u32, 3>& MeshRegisters() const noexcept {
+        return mesh_registers;
+    }
+
+    /// Mesh programs: the header of the pass-through geometry program bound with them, whose
+    /// output map lists the per-primitive outputs.
+    [[nodiscard]] const ProgramHeader& MeshPrimitiveHeader() const noexcept {
+        return mesh_primitive_header;
+    }
+
+protected:
+    ProgramHeader sph{};
+    std::array<u32, 8> gp_passthrough_mask{};
+    std::array<u32, 3> mesh_registers{};
+    ProgramHeader mesh_primitive_header{};
+    Stage stage{};
+    u32 start_address{};
+    bool is_proprietary_driver{};
+public:
+    ::Common::unordered_map<CbufWordKey, u32, CbufWordKeyHash> cbuf_word_cache;
+    ::Common::unordered_map<HandleKey,  u32, HandleKeyHash> handle_cache;
+    ::Common::unordered_map<const IR::Inst*, ConstBufferAddr> track_cache;
+};
+
+} // namespace Shader

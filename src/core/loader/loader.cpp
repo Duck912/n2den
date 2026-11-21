@@ -1,0 +1,270 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include <memory>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <concepts>
+#include <algorithm>
+#include "common/concepts.h"
+#include "common/fs/path_util.h"
+#include "common/logging.h"
+#include "common/string_util.h"
+#include "core/core.h"
+#include "core/hle/kernel/k_process.h"
+#include "core/loader/deconstructed_rom_directory.h"
+#include "core/loader/kip.h"
+#include "core/loader/nro.h"
+#include "core/loader/nso.h"
+#include "core/file_sys/nup_container.h"
+#include "core/loader/nup.h"
+#include "core/loader/nx.h"
+
+namespace Loader {
+
+namespace {
+
+template <std::derived_from<AppLoader> T>
+std::optional<FileType> IdentifyFileLoader(FileSys::VirtualFile file) {
+    const auto file_type = T::IdentifyType(file);
+    if (file_type != FileType::Error) {
+        return file_type;
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+FileType IdentifyFile(FileSys::VirtualFile file) {
+    if (const auto romdir_type =
+            IdentifyFileLoader<AppLoader_DeconstructedRomDirectory>(file)) {
+        return *romdir_type;
+    }
+    if (const auto nup_type = IdentifyFileLoader<AppLoader_NUP>(file)) {
+        return *nup_type;
+    } else if (const auto nx_type = IdentifyFileLoader<AppLoader_NX>(file)) {
+        return *nx_type;
+    } else if (const auto nro_type = IdentifyFileLoader<AppLoader_NRO>(file)) {
+        return *nro_type;
+    } else if (const auto kip_type = IdentifyFileLoader<AppLoader_KIP>(file)) {
+        return *kip_type;
+    } else if (const auto nso_type = IdentifyFileLoader<AppLoader_NSO>(file)) {
+        return *nso_type;
+    } else {
+        return FileType::Unknown;
+    }
+}
+
+bool IsContainerType(FileType type) {
+    return type == FileType::NUP || type == FileType::NX;
+}
+
+bool IsBootableGameContainer(FileSys::VirtualFile file, FileType type,
+                             [[maybe_unused]] u64 program_id,
+                             [[maybe_unused]] std::size_t program_index) {
+    if (!file) {
+        return false;
+    }
+
+    if (type == FileType::Unknown) {
+        type = IdentifyFile(file);
+    }
+
+    if (!IsContainerType(type)) {
+        return false;
+    }
+
+    if (type == FileType::NX) {
+        return AppLoader_NX::IsBootable(file);
+    }
+
+    if (type == FileType::NUP) {
+        FileSys::NupContainer nup{file};
+        if (nup.GetStatus() != ResultStatus::Success) {
+            return false;
+        }
+        // A base package boots normally; a standalone update (no base) carries
+        // a complete patched tree and boots on its own (SPEC section 4.1.2).
+        if (const auto base = nup.FindBasePackage();
+            base.has_value() && nup.GetExeFSDir(*base) != nullptr) {
+            return true;
+        }
+        if (const auto update = nup.FindBestUpdatePackage();
+            update.has_value() && nup.GetExeFSDir(*update) != nullptr) {
+            return true;
+        }
+        return false;
+    }
+
+    return false;
+}
+
+FileType GuessFromFilename(const std::string& name) {
+    if (name == "main")
+        return FileType::DeconstructedRomDirectory;
+
+    auto const extension =
+        Common::ToLower(std::string(Common::FS::GetExtensionFromFilename(name)));
+    if (extension == "nro")
+        return FileType::NRO;
+    else if (extension == "nso")
+        return FileType::NSO;
+    else if (extension == "kip")
+        return FileType::KIP;
+    else if (extension == "nup")
+        return FileType::NUP;
+    else if (extension == "nx")
+        return FileType::NX;
+    return FileType::Unknown;
+}
+
+std::string GetFileTypeString(FileType type) {
+    switch (type) {
+    case FileType::NRO:
+        return "NRO";
+    case FileType::NSO:
+        return "NSO";
+    case FileType::KIP:
+        return "KIP";
+    case FileType::NUP:
+        return "NUP";
+    case FileType::NX:
+        return "NX";
+    case FileType::DeconstructedRomDirectory:
+        return "Directory";
+    case FileType::Error:
+    case FileType::Unknown:
+        break;
+    }
+
+    return "unknown";
+}
+
+constexpr std::array<const char*, 44> RESULT_MESSAGES{
+    "The operation completed successfully.",
+    "The loader requested to load is already loaded.",
+    "The operation is not implemented.",
+    "The loader is not initialized properly.",
+    "The NPDM file has a bad header.",
+    "The NPDM has a bad ACID header.",
+    "The NPDM has a bad ACI header,",
+    "The NPDM file has a bad file access control.",
+    "The NPDM has a bad file access header.",
+    "The NPDM has bad kernel capability descriptors.",
+    "The PFS/HFS partition has a bad header.",
+    "The PFS/HFS partition has incorrect size as determined by the header.",
+    "The NCA file has a bad header.",
+    "Encrypted content is not supported. n2den only loads decrypted dumps.",
+    "The NCA file is not an application.",
+    "The Program-type NCA contains no executable. An update may be required.",
+    "The file could not be found or does not exist.",
+    "The game is missing a program metadata file (main.npdm).",
+    "The game uses the currently-unimplemented 32-bit architecture.",
+    "Unable to completely parse the kernel metadata when loading the emulated process",
+    "The RomFS could not be found.",
+    "The ELF file has incorrect size as determined by the header.",
+    "There was a general error loading the NRO into emulated memory.",
+    "There was a general error loading the NSO into emulated memory.",
+    "There is no icon available.",
+    "There is no control data available.",
+    "The BKTR-type NCA has a bad BKTR header.",
+    "The BKTR Subsection entry is not located immediately after the Relocation entry.",
+    "The BKTR Subsection entry is not at the end of the media block.",
+    "The BKTR-type NCA has a bad Relocation block.",
+    "The BKTR-type NCA has a bad Subsection block.",
+    "The BKTR-type NCA has a bad Relocation bucket.",
+    "The BKTR-type NCA has a bad Subsection bucket.",
+    "Game updates cannot be loaded directly. Load the base game instead.",
+    "The KIP file has a bad header.",
+    "The KIP BLZ decompression of the section failed unexpectedly.",
+    "The INI file has a bad header.",
+    "The INI file contains more than the maximum allowable number of KIP files.",
+    "Integrity verification could not be performed for this file.",
+    "Integrity verification failed.",
+    "The NUP container is malformed or its TOC hash does not match.",
+    "The NUP container does not contain a loadable base package.",
+    "The NX archive is damaged or is not a supported version.",
+    "The NX archive has no program stored as exefs and romfs folders.",
+};
+
+std::string GetResultStatusString(ResultStatus status) {
+    return RESULT_MESSAGES.at(static_cast<std::size_t>(status));
+}
+
+std::ostream& operator<<(std::ostream& os, ResultStatus status) {
+    os << RESULT_MESSAGES.at(static_cast<std::size_t>(status));
+    return os;
+}
+
+AppLoader::AppLoader(FileSys::VirtualFile file_) : file(std::move(file_)) {}
+AppLoader::~AppLoader() = default;
+
+/**
+ * Get a loader for a file with a specific type
+ * @param system The system context to use.
+ * @param file   The file to retrieve the loader for
+ * @param type   The file type
+ * @param program_index Specifies the index within the container of the program to launch.
+ * @return std::unique_ptr<AppLoader> a pointer to a loader object;  nullptr for unsupported type
+ */
+static std::unique_ptr<AppLoader> GetFileLoader([[maybe_unused]] Core::System& system,
+                                                FileSys::VirtualFile file, FileType type,
+                                                [[maybe_unused]] u64 program_id,
+                                                [[maybe_unused]] std::size_t program_index) {
+    switch (type) {
+    // NX NSO file format.
+    case FileType::NSO:
+        return std::make_unique<AppLoader_NSO>(std::move(file));
+
+    // NX NRO file format.
+    case FileType::NRO:
+        return std::make_unique<AppLoader_NRO>(std::move(file));
+
+    // NX KIP (Kernel Internal Process) file format
+    case FileType::KIP:
+        return std::make_unique<AppLoader_KIP>(std::move(file));
+
+    // NUP (NX Package) container format.
+    case FileType::NUP:
+        return std::make_unique<AppLoader_NUP>(std::move(file));
+
+    // NX archive (nxformat).
+    case FileType::NX:
+        return std::make_unique<AppLoader_NX>(std::move(file));
+
+    // NX deconstructed ROM directory.
+    case FileType::DeconstructedRomDirectory:
+        return std::make_unique<AppLoader_DeconstructedRomDirectory>(std::move(file));
+
+    default:
+        return nullptr;
+    }
+}
+
+std::unique_ptr<AppLoader> GetLoader(Core::System& system, FileSys::VirtualFile file,
+                                     u64 program_id, std::size_t program_index) {
+    if (!file) {
+        return nullptr;
+    }
+
+    FileType type = IdentifyFile(file);
+    const FileType filename_type = GuessFromFilename(file->GetName());
+
+    if (type != filename_type) {
+        LOG_WARNING(Loader, "File {} has a different type ({}) than its extension.",
+                    file->GetName(), GetFileTypeString(type));
+        if (FileType::Unknown == type) {
+            type = filename_type;
+        }
+    }
+
+    LOG_DEBUG(Loader, "Loading file {} as {}...", file->GetName(), GetFileTypeString(type));
+
+    return GetFileLoader(system, std::move(file), type, program_id, program_index);
+}
+
+} // namespace Loader

@@ -1,0 +1,17 @@
+<!--
+SPDX-FileCopyrightText: 2026 n2den contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<RCC>
+    <qresource prefix="icons/winter_fade">
+        <file alias="index.theme">icons/index.theme</file>
+    </qresource>
+    <qresource prefix="winter_fade">
+        <file alias="style.qss">../frost/style.qss</file>
+        <file alias="arrow-up.svg">../frost/arrow-up-light.svg</file>
+        <file alias="arrow-down.svg">../frost/arrow-down-light.svg</file>
+        <file alias="check.svg">../frost/check.svg</file>
+        <file alias="dash.svg">../frost/dash.svg</file>
+        <file alias="radio.svg">../frost/radio.svg</file>
+    </qresource>
+</RCC>

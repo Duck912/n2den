@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>n2den application icon</title>
+  <desc>Solid white geometric lowercase n on a vibrant red rounded square. The canvas outside the square is transparent.</desc>
+
+  <!-- The rounded rectangle is the only background shape; its exterior remains transparent. -->
+  <rect x="0" y="0" width="1024" height="1024" rx="210" ry="210" fill="#FF0800"/>
+
+  <!-- Two precisely aligned round-capped paths create one clean lowercase-n silhouette. -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="174"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 166,723 V 320"/>
+    <path d="M 166,580 C 166,413 304,318 503,318 C 707,318 860,429 860,589 V 723"/>
+  </g>
+</svg>

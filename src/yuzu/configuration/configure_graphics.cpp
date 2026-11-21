@@ -1,0 +1,725 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// SPDX-FileCopyrightText: 2016 Citra Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include <functional>
+#include <vector>
+#include <QBoxLayout>
+#include <QCheckBox>
+#include <QColorDialog>
+#include <QComboBox>
+#include <QIcon>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPixmap>
+#include <QPushButton>
+#include <QSlider>
+#include <QStringLiteral>
+#include <QtCore/qobjectdefs.h>
+#include <qabstractbutton.h>
+#include <qboxlayout.h>
+#include <qcombobox.h>
+#include <qcoreevent.h>
+#include <qglobal.h>
+#include <qgridlayout.h>
+#include <vulkan/vulkan_core.h>
+
+#include "common/common_types.h"
+#include "common/settings.h"
+#include "common/settings_enums.h"
+#include "core/core.h"
+#include "qt_common/config/uisettings.h"
+#include "qt_common/util/vk.h"
+#include "ui_configure_graphics.h"
+#include "yuzu/configuration/configuration_shared.h"
+#include "yuzu/configuration/configure_graphics.h"
+#include "yuzu/configuration/nvidia_dlss_panel.h"
+#include "yuzu/configuration/shared_widget.h"
+
+#ifdef HAS_RESHADE
+#include "yuzu/configuration/configure_post_processing.h"
+#endif
+
+namespace {
+
+// Greys out a settings row's label and value but not its "restore global" button: the button's
+// enabled state is how the per-game dialog knows the row has its own value, and a button under a
+// disabled row reads as "use global" and would drop that value when the dialog is accepted.
+void SetRowEnabled(ConfigurationShared::Widget* row, bool enabled) {
+    if (!row) {
+        return;
+    }
+    for (QObject* child : row->children()) {
+        if (auto* part = qobject_cast<QWidget*>(child); part && part != row->restore_button) {
+            part->setEnabled(enabled);
+        }
+    }
+}
+
+} // namespace
+
+ConfigureGraphics::ConfigureGraphics(
+    const Core::System& system_, std::vector<VkDeviceInfo::Record>& records_,
+    const std::function<void()>& expose_compute_option_,
+    const std::function<void(Settings::AspectRatio, Settings::ResolutionSetup)>&
+        update_aspect_ratio_,
+    std::shared_ptr<std::vector<ConfigurationShared::Tab*>> group_,
+    const ConfigurationShared::Builder& builder, QWidget* parent)
+    : ConfigurationShared::Tab(group_, parent), ui{std::make_unique<Ui::ConfigureGraphics>()},
+      records{records_}, expose_compute_option{expose_compute_option_},
+      update_aspect_ratio{update_aspect_ratio_}, system{system_},
+      combobox_translations{builder.ComboboxTranslations()} {
+    vulkan_device = Settings::values.vulkan_device.GetValue();
+    RetrieveVulkanDevices();
+
+    ui->setupUi(this);
+
+    Setup(builder);
+
+    for (const auto& device : vulkan_devices) {
+        vulkan_device_combobox->addItem(device);
+    }
+
+    UpdateBackgroundColorButton(QColor::fromRgb(Settings::values.bg_red.GetValue(),
+                                                Settings::values.bg_green.GetValue(),
+                                                Settings::values.bg_blue.GetValue()));
+    UpdateAPILayout();
+    PopulateVSyncModeSelection(false); //< must happen after UpdateAPILayout
+
+    // VSync setting needs to be determined after populating the VSync combobox
+    const auto vsync_mode_setting = Settings::values.vsync_mode.GetValue();
+    const auto vsync_mode = VSyncSettingToMode(vsync_mode_setting);
+    int index{};
+    for (const auto mode : vsync_mode_combobox_enum_map) {
+        if (mode == vsync_mode) {
+            break;
+        }
+        index++;
+    }
+    if (static_cast<unsigned long>(index) < vsync_mode_combobox_enum_map.size()) {
+        vsync_mode_combobox->setCurrentIndex(index);
+    }
+
+    connect(api_combobox, qOverload<int>(&QComboBox::activated), this, [this] {
+        UpdateAPILayout();
+        PopulateVSyncModeSelection(false);
+    });
+    connect(vulkan_device_combobox, qOverload<int>(&QComboBox::activated), this,
+            [this](int device) {
+                UpdateDeviceSelection(device);
+                PopulateVSyncModeSelection(false);
+            });
+    connect(ui->bg_button, &QPushButton::clicked, this, [this] {
+        const QColor new_bg_color = QColorDialog::getColor(bg_color);
+        if (!new_bg_color.isValid()) {
+            return;
+        }
+        UpdateBackgroundColorButton(new_bg_color);
+    });
+
+    const auto& update_screenshot_info = [this, &builder]() {
+        const auto& combobox_enumerations = builder.ComboboxTranslations().at(
+            Settings::EnumMetadata<Settings::AspectRatio>::Index());
+        const auto ratio_index = aspect_ratio_combobox->currentIndex();
+        const auto ratio =
+            static_cast<Settings::AspectRatio>(combobox_enumerations[ratio_index].first);
+
+        const auto& combobox_enumerations_resolution = builder.ComboboxTranslations().at(
+            Settings::EnumMetadata<Settings::ResolutionSetup>::Index());
+        const auto res_index = resolution_combobox->currentIndex();
+        const auto setup = static_cast<Settings::ResolutionSetup>(
+            combobox_enumerations_resolution[res_index].first);
+
+        update_aspect_ratio(ratio, setup);
+    };
+
+    connect(aspect_ratio_combobox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            update_screenshot_info);
+    connect(resolution_combobox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            update_screenshot_info);
+
+    api_combobox->setEnabled(!UISettings::values.has_broken_vulkan && api_combobox->isEnabled());
+    ui->api_widget->setEnabled(
+        (!UISettings::values.has_broken_vulkan || Settings::IsConfiguringGlobal()) &&
+        ui->api_widget->isEnabled());
+
+    if (Settings::IsConfiguringGlobal()) {
+        ui->bg_widget->setEnabled(Settings::values.bg_red.UsingGlobal());
+    }
+}
+
+void ConfigureGraphics::PopulateVSyncModeSelection(bool use_setting) {
+    const Settings::RendererBackend backend{GetCurrentGraphicsBackend()};
+    if (backend == Settings::RendererBackend::Null) {
+        vsync_mode_combobox->setEnabled(false);
+        return;
+    }
+    vsync_mode_combobox->setEnabled(true);
+
+    const int current_index = //< current selected vsync mode from combobox
+        vsync_mode_combobox->currentIndex();
+    const auto current_mode = //< current selected vsync mode as a VkPresentModeKHR
+        current_index == -1 || use_setting
+            ? VSyncSettingToMode(Settings::values.vsync_mode.GetValue())
+            : vsync_mode_combobox_enum_map[current_index];
+    int index{};
+    const int device{vulkan_device_combobox->currentIndex()}; //< current selected Vulkan device
+
+    const auto& present_modes = //< relevant vector of present modes for the selected device or API
+        backend == Settings::RendererBackend::Vulkan && device > -1 ? device_present_modes[device]
+                                                                    : default_present_modes;
+
+    vsync_mode_combobox->clear();
+    vsync_mode_combobox_enum_map.clear();
+    vsync_mode_combobox_enum_map.reserve(present_modes.size());
+    for (const auto present_mode : present_modes) {
+        const auto mode_name = TranslateVSyncMode(present_mode, backend);
+        if (mode_name.isEmpty()) {
+            continue;
+        }
+
+        vsync_mode_combobox->insertItem(index, mode_name);
+        vsync_mode_combobox_enum_map.push_back(present_mode);
+        if (present_mode == current_mode) {
+            vsync_mode_combobox->setCurrentIndex(index);
+        }
+        index++;
+    }
+
+    if (!Settings::IsConfiguringGlobal()) {
+        vsync_restore_global_button->setVisible(!Settings::values.vsync_mode.UsingGlobal());
+
+        const Settings::VSyncMode global_vsync_mode = Settings::values.vsync_mode.GetValue(true);
+        vsync_restore_global_button->setEnabled(
+            ((backend == Settings::RendererBackend::OpenGL_GLSL ||
+              backend == Settings::RendererBackend::OpenGL_GLASM ||
+              backend == Settings::RendererBackend::OpenGL_SPIRV) &&
+             (global_vsync_mode == Settings::VSyncMode::Immediate ||
+              global_vsync_mode == Settings::VSyncMode::Fifo)) ||
+            backend == Settings::RendererBackend::Vulkan);
+    }
+}
+
+void ConfigureGraphics::UpdateVsyncSetting() const {
+    const Settings::RendererBackend backend{GetCurrentGraphicsBackend()};
+    if (backend == Settings::RendererBackend::Null) {
+        return;
+    }
+
+    const auto mode = vsync_mode_combobox_enum_map[vsync_mode_combobox->currentIndex()];
+    const auto vsync_mode = PresentModeToSetting(mode);
+    Settings::values.vsync_mode.SetValue(vsync_mode);
+}
+
+void ConfigureGraphics::UpdateDeviceSelection(int device) {
+    if (device == -1) {
+        return;
+    }
+    if (GetCurrentGraphicsBackend() == Settings::RendererBackend::Vulkan) {
+        vulkan_device = device;
+    }
+}
+
+ConfigureGraphics::~ConfigureGraphics() = default;
+
+void ConfigureGraphics::SetConfiguration() {}
+
+void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
+    QLayout* api_layout = ui->api_widget->layout();
+    QWidget* api_grid_widget = new QWidget(this);
+    QVBoxLayout* api_grid_layout = new QVBoxLayout(api_grid_widget);
+    api_grid_layout->setContentsMargins(0, 0, 0, 0);
+    api_layout->addWidget(api_grid_widget);
+
+    QLayout& graphics_layout = *ui->graphics_widget->layout();
+
+    std::map<u32, QWidget*> hold_graphics;
+    std::vector<QWidget*> hold_api;
+
+    for (const auto setting : Settings::values.linkage.by_category[Settings::Category::Renderer]) {
+#ifndef HAS_RESHADE
+        if (setting->Id() == Settings::values.post_shader_enabled.Id()) {
+            continue;
+        }
+#endif
+#ifndef HAS_D3D12_NVN
+        // NVN-HLE's Direct3D 12 renderer is not in this build: no row for the renderer choice.
+        if (setting->Id() == Settings::values.nvn_renderer.Id()) {
+            continue;
+        }
+#endif
+
+        ConfigurationShared::Widget* widget = [&]() {
+            if (setting->Id() == Settings::values.fsr_sharpening_slider.Id()) {
+                // FSR needs a reversed slider and a 0.5 multiplier
+                return builder.BuildWidget(
+                    setting, apply_funcs, ConfigurationShared::RequestType::ReverseSlider, true,
+                    0.5f, nullptr, tr("%", "FSR/SGSR sharpening percentage (e.g. 50%)"));
+            } else {
+                return builder.BuildWidget(setting, apply_funcs);
+            }
+        }();
+
+        if (widget == nullptr) {
+            continue;
+        }
+        if (!widget->Valid()) {
+            widget->deleteLater();
+            continue;
+        }
+
+        if (setting->Id() == Settings::values.renderer_backend.Id()) {
+            // Add the renderer combobox now so it's at the top
+            api_grid_layout->addWidget(widget);
+            api_combobox = widget->combobox;
+            // n2den: Vulkan only (the upscalers, HDR and FSR 4 need it); the choice is
+            // kept for the layout code but not shown.
+            widget->hide();
+            api_restore_global_button = widget->restore_button;
+            if (!Settings::IsConfiguringGlobal()) {
+                api_restore_global_button->connect(api_restore_global_button,
+                                                   &QAbstractButton::clicked,
+                                                   [this](bool) { UpdateAPILayout(); });
+                // Detach API's restore button and place it where we want
+                // Lets us put it on the side, and it will automatically scale if there's a
+                // second combobox (vulkan_device)
+                widget->layout()->removeWidget(api_restore_global_button);
+                api_layout->addWidget(api_restore_global_button);
+            }
+        } else if (setting->Id() == Settings::values.vulkan_device.Id()) {
+            // Keep track of vulkan_device's combobox so we can populate it
+            hold_api.push_back(widget);
+            vulkan_device_combobox = widget->combobox;
+            vulkan_device_widget = widget;
+        } else if (setting->Id() == Settings::values.vsync_mode.Id()) {
+            // Keep track of vsync_mode's combobox so we can populate it
+            vsync_mode_combobox = widget->combobox;
+
+            // Since vsync is populated at runtime, we have to manually set up the button for
+            // restoring the global setting.
+            if (!Settings::IsConfiguringGlobal()) {
+                QPushButton* restore_button =
+                    ConfigurationShared::Widget::CreateRestoreGlobalButton(
+                        Settings::values.vsync_mode.UsingGlobal(), widget);
+                restore_button->setEnabled(true);
+                widget->layout()->addWidget(restore_button);
+
+                restore_button->connect(restore_button, &QAbstractButton::clicked,
+                                        [restore_button, this](bool) {
+                                            Settings::values.vsync_mode.SetGlobal(true);
+                                            PopulateVSyncModeSelection(true);
+
+                                            restore_button->setVisible(false);
+                                        });
+
+                std::function<void()> set_non_global = [restore_button, this]() {
+                    Settings::values.vsync_mode.SetGlobal(false);
+                    UpdateVsyncSetting();
+                    restore_button->setVisible(true);
+                };
+                widget->combobox->connect(widget->combobox,
+                                          QOverload<int>::of(&QComboBox::activated),
+                                          [set_non_global]() { set_non_global(); });
+                vsync_restore_global_button = restore_button;
+            }
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.aspect_ratio.Id()) {
+            // Keep track of the aspect ratio combobox to update other UI tabs that need it
+            aspect_ratio_combobox = widget->combobox;
+            // Fortune's Weave is 16:9 (Ultrawide covers 21:9): not shown.
+            widget->hide();
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.resolution_setup.Id()) {
+            // Keep track of the resolution combobox to update other UI tabs that need it
+            resolution_combobox = widget->combobox;
+            hold_graphics.emplace(setting->Id(), widget);
+#ifdef HAS_RESHADE
+        } else if (setting->Id() == Settings::values.post_shader_enabled.Id()) {
+            QPushButton* post_shader_button = new QPushButton(tr("Configure Effects..."), widget);
+            post_shader_button->setVisible(widget->checkbox->isChecked());
+
+            connect(post_shader_button, &QAbstractButton::clicked, this, [this]() {
+                ConfigurePostProcessing dialog(this);
+                dialog.exec();
+            });
+            connect(widget->checkbox, &QCheckBox::toggled, post_shader_button,
+                    &QWidget::setVisible);
+
+            QBoxLayout* row = qobject_cast<QBoxLayout*>(widget->layout());
+            row->insertWidget(1, post_shader_button);
+            post_process_widget = widget; // moved to the Advanced page by the dialog
+
+            hold_graphics.emplace(setting->Id(), widget);
+#endif
+#ifdef EGLANTINE_STREAMLINE
+        } else if (setting->Id() == Settings::values.upscaler.Id() && widget->combobox) {
+            // NVIDIA's files and a download button under the list while NVIDIA DLSS is chosen.
+            QWidget* group = new QWidget(this);
+            QVBoxLayout* group_layout = new QVBoxLayout(group);
+            group_layout->setContentsMargins(0, 0, 0, 0);
+            group_layout->setSpacing(2);
+            group_layout->addWidget(widget);
+            NvidiaDlssPanel* panel = new NvidiaDlssPanel(group);
+            group_layout->addWidget(panel);
+            QComboBox* const box = widget->combobox;
+            upscaler_combobox = box;
+            const auto show_panel = [box, panel] {
+                panel->setVisible(box->currentData().toUInt() ==
+                                  static_cast<u32>(Settings::Upscaler::NvidiaDlss));
+            };
+            show_panel();
+            connect(box, &QComboBox::currentIndexChanged, panel, show_panel);
+            hold_graphics.emplace(setting->Id(), group);
+#endif
+        } else if (setting->Id() == Settings::values.graphics_path.Id() && widget->combobox) {
+            // The NVN-HLE rows below it are enabled only while NVN-HLE is chosen.
+            graphics_path_combobox = widget->combobox;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.nvn_renderer.Id()) {
+            nvn_renderer_row = widget;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.nvn_upscaler.Id() && widget->combobox) {
+            // Same look as the emulated GPU's "Upscaler:" row, with the same NVIDIA files status
+            // under it while NVIDIA DLSS / DLAA is chosen.
+            QWidget* group = new QWidget(this);
+            QVBoxLayout* group_layout = new QVBoxLayout(group);
+            group_layout->setContentsMargins(0, 0, 0, 0);
+            group_layout->setSpacing(2);
+            group_layout->addWidget(widget);
+#ifdef EGLANTINE_STREAMLINE
+            nvn_dlss_panel = new NvidiaDlssPanel(group);
+            group_layout->addWidget(nvn_dlss_panel);
+#endif
+            nvn_upscaler_row = group;
+            nvn_upscaler_combobox = widget->combobox;
+            hold_graphics.emplace(setting->Id(), group);
+        } else if (setting->Id() == Settings::values.nvn_dlss_quality.Id()) {
+            nvn_dlss_quality_widget = widget;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.nvn_dlss_temporal.Id()) {
+            nvn_dlss_temporal_widget = widget;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.upscaler_quality.Id() && widget->combobox) {
+            // A warning under the list when the chosen resolution or upscaler ignores it.
+            QWidget* group = new QWidget(this);
+            QVBoxLayout* group_layout = new QVBoxLayout(group);
+            group_layout->setContentsMargins(0, 0, 0, 0);
+            group_layout->setSpacing(2);
+            group_layout->addWidget(widget);
+            upscaler_quality_widget = widget;
+            upscaler_quality_warning = new QLabel(group);
+            upscaler_quality_warning->setWordWrap(true);
+            upscaler_quality_warning->setStyleSheet(QStringLiteral("color: #e0a030;"));
+            group_layout->addWidget(upscaler_quality_warning);
+            hold_graphics.emplace(setting->Id(), group);
+        } else {
+            if (setting->Id() == Settings::values.upscaler.Id() && widget->combobox) {
+                upscaler_combobox = widget->combobox;
+            }
+            hold_graphics.emplace(setting->Id(), widget);
+        }
+    }
+
+    if (upscaler_quality_warning) {
+        if (resolution_combobox) {
+            connect(resolution_combobox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                    [this](int) { UpdateUpscalerQualityWarning(); });
+        }
+        if (upscaler_combobox) {
+            connect(upscaler_combobox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                    [this](int) { UpdateUpscalerQualityWarning(); });
+        }
+        UpdateUpscalerQualityWarning();
+    }
+
+    // The emulated GPU's upscaler rows go right under the NVN-HLE rows (settings are otherwise laid
+    // out in declaration order). Only one set of upscaler rows shows at a time, so both sit under
+    // "GPU backend:" and switching it looks like the dropdown's contents being replaced.
+    const auto take_row = [&hold_graphics](u32 id) -> QWidget* {
+        const auto it = hold_graphics.find(id);
+        if (it == hold_graphics.end()) {
+            return nullptr;
+        }
+        QWidget* const row = it->second;
+        hold_graphics.erase(it);
+        return row;
+    };
+    upscaler_row = take_row(Settings::values.upscaler.Id());
+    upscaler_quality_row = take_row(Settings::values.upscaler_quality.Id());
+
+    bool upscaler_rows_placed = false;
+    const auto place_upscaler_rows = [&] {
+        upscaler_rows_placed = true;
+        for (QWidget* row : {upscaler_row, upscaler_quality_row}) {
+            if (row) {
+                graphics_layout.addWidget(row);
+            }
+        }
+    };
+    for (const auto& [id, widget] : hold_graphics) {
+        if (!upscaler_rows_placed && id > Settings::values.nvn_dlss_temporal.Id()) {
+            place_upscaler_rows();
+        }
+        graphics_layout.addWidget(widget);
+    }
+    if (!upscaler_rows_placed) {
+        place_upscaler_rows();
+    }
+
+    // The GPU backend decides which set of rows shows; the NVN-HLE upscaler decides the DLSS rows.
+    if (graphics_path_combobox) {
+        connect(graphics_path_combobox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this](int) { UpdateNvnHleWidgets(); });
+    }
+    if (nvn_upscaler_combobox) {
+        connect(nvn_upscaler_combobox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this](int) { UpdateNvnHleWidgets(); });
+    }
+    UpdateNvnHleWidgets();
+
+    for (auto widget : hold_api) {
+        api_grid_layout->addWidget(widget);
+    }
+
+    // The background colour only shows in the bars around the picture: not shown.
+    ui->bg_widget->hide();
+
+    // Background color is too specific to build into the new system, so we manage it here
+    // (3 settings, all collected into a single widget with a QColor to manage on top)
+    if (Settings::IsConfiguringGlobal()) {
+        apply_funcs.push_back([this](bool powered_on) {
+            Settings::values.bg_red.SetValue(static_cast<u8>(bg_color.red()));
+            Settings::values.bg_green.SetValue(static_cast<u8>(bg_color.green()));
+            Settings::values.bg_blue.SetValue(static_cast<u8>(bg_color.blue()));
+        });
+    } else {
+        QPushButton* bg_restore_button = ConfigurationShared::Widget::CreateRestoreGlobalButton(
+            Settings::values.bg_red.UsingGlobal(), ui->bg_widget);
+        ui->bg_widget->layout()->addWidget(bg_restore_button);
+
+        bg_restore_button->connect(bg_restore_button, &QAbstractButton::clicked,
+                                   [bg_restore_button, this](bool) {
+                                       const int r = Settings::values.bg_red.GetValue(true);
+                                       const int g = Settings::values.bg_green.GetValue(true);
+                                       const int b = Settings::values.bg_blue.GetValue(true);
+                                       UpdateBackgroundColorButton(QColor::fromRgb(r, g, b));
+
+                                       bg_restore_button->setVisible(false);
+                                       bg_restore_button->setEnabled(false);
+                                   });
+
+        ui->bg_button->connect(ui->bg_button, &QAbstractButton::clicked, [bg_restore_button](bool) {
+            bg_restore_button->setVisible(true);
+            bg_restore_button->setEnabled(true);
+        });
+
+        apply_funcs.push_back([bg_restore_button, this](bool powered_on) {
+            const bool using_global = !bg_restore_button->isEnabled();
+            Settings::values.bg_red.SetGlobal(using_global);
+            Settings::values.bg_green.SetGlobal(using_global);
+            Settings::values.bg_blue.SetGlobal(using_global);
+            if (!using_global) {
+                Settings::values.bg_red.SetValue(static_cast<u8>(bg_color.red()));
+                Settings::values.bg_green.SetValue(static_cast<u8>(bg_color.green()));
+                Settings::values.bg_blue.SetValue(static_cast<u8>(bg_color.blue()));
+            }
+        });
+    }
+}
+
+const QString ConfigureGraphics::TranslateVSyncMode(VkPresentModeKHR mode,
+                                                    Settings::RendererBackend backend) const {
+    switch (mode) {
+    case VK_PRESENT_MODE_IMMEDIATE_KHR:
+        return (backend == Settings::RendererBackend::OpenGL_GLSL ||
+                backend == Settings::RendererBackend::OpenGL_GLASM ||
+                backend == Settings::RendererBackend::OpenGL_SPIRV)
+                   ? tr("Off")
+                   : QStringLiteral("Immediate (%1)").arg(tr("VSync Off"));
+    case VK_PRESENT_MODE_MAILBOX_KHR:
+        return QStringLiteral("Mailbox (%1)").arg(tr("Recommended"));
+    case VK_PRESENT_MODE_FIFO_KHR:
+        return (backend == Settings::RendererBackend::OpenGL_GLSL ||
+                backend == Settings::RendererBackend::OpenGL_GLASM ||
+                backend == Settings::RendererBackend::OpenGL_SPIRV)
+                   ? tr("On")
+                   : QStringLiteral("FIFO (%1)").arg(tr("VSync On"));
+    case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+        return QStringLiteral("FIFO Relaxed");
+    default:
+        return {};
+    }
+}
+
+int ConfigureGraphics::FindIndex(u32 enumeration, int value) const {
+    for (u32 i = 0; enumeration < combobox_translations.size() &&
+                    i < combobox_translations.at(enumeration).size();
+         i++)
+        if (combobox_translations.at(enumeration)[i].first == u32(value))
+            return i;
+    return -1;
+}
+
+void ConfigureGraphics::ApplyConfiguration() {
+    const bool powered_on = system.IsPoweredOn();
+    for (const auto& func : apply_funcs) {
+        func(powered_on);
+    }
+
+    UpdateVsyncSetting();
+
+    Settings::values.vulkan_device.SetGlobal(true);
+    auto const index = Settings::EnumMetadata<Settings::RendererBackend>::Index();
+    if (Settings::IsConfiguringGlobal() ||
+        (!Settings::IsConfiguringGlobal() && api_restore_global_button->isEnabled())) {
+        auto backend =
+            index >= combobox_translations.size() ||
+                    size_t(api_combobox->currentIndex()) >= combobox_translations.at(index).size()
+                ? Settings::values.renderer_backend.GetValue()
+                : Settings::RendererBackend(
+                      combobox_translations.at(index)[api_combobox->currentIndex()].first);
+        switch (backend) {
+        case Settings::RendererBackend::Vulkan:
+            Settings::values.vulkan_device.SetGlobal(Settings::IsConfiguringGlobal());
+            Settings::values.vulkan_device.SetValue(vulkan_device_combobox->currentIndex());
+            break;
+        case Settings::RendererBackend::OpenGL_GLSL:
+        case Settings::RendererBackend::OpenGL_SPIRV:
+        case Settings::RendererBackend::OpenGL_GLASM:
+        case Settings::RendererBackend::Null:
+            break;
+        }
+    }
+}
+
+void ConfigureGraphics::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange) {
+        RetranslateUI();
+    }
+
+    QWidget::changeEvent(event);
+}
+
+void ConfigureGraphics::RetranslateUI() {
+    ui->retranslateUi(this);
+}
+
+void ConfigureGraphics::UpdateBackgroundColorButton(QColor color) {
+    bg_color = color;
+
+    QPixmap pixmap(ui->bg_button->size());
+    pixmap.fill(bg_color);
+
+    const QIcon color_icon(pixmap);
+    ui->bg_button->setIcon(color_icon);
+}
+
+// Upscaler quality only applies at 1X with FSR 3.1, NVIDIA DLSS or FSR 4: say so when the chosen
+// resolution or upscaler means it won't.
+void ConfigureGraphics::UpdateUpscalerQualityWarning() {
+    if (!upscaler_quality_warning) {
+        return;
+    }
+    const bool game_dlss =
+        upscaler_combobox &&
+        upscaler_combobox->currentData().toUInt() == static_cast<u32>(Settings::Upscaler::GameDlss);
+    // The game's own DLSS has no quality modes: grey the list out.
+    if (upscaler_quality_widget) {
+        SetRowEnabled(upscaler_quality_widget, !game_dlss);
+    }
+    QString warning;
+    if (resolution_combobox &&
+        resolution_combobox->currentData().toUInt() !=
+            static_cast<u32>(Settings::ResolutionSetup::Res1X)) {
+        warning = tr("Upscaler quality only works at 1X resolution. At this resolution the 3D "
+                     "scene is drawn at Performance (half size) and the whole picture is scaled "
+                     "instead.");
+    } else if (game_dlss) {
+        warning = tr("Upscaler quality doesn't apply to the game's own DLSS: it always draws "
+                     "the 3D scene at Performance.");
+    }
+    upscaler_quality_warning->setText(warning);
+    upscaler_quality_warning->setVisible(!warning.isEmpty());
+}
+
+// One set of GPU rows shows at a time. With the NVN-HLE GPU backend: its renderer, upscaler, DLSS
+// quality and DLSS jitter rows (the last two enabled only with the upscaler at NVIDIA DLSS / DLAA).
+// With the emulated GPU: its upscaler and upscaler quality rows. The other set is hidden, not greyed
+// out. The backend is read from the combobox, the same choice the game will boot with (the
+// per-game dialog's combobox already shows the global value while "use global" is on).
+void ConfigureGraphics::UpdateNvnHleWidgets() {
+    const bool hle = graphics_path_combobox &&
+                     graphics_path_combobox->currentData().toUInt() ==
+                         static_cast<u32>(Settings::GraphicsPath::Hle);
+    const bool dlss = nvn_upscaler_combobox &&
+                      nvn_upscaler_combobox->currentData().toUInt() ==
+                          static_cast<u32>(Settings::NvnUpscaler::Dlss);
+    for (QWidget* row : {nvn_renderer_row, nvn_upscaler_row,
+                         static_cast<QWidget*>(nvn_dlss_quality_widget),
+                         static_cast<QWidget*>(nvn_dlss_temporal_widget)}) {
+        if (row) {
+            row->setVisible(hle);
+        }
+    }
+    for (QWidget* row : {upscaler_row, upscaler_quality_row}) {
+        if (row) {
+            row->setVisible(!hle);
+        }
+    }
+    SetRowEnabled(nvn_dlss_quality_widget, dlss);
+    SetRowEnabled(nvn_dlss_temporal_widget, dlss);
+#ifdef EGLANTINE_STREAMLINE
+    if (nvn_dlss_panel) {
+        nvn_dlss_panel->setVisible(dlss);
+    }
+#endif
+}
+
+void ConfigureGraphics::UpdateAPILayout() {
+    bool runtime_lock = !system.IsPoweredOn();
+    bool need_global = !(Settings::IsConfiguringGlobal() || api_restore_global_button->isEnabled());
+    vulkan_device = Settings::values.vulkan_device.GetValue(need_global);
+    vulkan_device_widget->setEnabled(!need_global && runtime_lock);
+
+    const auto current_backend = GetCurrentGraphicsBackend();
+    const bool is_vulkan = current_backend == Settings::RendererBackend::Vulkan;
+    vulkan_device_widget->setVisible(is_vulkan);
+    if (is_vulkan && int(vulkan_device) < vulkan_device_combobox->count()) {
+        vulkan_device_combobox->setCurrentIndex(vulkan_device);
+    }
+}
+
+void ConfigureGraphics::RetrieveVulkanDevices() {
+    vulkan_devices.clear();
+    vulkan_devices.reserve(records.size());
+    device_present_modes.clear();
+    device_present_modes.reserve(records.size());
+    for (const auto& record : records) {
+        vulkan_devices.push_back(QString::fromStdString(record.name));
+        device_present_modes.push_back(record.vsync_support);
+
+        if (record.has_broken_compute) {
+            expose_compute_option();
+        }
+    }
+}
+
+Settings::RendererBackend ConfigureGraphics::GetCurrentGraphicsBackend() const {
+    const auto selected_backend = [&]() {
+        auto const index = Settings::EnumMetadata<Settings::RendererBackend>::Index();
+        if (!Settings::IsConfiguringGlobal() && !api_restore_global_button->isEnabled())
+            return Settings::values.renderer_backend.GetValue(true);
+        return index >= combobox_translations.size() || size_t(api_combobox->currentIndex()) >=
+                                                            combobox_translations.at(index).size()
+                   ? Settings::values.renderer_backend.GetValue()
+                   : Settings::RendererBackend(
+                         combobox_translations.at(index).at(api_combobox->currentIndex()).first);
+    }();
+
+    if (selected_backend == Settings::RendererBackend::Vulkan &&
+        UISettings::values.has_broken_vulkan)
+        return Settings::RendererBackend::OpenGL_GLSL;
+    return selected_backend;
+}

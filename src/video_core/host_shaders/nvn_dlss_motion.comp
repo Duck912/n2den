@@ -1,0 +1,72 @@
+// SPDX-FileCopyrightText: Copyright 2026 n2den contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+
+// NVN HLE (Vulkan::Nvn::SinkTemporal, nvn_temporal.cpp): the camera motion vectors DLSS takes
+// for a replaced upscaling network. The game has no
+// velocity buffer: each pixel of the scene depth is taken back to this frame's clip space and
+// through `reproject` (the previous frame's view-projection times the inverse of this frame's,
+// both unjittered: the jitter is a viewport offset, not in the matrices) to where it was in the
+// previous frame. The method is the one Longshot documents for its NGX path (reprojection of the
+// depth through the two view-projections); this shader was written for n2den, no text was taken.
+//
+// Conventions: the picture's rows are top down and clip +y is its first row (nvn_viewport.h);
+// the output is in render pixels, x right / y down, pointing from this frame's position to the
+// previous frame's (Streamline's convention; mvecScale = 1 / render size, not jittered). A pixel
+// with no valid previous position (behind the previous camera, a depth outside the depth range,
+// not finite) gets no motion. Only the camera's motion: what moves by itself gets the motion of a
+// static surface at its depth. The scene viewport is assumed to cover exactly the render
+// rectangle DLSS reads (NDC -1..1 maps to its pixels); a scene drawn into a sub-viewport of it
+// would get wrong motion.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D scene_depth;
+layout(binding = 1, rg16f) uniform writeonly image2D motion;
+
+layout(push_constant) uniform PushConstants {
+    mat4 reproject;    // this frame's unjittered clip space -> the previous frame's
+    vec2 jitter;       // this frame's content shift in render pixels (x right, y down)
+    vec2 size;         // the render rectangle's size
+    ivec2 origin;      // the rectangle's origin in the depth image
+    float depth_min;   // the viewport's depth range: stored = min + (max - min) * t
+    float depth_scale; // 1 / (max - min)
+    uint flags;        // bit 0: OpenGL clip depth (z = 2t - 1), else z = t; bit 1: the debug view
+} pc;
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(vec2(pixel), pc.size))) {
+        return;
+    }
+    const float stored = texelFetch(scene_depth, pixel + pc.origin, 0).r;
+    const float t = (stored - pc.depth_min) * pc.depth_scale;
+    vec2 result = vec2(0.0);
+    if (t >= -1.0e-4 && t <= 1.0001) {
+        const float window = clamp(t, 0.0, 1.0);
+        const float z = (pc.flags & 1u) != 0u ? window * 2.0 - 1.0 : window;
+        // The pixel's centre where the unjittered camera puts it: the jitter moved the content by
+        // pc.jitter, so the surface seen here sits at (centre - jitter) without it.
+        const vec2 here = vec2(pixel) + 0.5 - pc.jitter;
+        const vec4 clip = vec4(here.x / pc.size.x * 2.0 - 1.0, 1.0 - here.y / pc.size.y * 2.0, z,
+                               1.0);
+        const vec4 before = pc.reproject * clip;
+        if (before.w > 1.0e-6) {
+            const vec2 ndc = before.xy / before.w;
+            const vec2 there = vec2((ndc.x + 1.0) * 0.5 * pc.size.x,
+                                    (1.0 - ndc.y) * 0.5 * pc.size.y);
+            const vec2 delta = there - here;
+            // (a NaN fails the comparison too)
+            if (all(lessThan(abs(delta), vec2(16384.0)))) {
+                result = delta;
+            }
+        }
+    }
+    if ((pc.flags & 2u) != 0u) {
+        // EDEN_NVN_DLSS_DEBUG=motion: the motion as a colour, 0.5 + motion / 32 per axis (x red,
+        // y green; zero motion is (0.5, 0.5), 16 pixels right or down saturates the channel).
+        result = clamp(vec2(0.5) + result / 32.0, vec2(0.0), vec2(1.0));
+    }
+    imageStore(motion, pixel, vec4(result, 0.0, 0.0));
+}

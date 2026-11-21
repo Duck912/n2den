@@ -1,0 +1,8 @@
+[Icon Theme]
+Name=Winter Fade
+Comment=White and light grey theme
+Inherits=default,colorful
+Directories=16x16
+
+[16x16]
+Size=16

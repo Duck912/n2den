@@ -1,0 +1,55 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#pragma once
+
+#include "shader_recompiler/environment.h"
+#include "shader_recompiler/frontend/ir/program.h"
+
+namespace Shader {
+struct HostTranslateInfo;
+}
+
+namespace Shader::Optimization {
+
+void CollectShaderInfoPass(Environment& env, IR::Program& program);
+/// Reads nvn-hle's NVN2 compute driver bank window from `env` into `program.info` (no-op for every
+/// other environment). Runs before the nvn-hle storage pass, which biases its tracking towards
+/// the window, and again inside CollectShaderInfoPass.
+void ApplyNvnBufferWindow(Environment& env, IR::Program& program);
+void ConditionalBarrierPass(IR::Program& program);
+void ConstantPropagationPass(Environment& env, IR::Program& program);
+void DeadCodeEliminationPass(IR::Program& program);
+void GeometryCompactionPass(IR::Program& program, const HostTranslateInfo& host_info);
+void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program, const HostTranslateInfo& host_info);
+void IdentityRemovalPass(IR::Program& program);
+void LowerFp64ToFp32(IR::Program& program);
+void LowerFp16ToFp32(IR::Program& program);
+/// The same for one block (tests).
+void LowerFp16ToFp32(IR::Block& block);
+void LowerInt64ToInt32(IR::Program& program);
+void RescalingPass(IR::Program& program);
+void SsaRewritePass(IR::Program& program);
+void PositionPass(Environment& env, IR::Program& program);
+void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo& host_info);
+void LayerPass(IR::Program& program, const HostTranslateInfo& host_info);
+void VendorWorkaroundPass(IR::Program& program);
+void VerificationPass(const IR::Program& program);
+bool HasBrokenPattern(const IR::Program& program);
+
+// Dual Vertex
+void VertexATransformPass(IR::Program& program);
+void VertexBTransformPass(IR::Program& program);
+void JoinTextureInfo(Info& base, Info& source);
+/// Storage buffers a stage may bind: Info::MAX_SSBOS, clamped to the device's limits.
+size_t StorageBufferLimit(const HostTranslateInfo& host_info);
+void JoinStorageInfo(Info& base, Info& source, size_t limit = Info::MAX_GRAPHICS_SSBOS);
+/// nvn-hle: appends the raw global memory address table as the last storage buffer descriptor
+/// (see HostTranslateInfo::nvn_raw_global_table_ssbo). No-op unless `info` uses raw global memory
+/// with a table storage buffer.
+void AddRawGlobalTableDescriptor(Info& info);
+
+} // namespace Shader::Optimization

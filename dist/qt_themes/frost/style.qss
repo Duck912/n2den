@@ -1,0 +1,347 @@
+/*
+SPDX-FileCopyrightText: 2026 n2den contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/* Shared geometry; every surface and state uses the active grey palette. */
+QWidget {
+    color: palette(window-text);
+    selection-background-color: palette(highlight);
+    selection-color: palette(highlighted-text);
+}
+QMainWindow, QDialog {
+    background-color: palette(window);
+}
+QToolTip {
+    color: palette(tooltip-text);
+    background-color: palette(tooltip-base);
+    border: 1px solid palette(mid);
+    padding: 6px 8px;
+}
+QLabel {
+    background: transparent;
+}
+QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled {
+    color: palette(placeholder-text);
+}
+
+QPushButton, QToolButton {
+    color: palette(button-text);
+    background-color: palette(button);
+    border: 1px solid palette(mid);
+    border-radius: 6px;
+    padding: 5px 12px;
+    min-height: 20px;
+}
+QPushButton:hover, QToolButton:hover {
+    background-color: palette(midlight);
+}
+QPushButton:pressed, QToolButton:pressed,
+QPushButton:checked, QToolButton:checked {
+    background-color: palette(highlight);
+    color: palette(highlighted-text);
+}
+QPushButton:default, QPushButton:focus, QToolButton:focus {
+    border-color: palette(text);
+}
+QPushButton:disabled, QToolButton:disabled {
+    color: palette(placeholder-text);
+    border-color: palette(button);
+}
+QCheckBox, QRadioButton {
+    spacing: 7px;
+    padding: 3px 0;
+    background: transparent;
+}
+QCheckBox::indicator, QGroupBox::indicator, QRadioButton::indicator {
+    width: 14px;
+    height: 14px;
+    background-color: palette(base);
+    border: 1px solid palette(mid);
+    border-radius: 3px;
+}
+QCheckBox::indicator:hover, QGroupBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: palette(text);
+}
+QCheckBox::indicator:checked, QGroupBox::indicator:checked {
+    background-color: palette(highlight);
+    image: url(:/@theme@/check.svg);
+}
+QCheckBox::indicator:indeterminate {
+    background-color: palette(highlight);
+    image: url(:/@theme@/dash.svg);
+}
+QRadioButton::indicator {
+    border-radius: 8px;
+}
+QRadioButton::indicator:checked {
+    background-color: palette(highlight);
+    image: url(:/@theme@/radio.svg);
+}
+
+QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox {
+    color: palette(text);
+    background-color: palette(base);
+    border: 1px solid palette(mid);
+    border-radius: 5px;
+    padding: 4px 7px;
+    min-height: 20px;
+}
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
+QAbstractSpinBox:focus, QComboBox:focus {
+    border-color: palette(text);
+}
+QLineEdit:disabled, QAbstractSpinBox:disabled, QComboBox:disabled {
+    color: palette(placeholder-text);
+    background-color: palette(window);
+}
+QComboBox {
+    padding-right: 24px;
+}
+QComboBox::drop-down {
+    width: 22px;
+    border-left: 1px solid palette(mid);
+}
+QComboBox::down-arrow {
+    image: url(:/@theme@/arrow-down.svg);
+    width: 12px;
+    height: 8px;
+}
+QAbstractSpinBox {
+    padding-right: 25px;
+}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
+    subcontrol-origin: border;
+    width: 20px;
+    border-left: 1px solid palette(mid);
+}
+QAbstractSpinBox::up-button {
+    subcontrol-position: top right;
+}
+QAbstractSpinBox::down-button {
+    subcontrol-position: bottom right;
+}
+QAbstractSpinBox::up-arrow {
+    image: url(:/@theme@/arrow-up.svg);
+    width: 10px;
+    height: 6px;
+}
+QAbstractSpinBox::down-arrow {
+    image: url(:/@theme@/arrow-down.svg);
+    width: 10px;
+    height: 6px;
+}
+QComboBox QAbstractItemView {
+    border: 1px solid palette(mid);
+    background-color: palette(base);
+    selection-background-color: palette(highlight);
+    selection-color: palette(highlighted-text);
+    padding: 3px;
+}
+
+QGroupBox {
+    background-color: palette(alternate-base);
+    border: 1px solid palette(mid);
+    border-radius: 8px;
+    margin-top: 18px;
+    padding: 12px 10px 10px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 5px;
+    color: palette(text);
+    font-weight: bold;
+}
+QTabWidget::pane {
+    border: 1px solid palette(mid);
+    border-radius: 6px;
+    background-color: palette(window);
+}
+QTabBar::tab {
+    color: palette(window-text);
+    background-color: palette(button);
+    border: 1px solid palette(mid);
+    border-bottom: 2px solid transparent;
+    padding: 7px 12px;
+}
+QTabBar::tab:hover {
+    background-color: palette(midlight);
+}
+QTabBar::tab:selected {
+    background-color: palette(window);
+    border-bottom-color: palette(text);
+}
+
+QTreeView, QListView, QTableView {
+    background-color: palette(base);
+    alternate-background-color: palette(alternate-base);
+    border: 1px solid palette(mid);
+    border-radius: 6px;
+    outline: 0;
+}
+QTreeView::item, QListView::item, QTableView::item {
+    padding: 5px;
+}
+QTreeView::item:hover, QListView::item:hover, QTableView::item:hover {
+    background-color: palette(midlight);
+}
+QTreeView::item:selected, QListView::item:selected, QTableView::item:selected {
+    background-color: palette(highlight);
+    color: palette(highlighted-text);
+}
+QHeaderView::section {
+    color: palette(text);
+    background-color: palette(window);
+    border: 0;
+    border-bottom: 1px solid palette(mid);
+    padding: 7px 8px;
+    font-weight: bold;
+}
+QListWidget#selectorList {
+    background-color: palette(base);
+    padding: 5px;
+}
+QListWidget#selectorList::item {
+    padding: 8px 12px;
+    border-radius: 5px;
+    margin: 1px 0;
+}
+QListWidget#selectorList::item:selected {
+    font-weight: bold;
+}
+
+QMenuBar {
+    background-color: palette(window);
+    border-bottom: 1px solid palette(mid);
+}
+QMenuBar::item {
+    background: transparent;
+    padding: 5px 10px;
+}
+QMenuBar::item:selected, QMenuBar::item:pressed {
+    background-color: palette(highlight);
+    color: palette(highlighted-text);
+}
+QMenu {
+    color: palette(text);
+    background-color: palette(alternate-base);
+    border: 1px solid palette(mid);
+    border-radius: 6px;
+    padding: 5px;
+}
+QMenu::item {
+    padding: 6px 30px 6px 30px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background-color: palette(highlight);
+    color: palette(highlighted-text);
+}
+QMenu::item:disabled {
+    color: palette(placeholder-text);
+}
+QMenu::separator {
+    height: 1px;
+    background: palette(mid);
+    margin: 5px 8px;
+}
+
+QScrollBar:vertical {
+    background: palette(window);
+    width: 12px;
+    margin: 2px;
+}
+QScrollBar:horizontal {
+    background: palette(window);
+    height: 12px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: palette(mid);
+    border-radius: 4px;
+    min-height: 24px;
+    min-width: 24px;
+}
+QScrollBar::handle:hover {
+    background: palette(placeholder-text);
+}
+QScrollBar::add-line, QScrollBar::sub-line {
+    width: 0;
+    height: 0;
+}
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: transparent;
+}
+QSlider::groove:horizontal {
+    height: 4px;
+    background: palette(mid);
+    border-radius: 2px;
+}
+QSlider::sub-page:horizontal {
+    background: palette(text);
+}
+QSlider::handle:horizontal {
+    background: palette(text);
+    width: 12px;
+    height: 12px;
+    margin: -4px 0;
+    border-radius: 6px;
+}
+QProgressBar {
+    color: palette(text);
+    background-color: palette(base);
+    border: 1px solid palette(mid);
+    border-radius: 5px;
+    text-align: center;
+    min-height: 16px;
+}
+QProgressBar::chunk {
+    background-color: palette(mid);
+    border-radius: 4px;
+}
+
+QStatusBar {
+    color: palette(window-text);
+    background-color: palette(window);
+    border-top: 1px solid palette(mid);
+}
+QStatusBar::item {
+    border: 0;
+}
+QStatusBar QLabel {
+    padding: 0 6px;
+}
+QStatusBar QPushButton {
+    background: transparent;
+    border: 0;
+    padding: 2px 6px;
+    min-height: 0;
+}
+QStatusBar QPushButton:hover {
+    background-color: palette(midlight);
+}
+QStatusBar QPushButton:checked {
+    color: palette(highlighted-text);
+    background-color: palette(highlight);
+}
+
+/* The library sidebar uses the same neutral surfaces as the game list. */
+QWidget#gameDetailsPanel {
+    background-color: palette(alternate-base);
+    border-left: 1px solid palette(mid);
+}
+QLabel#gameDetailsTitle {
+    font-size: 12pt;
+    font-weight: bold;
+}
+QLabel#gameDetailsStatus {
+    color: palette(placeholder-text);
+}
+QWidget#gameInputProfiles QGroupBox {
+    background: transparent;
+    border: 0;
+    margin: 0;
+    padding: 0;
+}
