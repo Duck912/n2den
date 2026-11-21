@@ -79,7 +79,7 @@ u32 FastCoreCount() {
 
 /// The split's second thread is busy whenever the game draws. With 4 or fewer fast cores (a
 /// laptop's 4 performance cores, a 4-core desktop) it competed with the game's own threads,
-/// and on an i5-12450H battles' sound crackled while the FPS held 30.
+/// and on a laptop with 4 performance cores battles' sound crackled while the FPS held 30.
 constexpr u32 MinFastCoresForSplit = 5;
 
 /// EDEN_GPU_SPLIT: '0' off, '1' engine methods on the back, '2' macros on the front too. Unset:
