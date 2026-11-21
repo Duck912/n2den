@@ -1024,8 +1024,22 @@ void DrawContext::ResolveIndirectSource(BufferRef& ref, u64 size) {
         // inside a live entry, or wherever the mirror holds the current bytes and no entry of
         // this command buffer overlaps the range.
         const u64 end = ref.pool_offset + size;
-        bool serve = FindShadow(*ref.pool, ref.pool_offset, end) != shadows.size();
-        if (!serve && impl.MirrorCurrent(*ref.pool, ref.pool_offset, size)) {
+        // A live entry is read from its own buffer: a copy shadow (a written range the pool's
+        // mirror refused, e.g. pools over the storage-mirror size) lives in a device chunk, not in
+        // the mirror, whose bytes there are stale. Fast Fusion draws its particles indirectly with
+        // counts a compute shader adds up atomically in such a shadow; reading them from the
+        // read-only mirror gave garbage counts and draws that ran until the device was lost.
+        if (const size_t found = FindShadow(*ref.pool, ref.pool_offset, end); found != shadows.size()) {
+            const Shadow& entry = shadows[found];
+            ref.buffer = entry.buffer;
+            ref.offset = entry.offset + (ref.pool_offset - entry.begin);
+            if (entry.mirror) {
+                impl.stats.vram_bindings.fetch_add(1, std::memory_order_relaxed);
+            }
+            return;
+        }
+        bool serve = false;
+        if (impl.MirrorCurrent(*ref.pool, ref.pool_offset, size)) {
             serve = std::ranges::none_of(shadows, [&](const Shadow& entry) {
                 return entry.pool == ref.pool &&
                        Overlaps(ref.pool_offset, end, entry.begin, entry.end);
