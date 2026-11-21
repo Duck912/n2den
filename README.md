@@ -28,6 +28,10 @@ n2den, which emulates the rest of the console. Nothing is turned into a standalo
 Switch 2 games come first in n2den, and design decisions are made for them. The Switch 1 support inherited
 from Eden is kept for decrypted dumps, but it is not where the work goes.
 
+For now, only Windows is supported. Linux is planned and will come once Windows version is stable.
+
+Contributions and testing is encouraged. 
+
 ## Games
 
 n2den runs decrypted dumps of games you own. It contains no decryption code and does not use console keys.
