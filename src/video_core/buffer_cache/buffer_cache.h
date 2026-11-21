@@ -2797,6 +2797,20 @@ Binding BufferCache<P>::StorageBufferBindingUncached(GPUVAddr gpu_addr, u64 foll
     if (table_pointer && !is_written) {
         size = static_cast<u32>((std::min)(mapped_size, u64{64_MiB}));
     }
+    // A native (CUDA/Ampere) kernel's bare pointer reaches as far as the tensor it addresses: Fast
+    // Fusion's DLSS network output in Ultra Quality is 480x288 pixels of 80 bytes (11 MB), and with
+    // the 8 MiB guess its bottom 24% fell outside the binding for writer and reader alike (ghosting
+    // on the player car). Bound native pointers to the end of their mapping up to 32 MiB; the
+    // device-contiguous clamp below still keeps them inside one memory pool.
+    // EDEN_N2DEN_NATIVE_SSBO_MIB overrides the limit (8 restores the old guess).
+    if (native_pointer && !table_pointer) {
+        static const u64 native_limit = [] {
+            const char* value = std::getenv("EDEN_N2DEN_NATIVE_SSBO_MIB");
+            const u64 mib = value ? std::strtoull(value, nullptr, 0) : 0;
+            return (mib != 0 ? mib : 32) * 1_MiB;
+        }();
+        size = static_cast<u32>((std::min)(mapped_size, native_limit));
+    }
     if ((native_pointer || table_pointer) && size) {
         // A bare pointer's size is a guess (up to 8 MiB of mapped GPU VA). NVN buffers live in one
         // memory pool, which is one device-contiguous allocation, so the guess must not run into
