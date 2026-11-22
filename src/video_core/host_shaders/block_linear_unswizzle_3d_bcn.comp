@@ -159,11 +159,19 @@ void main() {
     uint block_index = block_coord.x +
                        (block_coord.y * pc.blocks_dim.x) +
                        (block_coord.z * pc.blocks_dim.x * pc.blocks_dim.y);
-    uint out_idx = block_index * (bytes_per_block >> 2u);
+    // Each invocation stores only its own element's bytes. 1- and 2-byte elements cannot be stored
+    // through a 32-bit view without racing with their neighbours: callers do not dispatch them.
+    const uint bpl2 = pc.bytes_per_block_log2;
+    if (bpl2 < 2u) {
+        return;
+    }
+    uint out_idx = block_index << (bpl2 - 2u);
 
-    out_u32[out_idx]     = texel.x;
-    out_u32[out_idx + 1u] = texel.y;
-    if (pc.bytes_per_block_log2 == 4u) {
+    out_u32[out_idx] = texel.x;
+    if (bpl2 >= 3u) {
+        out_u32[out_idx + 1u] = texel.y;
+    }
+    if (bpl2 == 4u) {
         out_u32[out_idx + 2u] = texel.z;
         out_u32[out_idx + 3u] = texel.w;
     }

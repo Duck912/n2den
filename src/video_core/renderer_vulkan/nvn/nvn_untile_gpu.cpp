@@ -96,6 +96,9 @@ bool UntileGpu::Fits(const Piece& piece) {
     // Group counts within the minimum maxComputeWorkGroupCount every device has.
     constexpr u32 MAX_GROUPS = 65535;
     const Params params = MakeParams(piece);
+    if (!ElementsFit(params)) {
+        return false;
+    }
     return (params.elements_x + GROUP_X - 1) / GROUP_X <= MAX_GROUPS &&
            (params.elements_y + GROUP_Y - 1) / GROUP_Y <= MAX_GROUPS &&
            (params.elements_z + GROUP_Z - 1) / GROUP_Z <= MAX_GROUPS;

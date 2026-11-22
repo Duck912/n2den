@@ -59,6 +59,12 @@ public:
     /// The shader addresses bytes with 32-bit integers: false when the piece is too big for that
     /// (or empty).
     [[nodiscard]] static bool Fits(const Piece& piece);
+    /// Whether the shader can store the piece's elements: 4, 8 or 16 bytes. A row whose byte count
+    /// is odd or 2 mod 4 (an R8 or RG8 row of odd width, say) has smaller elements, which a 32-bit
+    /// store cannot write without clobbering a neighbour's bytes; those pieces untile on the CPU.
+    [[nodiscard]] static bool ElementsFit(const Params& params) {
+        return params.element_log2 >= 2;
+    }
     [[nodiscard]] static Params MakeParams(const Piece& piece);
 
     explicit UntileGpu(const Device& device);

@@ -3545,6 +3545,13 @@ bool Recorder::UploadUntileOnGpu(Storage& s, const UploadPlan& plan, Pool& pool,
             .tile_depth = piece.tile_d,
         };
         const u64 needed = UntileGpu::InputSize(gpu);
+        if (!UntileGpu::ElementsFit(UntileGpu::MakeParams(gpu))) {
+            LogOnce(fmt::format("GPU untile: a {}x{}x{} level of format {:#x} has rows of {} bytes, "
+                                "too narrow an element for the shader, untiled on the CPU",
+                                piece.width, piece.height, piece.depth, s.desc.format,
+                                u64{gpu.columns} * gpu.bytes_per_block));
+            return false;
+        }
         if (!UntileGpu::Fits(gpu) || needed > untile->MaxRange() ||
             UntileGpu::OutputSize(gpu) > untile->MaxRange()) {
             LogOnce(fmt::format("GPU untile: a {}x{}x{} level of format {:#x} is beyond the "
