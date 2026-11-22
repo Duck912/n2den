@@ -148,6 +148,7 @@ public:
         : ServiceFramework{system, "ISyncpointSupervisor"}, m_module{std::move(module)},
           m_context{system, "SyncpointSupervisor"} {
         static const FunctionInfo functions[] = {
+            {0, &ISyncpointSupervisor::Echo, "Echo"},
             {1, &ISyncpointSupervisor::GetMaximumEventCount, "GetMaximumEventCount"},
             {21, &ISyncpointSupervisor::SetEventCount, "SetEventCount"},
             {22, &ISyncpointSupervisor::GetEvent, "GetEvent"},
@@ -187,6 +188,21 @@ private:
         rb.Push(result.raw);
         rb.Push(MaximumEventCount);
         LOG_DEBUG(Service_AM, "syncpoint maximum events={}", MaximumEventCount);
+    }
+
+    // Older SDKs (Generic_19_3_7, nn::syncpt::sdk::Initialize) send one 64-bit value right after
+    // opening the session and abort unless the reply returns the same value.
+    void Echo(HLERequestContext& ctx) {
+        const auto* packet = ctx.CommandBuffer();
+        const bool valid = packet[0] == 0x10 && packet[1] == 2;
+        // The reply is built in the same buffer: copy the value before the result overwrites it.
+        const u32 low = valid ? packet[2] : 0u;
+        const u32 high = valid ? packet[3] : 0u;
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push((valid ? ResultSuccess : Kernel::ResultInvalidCombination).raw);
+        rb.Push(low);
+        rb.Push(high);
+        LOG_DEBUG(Service_AM, "syncpoint echo valid={}", valid);
     }
 
     void SetEventCount(HLERequestContext& ctx) {
@@ -1924,7 +1940,18 @@ IGraphicsSupervisor::~IGraphicsSupervisor() {
 Result IGraphicsSupervisor::HandleSyncRequest(Kernel::KServerSession& session,
                                                HLERequestContext& ctx) {
     if (!ctx.IsTipc() || handlers_tipc.contains(ctx.GetCommand())) {
-        return ServiceFrameworkBase::HandleSyncRequest(session, ctx);
+        const u32 command = ctx.GetCommand();
+        const Result handled = ServiceFrameworkBase::HandleSyncRequest(session, ctx);
+        // EDEN_NX2_GSV_TRACE=1 logs every TIPC command and its reply result (finds the call a
+        // game aborts on when the handler logs nothing).
+        static const bool trace = [] {
+            const char* value = std::getenv("EDEN_NX2_GSV_TRACE");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (trace && ctx.IsTipc()) {
+            LOG_INFO(Service_AM, "[gsv-trace] command {} -> {:#x}", command, ctx.CommandBuffer()[2]);
+        }
+        return handled;
     }
     const auto guard = LockService();
     InvokeRequestTipc(ctx);
@@ -1950,6 +1977,7 @@ void IGraphicsSupervisor::Initialize(HLERequestContext& ctx) {
             result = Kernel::ResultNotImplemented;
         } else {
             m_phase = Phase::Initialized;
+            m_legacy_bootstrap = request->flags == 0x8000000000000001ULL;
             m_native_gpu_profile =
                 GraphicsSupervisorProtocol::NativeGpuProfileForBootstrap(request->flags);
             // Welcome Tour bootstraps with flags 5 but only embeds an sm_88 CUDA image; the driver's
@@ -2280,11 +2308,12 @@ void IGraphicsSupervisor::OpenGpuSession(HLERequestContext& ctx) {
     Result result = Kernel::ResultInvalidCombination;
     Kernel::KClientSession* client{};
     const u64 flags = u64{packet[2]} | (u64{packet[3]} << 32);
-    if (packet[0] == 0x201 && packet[1] == 2 && flags == 4) {
+    // Version 3 comes from older SDKs (Generic_19_3_7, Kirby and the Forgotten Land).
+    if (packet[0] == 0x201 && packet[1] == 2 && (flags == 3 || flags == 4)) {
         if (m_phase != Phase::Ready || !m_nv_module) {
             result = Kernel::ResultInvalidState;
         } else {
-            auto handler = std::make_shared<IGpuSession>(system, m_nv_module, m_process);
+            auto handler = std::make_shared<IGpuSession>(system, m_nv_module, m_process, flags);
             result = CreateGraphicsSession(system, ctx, handler, &client);
             if (result.IsSuccess()) {
                 std::erase_if(m_gpu_sessions, [](const auto& item) { return item.expired(); });
@@ -2527,7 +2556,9 @@ void IGraphicsSupervisor::GetNvidiaDriver(HLERequestContext& ctx) {
         Fail(Kernel::ResultInvalidCombination);
         return;
     }
-    if (m_phase != Phase::Ready || !m_image_formats_initialized) {
+    if (m_phase != Phase::Ready || !ImageFormatsReady()) {
+        LOG_DEBUG(Service_AM, "NVDRV session refused: phase={}, image formats={}",
+                  static_cast<int>(m_phase), m_image_formats_initialized);
         Fail(Kernel::ResultInvalidState);
         return;
     }
@@ -2684,7 +2715,7 @@ void IGraphicsSupervisor::CalculateImageRequirements(HLERequestContext& ctx) {
     if (packet[0] == (gpu_image ? 0x1c3U : 0x5f6U) && packet[1] == 17 &&
         packet[3] == (gpu_image ? 1U : 2U)) {
         result = Kernel::ResultInvalidState;
-        if (m_phase == Phase::Ready && m_image_formats_initialized) {
+        if (m_phase == Phase::Ready && ImageFormatsReady()) {
             // gsv1 0x4cf44 (435) and 0x909a0 (1510): one image's block storage times the count in
             // word 18 (a valid layout with count 0 is gsv result 0x100f3); the format word does not
             // scale it and the alignment is 4096.
@@ -2718,7 +2749,7 @@ void IGraphicsSupervisor::CalculateRequiredBufferMemory(HLERequestContext& ctx) 
     u64 alignment = 0;
     if (packet[0] == 0x51b && packet[1] == 17) {
         result = Kernel::ResultInvalidState;
-        if (m_phase == Phase::Ready && m_image_formats_initialized) {
+        if (m_phase == Phase::Ready && ImageFormatsReady()) {
             result = Kernel::ResultNotImplemented;
             if (packet[2] == 0 && packet[3] == 1 && packet[5] == 0) {
                 const u64 width = (packet[4] & 0xfff0U) + 0x10U;
@@ -2758,7 +2789,7 @@ void IGraphicsSupervisor::CreateChatImagePool(HLERequestContext& ctx) {
     u32 pool_id{};
     if (packet[0] == 0x4cb && packet[1] == 18) {
         result = Kernel::ResultInvalidState;
-        if (m_phase == Phase::Ready && m_image_formats_initialized) {
+        if (m_phase == Phase::Ready && ImageFormatsReady()) {
             result = Kernel::ResultNotImplemented;
             if (packet[2] == 0 && packet[3] == 1 && packet[5] == 0) {
                 const u64 width = (packet[4] & 0xfff0U) + 0x10U;
@@ -2840,7 +2871,7 @@ void IGraphicsSupervisor::CreateNativeMemory(HLERequestContext& ctx) {
     // in this layer.
     if (packet[0] == 0x7f && packet[1] == 3 && (packet[2] & 0xff) <= 3) {
         result = Kernel::ResultInvalidState;
-        if (m_phase == Phase::Ready && m_image_formats_initialized && m_nv_module) {
+        if (m_phase == Phase::Ready && ImageFormatsReady() && m_nv_module) {
             result = Result{static_cast<ErrorModule>(0xf3), 0x80};
             if (size && size <= (1ULL << 48)) {
                 result = Kernel::ResultOutOfResource;
@@ -3010,7 +3041,7 @@ void IGraphicsSupervisor::CreateNativeImage(HLERequestContext& ctx) {
     u32 id{};
     if (packet[0] == 0x1bd && packet[1] == 18 && packet[3] == 1) {
         result = Kernel::ResultInvalidState;
-        if (m_phase == Phase::Ready && m_gpu_context_ready && m_image_formats_initialized && m_nv_module) {
+        if (m_phase == Phase::Ready && m_gpu_context_ready && ImageFormatsReady() && m_nv_module) {
             const auto requirements = CalculateNativeImageRequirements(std::span{packet + 2, 16}, packet[18]);
             result = Kernel::ResultNotImplemented;
             if (requirements) {

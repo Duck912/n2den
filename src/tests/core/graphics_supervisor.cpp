@@ -66,7 +66,8 @@ TEST_CASE("Graphics supervisor decodes the captured TIPC bootstrap", "[graphics-
 
 TEST_CASE("Graphics supervisor local bootstrap excludes remote memory requests", "[graphics-supervisor]") {
     using namespace Service::AM::GraphicsSupervisorProtocol;
-    for (u64 flags : {0x8000000000000005ULL, 0x8000000000000006ULL, 0x8000000000000007ULL}) {
+    for (u64 flags : {0x8000000000000001ULL, 0x8000000000000005ULL, 0x8000000000000006ULL,
+                      0x8000000000000007ULL}) {
         BootstrapRequest request{0xffff8001, 0x51, flags, {}};
         REQUIRE(IsLocalBootstrap(request));
         for (size_t parameter = 0; parameter < request.parameters.size(); ++parameter) {
@@ -75,13 +76,14 @@ TEST_CASE("Graphics supervisor local bootstrap excludes remote memory requests",
             REQUIRE_FALSE(IsLocalBootstrap(remote));
         }
     }
-    for (u64 flags : {0ULL, 5ULL, 6ULL, 7ULL, 0x8000000000000001ULL, 0x8000000000000004ULL, 0x800000000000000fULL}) {
+    for (u64 flags : {0ULL, 1ULL, 5ULL, 6ULL, 7ULL, 0x8000000000000002ULL, 0x8000000000000004ULL, 0x800000000000000fULL}) {
         REQUIRE_FALSE(IsLocalBootstrap(BootstrapRequest{0xffff8001, 0x51, flags, {}}));
     }
 }
 
 TEST_CASE("Graphics supervisor accepts the supported display interface versions", "[graphics-supervisor]") {
     using Service::AM::GraphicsSupervisorProtocol::IsSupportedDisplaySession;
+    REQUIRE(IsSupportedDisplaySession(0x300010000ULL));
     REQUIRE(IsSupportedDisplaySession(0x300020000ULL));
     REQUIRE(IsSupportedDisplaySession(0x300030000ULL));
     REQUIRE(IsSupportedDisplaySession(0x300040000ULL));

@@ -119,6 +119,15 @@ private:
     bool m_frame_context_ready{};
     bool m_image_context_initialized{};
     bool m_image_formats_initialized{};
+    /// Image formats usable: 1501/1502 done, or the older-SDK bootstrap (flags 0x8000000000000001,
+    /// Kirby and the Forgotten Land S2) whose SDK has no image-context step and goes straight to
+    /// native memory/image pools.
+    [[nodiscard]] bool ImageFormatsReady() const {
+        return m_image_formats_initialized || m_legacy_bootstrap;
+    }
+    // Bootstrap flags 1 (older SDKs): the process-bound NVDRV session (1402) is opened right after
+    // CompleteBootstrap, before any image-context command.
+    bool m_legacy_bootstrap{};
 };
 
 } // namespace Service::AM

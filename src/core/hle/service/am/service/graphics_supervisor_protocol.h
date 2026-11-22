@@ -224,7 +224,8 @@ constexpr std::optional<EventSupervisorBind> DecodeEventSupervisorBind(std::span
 }
 
 constexpr bool IsSupportedDisplaySession(u64 flags) {
-    return flags == 0x300020000ULL || flags == 0x300030000ULL ||
+    // 0x300010000 comes from older SDKs (Generic_19_3_7, Kirby and the Forgotten Land).
+    return flags == 0x300010000ULL || flags == 0x300020000ULL || flags == 0x300030000ULL ||
            flags == 0x300040000ULL;
 }
 
@@ -237,8 +238,10 @@ constexpr u32 NativeGpuProfileForBootstrap(u64 flags) {
     }
 }
 
+// Flags 1 comes from older SDKs (Generic_19_3_7, Kirby and the Forgotten Land Switch 2 Edition);
+// it asks for no native GPU profile, so NativeGpuProfileForBootstrap leaves it at 0.
 inline bool IsLocalBootstrap(const BootstrapRequest& request) {
-    return (request.flags == 0x8000000000000005ULL ||
+    return (request.flags == 0x8000000000000001ULL || request.flags == 0x8000000000000005ULL ||
             request.flags == 0x8000000000000006ULL || request.flags == 0x8000000000000007ULL) &&
            std::ranges::all_of(request.parameters, [](u64 value) { return value == 0; });
 }
