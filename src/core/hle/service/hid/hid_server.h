@@ -270,6 +270,10 @@ private:
                                                  s32 unknown, ClientAppletResourceUserId aruid);
     Result SetTouchScreenResolution(u32 width, u32 height, ClientAppletResourceUserId aruid);
     Result SetMouseLibraryVersion(ClientAppletResourceUserId aruid);
+    /// 320/321/323 (21.0.0+): Npad IMU switches. Success with zeroed output words, like Eglantine's
+    /// StubReplyZeroed; the auto stub returned no output at all.
+    Result NpadImuStub(Out<u64> out_zero0, Out<u64> out_zero1, u32 value,
+                       ClientAppletResourceUserId aruid);
 
     Result RegisterNativeInputMemory(u8 mode, u32 parameter0, u32 parameter1, u32 parameter2,
                                      ClientAppletResourceUserId aruid, u64 size,

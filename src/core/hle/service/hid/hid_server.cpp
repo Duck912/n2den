@@ -149,8 +149,9 @@ IHidServer::IHidServer(Core::System& system_, std::shared_ptr<ResourceManager> r
         {308, nullptr, "SetSevenSixAxisSensorFusionStrength"},
         {309, nullptr, "GetSevenSixAxisSensorFusionStrength"},
         {310, C<&IHidServer::ResetSevenSixAxisSensorTimestamp>, "ResetSevenSixAxisSensorTimestamp"},
-        {320, nullptr, "EnableNpadImu"}, //21.0.0+
-        {321, nullptr, "DisableNpadImu"}, //21.0.0+
+        {320, C<&IHidServer::NpadImuStub>, "EnableNpadImu"}, //21.0.0+
+        {321, C<&IHidServer::NpadImuStub>, "DisableNpadImu"}, //21.0.0+
+        {323, C<&IHidServer::NpadImuStub>, "EnableNpadImuHandle"},
         {400, C<&IHidServer::IsUsbFullKeyControllerEnabled>, "IsUsbFullKeyControllerEnabled"},
         {401, nullptr, "EnableUsbFullKeyController"},
         {402, nullptr, "IsUsbFullKeyControllerConnected"},
@@ -1686,6 +1687,14 @@ Result IHidServer::SetNmouseButtonConfigJoyRightJcms(ClientAppletResourceUserId 
 Result IHidServer::SetMouseLibraryVersion(ClientAppletResourceUserId aruid) {
     LOG_INFO(Service_HID, "(STUBBED) called, applet_resource_user_id={}", aruid.pid);
 
+    R_SUCCEED();
+}
+
+Result IHidServer::NpadImuStub(Out<u64> out_zero0, Out<u64> out_zero1, u32 value,
+                               ClientAppletResourceUserId aruid) {
+    LOG_INFO(Service_HID, "(STUBBED) Npad IMU switch, value={:#x}, aruid={}", value, aruid.pid);
+    *out_zero0 = 0;
+    *out_zero1 = 0;
     R_SUCCEED();
 }
 
