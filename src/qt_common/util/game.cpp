@@ -13,7 +13,10 @@
 #include "qt_common/qt_common.h"
 
 #include <QDesktopServices>
+#include <QDir>
+#include <QFileInfo>
 #include <QStandardPaths>
+#include <QStringList>
 #include <QUrl>
 
 #ifdef _WIN32
@@ -26,7 +29,6 @@
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/loader/loader.h"
-#include <QFileInfo>
 #else
 #include <fstream>
 #include "fmt/ostream.h"
@@ -663,10 +665,40 @@ std::string ResolveGameTitle(Core::System& core_system, Loader::AppLoader* loade
     if (!game_path.empty()) {
         const QFileInfo info{
             QString::fromUtf8(game_path.data(), static_cast<qsizetype>(game_path.size()))};
-        // An extracted game is its "main" file: name it after the folder.
-        const QString base = info.fileName() == QStringLiteral("main")
-                                 ? QFileInfo{info.absolutePath()}.fileName()
-                                 : info.completeBaseName();
+        // An extracted game is its "main" file: name it after the first folder above it that
+        // is not part of the dump layout (Game/base/exefs/main, Game/updates/65536/exefs/main).
+        const auto is_layout_folder = [](const QString& folder) {
+            static const QStringList layout{
+                QStringLiteral("exefs"),  QStringLiteral("romfs"),   QStringLiteral("base"),
+                QStringLiteral("update"), QStringLiteral("updates"), QStringLiteral("patch"),
+                QStringLiteral("dlc")};
+            bool numeric = false;
+            folder.toULongLong(&numeric);
+            return numeric || layout.contains(folder, Qt::CaseInsensitive);
+        };
+        QString base;
+        if (info.fileName() == QStringLiteral("main")) {
+            QDir dir = info.absoluteDir();
+            QString fallback = dir.dirName();
+            for (int level = 0; level < 4; ++level) {
+                const QString folder = dir.dirName();
+                if (folder.trimmed().isEmpty()) {
+                    break;
+                }
+                if (!is_layout_folder(folder)) {
+                    base = folder;
+                    break;
+                }
+                if (!dir.cdUp()) {
+                    break;
+                }
+            }
+            if (base.isEmpty()) {
+                base = fallback;
+            }
+        } else {
+            base = info.completeBaseName();
+        }
         if (!base.trimmed().isEmpty()) {
             return base.toStdString();
         }
