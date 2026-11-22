@@ -22,6 +22,7 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/fefw_ultrawide.h"
+#include "core/file_sys/oot_builtin_mods.h"
 #include "core/file_sys/nvn_dlss_scale.h"
 #include "core/file_sys/ips_layer.h"
 #include "core/file_sys/patch_manager.h"
@@ -437,6 +438,29 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             LOG_ERROR(Loader, "    - The built-in ultrawide patch could not be applied");
         }
     }
+    // Ocarina of Time's built-in patches (oot_builtin_mods.h), before the mod folders too.
+    if (build_id == OotBuiltinMods::MainBuildId) {
+        const auto log_outcome = [](std::string_view name, OotBuiltinMods::Outcome outcome) {
+            switch (outcome) {
+            case OotBuiltinMods::Outcome::Applied:
+                LOG_INFO(Loader, "    - Applying the built-in {} patch", name);
+                break;
+            case OotBuiltinMods::Outcome::AlreadyApplied:
+                LOG_INFO(Loader, "    - The built-in {} patch is already in the code", name);
+                break;
+            case OotBuiltinMods::Outcome::Mismatch:
+                LOG_ERROR(Loader, "    - The built-in {} patch was not applied: unexpected code",
+                          name);
+                break;
+            }
+        };
+        if (Settings::values.oot_dynamic_fps.GetValue()) {
+            log_outcome("Dynamic FPS", OotBuiltinMods::ApplyDynamicFps(out));
+        }
+        if (Settings::values.oot_max_resolution.GetValue()) {
+            log_outcome("Max Resolution", OotBuiltinMods::ApplyMaxResolution(out));
+        }
+    }
     for (const auto& patch_file : patches) {
         if (patch_file->GetExtension() == "ips") {
             LOG_INFO(Loader, "    - Applying IPS patch from mod \"{}\"",
@@ -494,6 +518,11 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
     }
     if (Settings::NvnDlssSceneQuality() != Settings::NvnDlssQuality::Native &&
         NvnDlssScale::Supports(build_id)) {
+        return true;
+    }
+    if ((Settings::values.oot_dynamic_fps.GetValue() ||
+         Settings::values.oot_max_resolution.GetValue()) &&
+        build_id == OotBuiltinMods::MainBuildId) {
         return true;
     }
 

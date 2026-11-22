@@ -212,6 +212,15 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "the HUD, menus and movies centred at 16:9, and stretches the picture to the window. "
               "For 21:9 monitors only; play fullscreen.\nOnly for game version 1.1.0. Takes effect "
               "when the game starts."));
+    INSERT(Settings, oot_dynamic_fps, tr("Dynamic FPS for Ocarina of Time"),
+           tr("Below 60 fps the game keeps its normal speed instead of running in slow motion: "
+              "it steps by the real frame time (down to 20 fps). At 60 fps nothing changes.\nOnly "
+              "for the Ocarina of Time (Switch 2) release it was made for. Takes effect at game start."));
+    INSERT(Settings, oot_max_resolution, tr("Max resolution for Ocarina of Time"),
+           tr("Turns the game's dynamic resolution off, so the 3D scene renders at the full output "
+              "size (2560x1440 docked) instead of as low as 854x480. Keep the resolution at 1x "
+              "with this on.\nOnly for the Ocarina of Time (Switch 2) release it was made for. "
+              "Takes effect at game start."));
     INSERT(Settings, hdr_output, tr("HDR output (HDR10)"),
            tr("Shows the game in HDR on an HDR display. Turn on HDR in Windows first (Settings > "
               "Display > Use HDR).\nFire Emblem: Fortune's Weave then makes its own HDR picture: "

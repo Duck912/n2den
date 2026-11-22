@@ -68,6 +68,7 @@ add_library(core STATIC
     file_sys/fssystem/fs_i_storage.h
     file_sys/fssystem/fs_types.h
     file_sys/fefw_ultrawide.h
+    file_sys/oot_builtin_mods.h
     file_sys/fssystem/fssystem_alignment_matching_storage.h
     file_sys/fssystem/fssystem_alignment_matching_storage_impl.cpp
     file_sys/fssystem/fssystem_alignment_matching_storage_impl.h

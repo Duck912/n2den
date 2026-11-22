@@ -509,6 +509,12 @@ struct Values {
     // Kompas9's 3440x1440 ultrawide patch for Fortune's Weave 1.1.0 (file_sys/fefw_ultrawide.h),
     // built in; when on, the picture is also stretched to the window. Takes effect at game start.
     SwitchableSetting<bool> fefw_ultrawide{linkage, false, "fefw_ultrawide", Category::Renderer};
+    // Built-in patches for Ocarina of Time (Switch 2), one game build (file_sys/oot_builtin_mods.h):
+    // game speed follows the real frame time below 60 fps, and the 3D scene at full resolution
+    // instead of dynamic resolution. Take effect at game start; any other game is left alone.
+    SwitchableSetting<bool> oot_dynamic_fps{linkage, true, "oot_dynamic_fps", Category::Renderer};
+    SwitchableSetting<bool> oot_max_resolution{linkage, true, "oot_max_resolution",
+                                               Category::Renderer};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
