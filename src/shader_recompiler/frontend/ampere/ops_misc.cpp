@@ -181,7 +181,8 @@ void Visitor::LDC() {
     Require(mode == 0 || mode == 2, "native indexed constant load mode");
     Require(Take(91, 1) == 0, "native bindless constant load");
     Require(width <= 6, "native constant load width");
-    Require(cbuf_index < 18, "native constant buffer index");
+    // Bank 24 like Cbuf() and ULDC (see there).
+    Require(cbuf_index < 18 || cbuf_index == 24, "native constant buffer index");
     IR::U32 binding{ir.Imm32(cbuf_index)};
     IR::U32 byte_offset{ir.IAdd(X(offset_reg), ir.Imm32(static_cast<u32>(offset)))};
     if (mode == 2) {
@@ -328,7 +329,10 @@ void Visitor::ULDC() {
     // (Ocarina of Time's foliage computes).
     const u32 element_bytes{width < 2 ? 1U : width < 4 ? 2U : 4U};
     // Indexed loads only need the sum aligned (ULDC UR7, c[0x4][UR15+0x29]): not checked here.
-    Require(cbuf_index < 18 && (indexed || offset % element_bytes == 0),
+    // Bank 24 is read like the others, as Cbuf() does for operands (the 3D engine keeps 32 banks;
+    // Fortune's Weave binds a matrix there). Nintendo Switch Sports' fullscreen vertex shaders load it
+    // with ULDC.64 c[0x18][0x58] (2bb4d3c4f6b9087a, 480ed630913cf9f6), rejected before.
+    Require((cbuf_index < 18 || cbuf_index == 24) && (indexed || offset % element_bytes == 0),
             "native uniform constant buffer address");
     const IR::U32 binding{ir.Imm32(cbuf_index)};
     const IR::U32 byte_offset{indexed ? IR::U32{ir.IAdd(UR(index_reg), ir.Imm32(offset))} : ir.Imm32(offset)};
