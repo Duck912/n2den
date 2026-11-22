@@ -59,6 +59,9 @@ Test scene: the opening sequence, which plays without input.
   There is no pipeline list for this game yet, so several hundred graphics pipelines still compile during
   the first run of the sequence, with visible pop-in while they do.
 - **Upscaling:** the game uses its own upscaling network.
+- **Fixed:** blocky splotches on the map on NVN-HLE. The ambient-occlusion pass writes through a storage image
+  whose handle sits in the NVN handle bank (c2); the shader translator lost that handle and dropped every
+  store, so a later pass read leftover memory.
 
 Known issues:
 

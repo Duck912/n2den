@@ -1005,6 +1005,27 @@ TextureInst MakeInst(Environment& env, IR::Program& program, IR::Block* block, I
             return TextureInst{addr, &inst, block};
         }
         {
+            // A handle that is one constant-buffer word at a fixed place is that word: a descriptor
+            // in a bank other than the program's bound one (Fortune's Weave's AO depth pass samples
+            // through c5 and stores to the image slot c2[0x120] of the NVN handle bank). The
+            // descriptor layout classifies (bank, offset) itself; as a handle program it was lost:
+            // the per-draw evaluator reads only uniform-buffer banks (c2 gave 0) and image
+            // descriptors did not carry the program, so the image became c0[0x0] and every store
+            // of the pass was dropped (blocky AO splotches over the map on NVN-HLE).
+            const IR::Value handle{inst.Arg(0).Resolve()};
+            if (!handle.IsImmediate()) {
+                const IR::Inst* const read{handle.InstRecursive()};
+                if (read->GetOpcode() == IR::Opcode::GetCbufU32 && read->Arg(0).IsImmediate() &&
+                    read->Arg(1).IsImmediate()) {
+                    addr = ConstBufferAddr{};
+                    addr.index = read->Arg(0).U32();
+                    addr.offset = read->Arg(1).U32();
+                    addr.count = 1;
+                    return TextureInst{addr, &inst, block};
+                }
+            }
+        }
+        {
             // A handle read from a storage buffer: build a small program over constant and
             // storage words, evaluated again for each draw (see shader_handle_program.h).
             std::vector<u32> code;
@@ -1443,6 +1464,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .cbuf_offset = cbuf.offset,
                     .count = count,
                     .size_shift = size_shift,
+                    .handle_program = cbuf.handle_program,
                 });
             } else {
                 index = descriptors.Add(ImageDescriptor{
@@ -1455,6 +1477,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .cbuf_offset = cbuf.offset,
                     .count = count,
                     .size_shift = size_shift,
+                    .handle_program = cbuf.handle_program,
                 });
             }
             break;
@@ -1471,6 +1494,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .secondary_shift_left = cbuf.secondary_shift_left,
                     .count = count,
                     .size_shift = size_shift,
+                    .handle_program = cbuf.handle_program,
                 });
             } else {
                 if (!cbuf.buffer_source.enabled) count = std::min(count, sampled_dynamic_cap);
