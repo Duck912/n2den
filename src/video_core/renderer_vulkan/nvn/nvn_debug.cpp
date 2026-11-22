@@ -419,6 +419,16 @@ void TimelineEvent(const char* event, u64 seq, std::string_view detail) {
 
 bool FrameSelected(u64 present_index) {
     const Config& config = Get();
+    // EDEN_NX2_NVN_TRACE_ON_REQUEST=1: the environment's traces (EDEN_NX2_NVN_OPLOG, ...) cover only
+    // the frame of an `nvn-frame` diag request, taken when the request file appears.
+    static const bool on_request = [] {
+        const char* v = std::getenv("EDEN_NX2_NVN_TRACE_ON_REQUEST");
+        return v != nullptr && *v != '\0' && v[0] != '0';
+    }();
+    if (on_request) {
+        const RequestState* request = RequestFor(present_index);
+        return request != nullptr && request->all_passes;
+    }
     if (config.dump_frames.empty()) {
         return present_index % 120 == 1;
     }
@@ -455,6 +465,16 @@ void RequestDump(u32 pass, u32 draw, std::filesystem::path directory) {
     if (draw != 0) {
         requests.pending.draw = draw;
     }
+    requests.pending.directory = std::move(directory);
+    requests.armed = true;
+    u32 idle = 0;
+    g_request_phase.compare_exchange_strong(idle, 1u, std::memory_order_relaxed);
+}
+
+void RequestFrameDump(std::filesystem::path directory) {
+    Requests& requests = GetRequests();
+    std::scoped_lock lock{requests.mutex};
+    requests.pending.all_passes = true;
     requests.pending.directory = std::move(directory);
     requests.armed = true;
     u32 idle = 0;

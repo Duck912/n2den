@@ -336,6 +336,7 @@ struct RequestState {
     u64 frame{};     ///< 1-based present number of the frame the request applies to
     u32 pass{};      ///< 0: none
     u32 draw{};      ///< 0: none
+    bool all_passes{}; ///< nvn-frame: the targets of every pass, plus the frame's draw log
     std::filesystem::path directory;
 };
 
@@ -351,6 +352,8 @@ extern std::atomic<u32> g_request_phase;
 /// Arms a request (any thread). `pass` / `draw` of 0 leave that part as it is; requests armed
 /// before the replay binds them merge into one.
 void RequestDump(u32 pass, u32 draw, std::filesystem::path directory);
+/// One-shot dump of every pass's targets of the next frame, with that frame's draw log.
+void RequestFrameDump(std::filesystem::path directory);
 
 /// Replay thread, once per present, after the present counter was incremented to `present_index`:
 /// binds an armed request to the frame that starts now and retires a bound request whose frame has

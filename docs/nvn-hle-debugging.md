@@ -50,6 +50,13 @@ memory (`ResolveIndirectSource`).
 - `EDEN_NX2_NVN_DRAWLOG=<n>` logs up to `n` draws of the frame chosen by `EDEN_NX2_NVN_DUMP_FRAME`, with their
   programs, targets, blend state and bindings (`draw+` lines list uniform, storage and texture bindings).
 - Compare a good and a bad frame pass by pass (mean brightness per target is enough to see where they part).
+- **At the moment the bug shows, without a frame number:** write `nvn-frame` into `nx2-request.txt` in the user
+  folder (`%APPDATA%\eden`, e.g. `echo nvn-frame> "%APPDATA%\eden\nx2-request.txt"`). The next frame's targets
+  of every pass go to `diag\<time>\` in the same file names as above, and its draws to the log. With
+  `EDEN_NX2_NVN_OPLOG=1 EDEN_NX2_NVN_TRACE_ON_REQUEST=1` at launch the op/dispatch log covers that frame only.
+- **A pass that reads a texture nothing rendered into this frame:** look for passes with no target
+  (`fb=32768x32768`, empty `tg=`) just before it. They write through storage images; a `fallbacks=[...]` entry
+  with `word=0x0` on such a draw means the image handle did not resolve and every store was dropped.
 
 ### If the shader and its state match but the output differs
 
@@ -78,6 +85,10 @@ spread in square blocks: NaN shows as black, Inf as white.
    the first NaN producer, the shaders are fine and an input they share is bad. Compare their texture bindings.
 3. Grep the log for dropped operations: `unsupported ClearTexture`, `ClearTexture dropped`. A texture the game
    clears but HLE didn't keeps whatever bytes the memory held, which can decode as NaN.
+4. Not every splotch is NaN. `scan_nan.py` reads every 4-byte target as R11G11B10, so RGBA8 targets show false
+   NaN counts: look at the images. Fire Emblem's map splotches were an AO depth pass whose storage image handle
+   (`c2[0x120]`, in a bank other than the program's bound one) translated to `c0[0x0]`: its stores were dropped
+   and the AO passes read leftover memory, which darkened the terrain in blocks.
 
 Worked example (Fast Fusion, black race): the game clears 3D fog volumes one Z slice at a time. NVN-HLE rejected
 slice views of 3D textures, so the clears were dropped, the volumes kept stale bytes, and the lighting wrote NaN
@@ -115,6 +126,9 @@ Each fix has a switch to turn it off for A/B tests.
 | `EDEN_NX2_NVN_DUMP_DRAW_VS=<hash>` | Dumps the CPU view of uniform and vertex buffers of every draw with this vertex program in the dump frame. |
 | `EDEN_NX2_NVN_DRAWLOG=<n>` | Logs up to `n` draws of the selected frame (`EDEN_NX2_NVN_DUMP_FRAME`) with state and bindings. |
 | `EDEN_NX2_NVN_FEEDBACK_NO_PRUNE=1` | Redoes every feedback copy. |
+| `nvn-frame` in `nx2-request.txt` | Dumps every pass of the next frame and logs its draws (no frame number needed). |
+| `EDEN_NX2_NVN_TRACE_ON_REQUEST=1` | Environment traces (`EDEN_NX2_NVN_OPLOG`, ...) cover only the frame of an `nvn-frame` request. |
+| `EDEN_NX2_NVN_TARGET_FIRST_INIT=0` | Leaves a render target's new image undefined at its first use (old behaviour). |
 
 The in-game DLSS (`nvnDlss*`) path also logs each distinct `nvnDlssNetworkBuilderGetOptimalSettings` question
 and answer (method, output size, optimal/max/min render size). Games usually ask once per mode change.

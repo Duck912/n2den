@@ -181,6 +181,13 @@ void RegisterDiagRequests() {
         LOG_INFO(Render_Vulkan, "[diag] nvn-draw: logging draw {} of the next frame (also to {}/nvn-draw-{}.txt)",
                  draw, request.Directory().string(), draw);
     });
+    // `nvn-frame`: the targets of every pass of the next frame (for tools/n2den/scan_nan.py) and its
+    // draw log, taken at whatever moment the request file appears (no frame number needed).
+    Common::DiagRequest::Register("nvn-frame", [](const Request& request) {
+        Debug::RequestFrameDump(request.Directory());
+        LOG_INFO(Render_Vulkan, "[diag] nvn-frame: dumping every pass of the next frame into {}",
+                 request.Directory().string());
+    });
 }
 
 } // Anonymous namespace

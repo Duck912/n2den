@@ -46,6 +46,11 @@ void DrawContext::DebugSync() {
         if (request->draw != 0) {
             dbg.report_draw = request->directory / fmt::format("nvn-draw-{}.txt", request->draw);
         }
+        if (request->all_passes) {
+            // nvn-frame: every pass's targets (dump_pass 0) and the frame's draws in the log.
+            dbg.dump_dir = request->directory.string();
+            dbg.draw_log = 1u << 20; // every draw of the frame
+        }
     }
     dbg.logged = 0;
     dbg.draw_index = 0;
