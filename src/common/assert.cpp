@@ -5,6 +5,7 @@
 
 #include "common/assert.h"
 #include "common/common_funcs.h"
+#include "common/fatal_assert_scope.h"
 #include "common/logging.h"
 #include "common/settings.h"
 
@@ -29,7 +30,22 @@ void AssertFailSoftImpl() {
 #endif
     }
 }
+namespace {
+thread_local int fatal_assert_throws = 0;
+} // namespace
+
+Common::ScopedFatalAssertThrows::ScopedFatalAssertThrows() {
+    ++fatal_assert_throws;
+}
+
+Common::ScopedFatalAssertThrows::~ScopedFatalAssertThrows() {
+    --fatal_assert_throws;
+}
+
 void AssertFatalImpl() {
+    if (fatal_assert_throws > 0) {
+        throw Common::FatalAssertError{};
+    }
     Common::Log::Stop();
     std::abort();
 }

@@ -20,6 +20,7 @@
 #include <fmt/format.h>
 
 #include "common/cityhash.h"
+#include "common/fatal_assert_scope.h"
 #include "common/logging.h"
 #include "common/thread.h"
 #include "core/arm/debug.h"
@@ -985,6 +986,7 @@ std::optional<std::size_t> GenerateJitCodeList(const JitCodeImage& image, std::s
     std::atomic<size_t> next_seed{0};
     std::atomic<size_t> scanned{0};
     std::atomic<size_t> not_cacheable{0};
+    std::atomic<size_t> aborted{0};
     std::atomic<size_t> running{thread_count};
     constexpr size_t chunk = 1024;
     constexpr u32 scan_fpcr = 0;  // block ends and successors do not depend on FPCR; 0 as in every measured run
@@ -1008,7 +1010,18 @@ std::optional<std::size_t> GenerateJitCodeList(const JitCodeImage& image, std::s
                     while (!stack.empty()) {
                         const u64 pc = stack.back();
                         stack.pop_back();
-                        const auto r = jit->ScanBlock(Descriptor(pc, scan_fpcr));
+                        std::optional<Dynarmic::A64::ScanResult> r;
+                        try {
+                            // Seeds include swept words that may be data: a translator abort on one skips
+                            // that block (translated normally if the game ever runs it), not the process.
+                            Common::ScopedFatalAssertThrows throws;
+                            r = jit->ScanBlock(Descriptor(pc, scan_fpcr));
+                        } catch (const Common::FatalAssertError&) {
+                            if (aborted.fetch_add(1, std::memory_order_relaxed) < 8) {
+                                LOG_WARNING(Core_ARM, "JIT code scan: translator abort in the block at {:#x}; "
+                                            "skipped", pc);
+                            }
+                        }
                         ++local_scanned;
                         if (!r) {
                             continue;
@@ -1039,6 +1052,9 @@ std::optional<std::size_t> GenerateJitCodeList(const JitCodeImage& image, std::s
     }
     for (auto& thread : threads) {
         thread.join();
+    }
+    if (const size_t n = aborted.load(); n != 0) {
+        LOG_WARNING(Core_ARM, "JIT code scan: {} blocks skipped after a translator abort", n);
     }
     const size_t seed_count = seeds.size();
     std::vector<u64>().swap(seeds);
