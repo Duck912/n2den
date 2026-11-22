@@ -106,6 +106,42 @@ inline bool CaptureMayWriteUniformRegister(const Instruction& instruction, u32 r
     return reg >= destination && reg - destination < count;
 }
 
+// True when `instruction` may change uniform state (a uniform register or predicate) or transfer control. Used
+// to accept an instruction between UISETP and USEL only when it can do neither; a false positive just leaves
+// a branch untracked.
+inline bool CaptureTouchesUniformStateOrBranches(const Instruction& instruction) {
+    const u32 opcode = instruction.Bits(0, 12);
+    const u32 datapath = opcode & 0x1ff;
+    if (opcode >= 0x940 && opcode <= 0x95f) // branches, calls, returns, exits, warp sync
+        return true;
+    if (Classify(opcode).uniform) // the uniform datapath writes uniform registers or predicates
+        return true;
+    if (opcode == 0x3c2 || opcode == 0x3c4 || opcode == 0x883 || opcode == 0x896) // R2UR, REDUX, UP2UR, UPRMT
+        return true;
+    // Eglantine's ranges for the same check (uniform datapath, R2UR/REDUX family).
+    return (datapath >= 0x080 && datapath <= 0x0bf) || (datapath >= 0x1c2 && datapath <= 0x1c4);
+}
+
+// True when a direct branch anywhere in `code` targets an instruction in (first, last]: control could then reach
+// `last` without passing through `first`. Targets are computed as ProgramCaptureState::Observe does.
+inline bool CaptureBranchLandsIn(std::span<const Instruction> code, u32 first, u32 last) {
+    for (u32 index = 0; index < code.size(); ++index) {
+        const auto& instruction = code[index];
+        const u32 opcode = instruction.Bits(0, 12);
+        if (opcode != 0x944 && opcode != 0x945 && opcode != 0x947)
+            continue;
+        const s64 relative = opcode == 0x945 ? static_cast<s32>(instruction.words[1])
+                                             : CaptureRelativeOffset48(instruction);
+        const s64 target = s64{index} * 16 + 16 + relative;
+        if (target % 16 != 0)
+            continue;
+        const s64 target_index = target / 16;
+        if (target_index > s64{first} && target_index <= s64{last})
+            return true;
+    }
+    return false;
+}
+
 // Recognises, for every self-relative computed branch, the selector sequence of its jump table: a value
 // clamped to [0, N] by an unsigned minimum with an immediate, scaled by 4, loaded from a constant bank and
 // branched on. Three spellings are known, each matched on its exact encoding (unguarded, no modifiers):
@@ -115,7 +151,8 @@ inline bool CaptureMayWriteUniformRegister(const Instruction& instruction, u32 r
 //   scale    SHF.L.U32 Rs, Rc, 0x2, RZ               USHF.L.U32 URs, URc, 0x2, URZ
 //         or IMAD[.SHL.U32] Rs, Rc, 0x4, RZ
 //   clamp    IMNMX.U32 Rc, Rx, N, PT                 UISETP.LT.U32.AND UPn, UPT, URx, N, UPT
-//                                                    USEL URc, URx, N, UPn (the next instruction)
+//                                                    USEL URc, URx, N, UPn (up to 8 instructions later,
+//                                                    none between touching uniform state or branching)
 //
 // The table has N + 1 entries starting at c[bank][offset]. Each step is the nearest earlier instruction of
 // that spelling writing the register. On the uniform side the nearest earlier writer of the register of any
@@ -179,13 +216,29 @@ inline std::vector<CaptureIndirectBranch> TrackCaptureIndirectBranches(std::span
             if (!select_index || *select_index == 0)
                 continue;
             const auto& select = code[*select_index];
-            const auto& compare = code[*select_index - 1];
             const u32 condition = select.Bits(87, 3);
             const u32 maximum = select.words[1];
             if (!unguarded(select, 0x887) || select.Bits(16, 8) != bounded_selector || select.Bits(24, 8) >= 63 ||
-                condition == 7 || maximum < 1 || maximum > 15 || select.words[2] != (0x08000000U | (condition << 23)) ||
-                compare.words[0] != (0x0000788cU | (select.Bits(24, 8) << 24)) || compare.words[1] != maximum ||
-                compare.words[2] != (0x0bf01070U | (condition << 17)))
+                condition == 7 || maximum < 1 || maximum > 15 || select.words[2] != (0x08000000U | (condition << 23)))
+                continue;
+            const auto is_compare = [&](const Instruction& instruction) {
+                return instruction.words[0] == (0x0000788cU | (select.Bits(24, 8) << 24)) &&
+                       instruction.words[1] == maximum && instruction.words[2] == (0x0bf01070U | (condition << 17));
+            };
+            // The UISETP may sit a few instructions before the USEL (Nintendo Switch Sports' jump tables, as
+            // Eglantine found): every instruction between must leave the uniform file and predicates alone and
+            // not branch, and no branch may land between the two, so UPn and URx still hold what was compared.
+            std::optional<u32> compare_index;
+            for (u32 back = 1; back <= 8 && back <= *select_index; ++back) {
+                const u32 candidate = *select_index - back;
+                if (is_compare(code[candidate])) {
+                    compare_index = candidate;
+                    break;
+                }
+                if (CaptureTouchesUniformStateOrBranches(code[candidate]))
+                    break;
+            }
+            if (!compare_index || CaptureBranchLandsIn(code, *compare_index, *select_index))
                 continue;
             result.push_back({.index = branch_index,
                               .cbuf_index = (load.words[1] >> 22) & 0x1f,

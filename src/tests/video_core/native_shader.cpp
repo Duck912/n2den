@@ -2682,6 +2682,43 @@ TEST_CASE("Native capture tracks uniform and multiply jump table selectors", "[n
     REQUIRE(untracked(multiply, 2, {{0x00027824, 0x00000004, 0x078e0001, 0}})); // non-zero addend
 }
 
+TEST_CASE("Native capture tracks a uniform jump table whose compare sits before the select", "[native-shader]") {
+    // Nintendo Switch Sports' fragment programs (8ce31bb9f74d67c4, 335f5c65e665bab2) schedule other work between
+    // the UISETP and the USEL of the clamp. The program of the BRXU test above with MOV R0 in that gap.
+    const std::vector<Native> gapped{
+        {{0x00047ab9, 0x00c01800, 0x00000800, 0}}, // ULDC UR4, c[0x3][0x60]
+        {{0x0400788c, 0x00000001, 0x0bf01070, 0}}, // UISETP.LT.U32.AND UP0, UPT, UR4, 0x1, UPT
+        {{0x00007802, 0x3f800000, 0x00000f00, 0}}, // MOV R0, 1.0: no uniform state, no branch
+        {{0x04047887, 0x00000001, 0x08000000, 0}}, // USEL UR4, UR4, 0x1, UP0
+        {{0x04047899, 0x00000002, 0x0800063f, 0}}, // USHF.L.U32 UR4, UR4, 0x2, URZ
+        {{0x04047abb, 0x00401000, 0x08000800, 0}}, // ULDC UR4, c[0x1][UR4+0x40]
+        {{0x3f057899, 0x0000001f, 0x08011404, 0}}, // USHF.R.S32.HI UR5, URZ, 0x1f, UR4
+        {{0x04007958, 0xffffff80, 0x0b83ffff, 0}}, // BRXU UR4 -0x80
+        {{0x00007802, 0x3f800000, 0x00000f00, 0}},
+        {{0x00007947, 0x00000020, 0x03800000, 0}},
+        {{0x00007802, 0x40000000, 0x00000f00, 0}},
+        {{0x00007947, 0x00000000, 0x03800000, 0}},
+        {{0xff007322, 0x00007000, 0x000000ff, 0}},
+        VertexTransform.back(),
+    };
+    const auto tracked = Shader::Ampere::TrackCaptureIndirectBranches(gapped);
+    REQUIRE(tracked.size() == 1);
+    REQUIRE(tracked[0].index == 7);
+    REQUIRE(tracked[0].cbuf_index == 1);
+    REQUIRE(tracked[0].cbuf_offset == 0x40);
+    REQUIRE(tracked[0].entries == 2);
+    const auto untracked = [](std::vector<Native> program, u32 index, Native replacement) {
+        program[index] = replacement;
+        return Shader::Ampere::TrackCaptureIndirectBranches(program).empty();
+    };
+    // UR6 written in the gap: the uniform file may have changed after the compare.
+    REQUIRE(untracked(gapped, 2, {{0x3f067899, 0x0000001f, 0x08011404, 0}}));
+    // A branch in the gap.
+    REQUIRE(untracked(gapped, 2, {{0x00007947, 0x00000000, 0x03800000, 0}}));
+    // A branch elsewhere that lands in the gap (index 9 jumping to index 2) skips the compare.
+    REQUIRE(untracked(gapped, 9, {{0x00007947, 0xffffff80, 0x0383ffff, 0}}));
+}
+
 
 TEST_CASE("Native forward branches retain paths beyond an early unconditional exit", "[native-shader]") {
     const Native exit{{0x0000794d, 0, 0x03800000, 0x000fea00}};
