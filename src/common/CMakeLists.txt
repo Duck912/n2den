@@ -88,6 +88,8 @@ add_library(
     memory_detect.h
     multi_level_page_table.cpp
     multi_level_page_table.h
+    memory_census.cpp
+    memory_census.h
     overflow.h
     fefw_hidden_settings.h
     fefw_version.h

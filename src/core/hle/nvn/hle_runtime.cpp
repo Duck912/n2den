@@ -23,6 +23,7 @@
 #include "common/frame_stats.h"
 #include "common/game_presets.h"
 #include "common/logging.h"
+#include "common/memory_census.h"
 #include "common/tl_ring.h"
 #include "core/core.h"
 #include "core/core_timing.h"
@@ -663,6 +664,14 @@ void Runtime::HeartbeatLoop(std::stop_token token) {
     // What the previous status line saw: per heartbeat (per boot), never carried into the next one.
     std::map<std::string, std::pair<u64, u64>> last_waits;
     std::map<std::string, u64> last_calls;
+    // The memory census runs every `census_every` status lines (10 s each).
+    const u64 census_every = [] {
+        const char* const value = std::getenv("EDEN_MEMORY_CENSUS_SEC");
+        const u64 seconds = value != nullptr ? std::strtoull(value, nullptr, 10) : 60;
+        return seconds == 0 ? u64{0} : (std::max<u64>)(1, seconds / 10);
+    }();
+    u64 census_ticks = 0;
+    Common::TrackLargeAllocations(); // EDEN_MEMORY_TRACK_ALLOC=1 only
     while (!token.stop_requested()) {
         for (int i = 0; i < 100 && !token.stop_requested(); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
@@ -760,6 +769,14 @@ void Runtime::HeartbeatLoop(std::stop_token token) {
                      s.synthetic_cap_evictions, s.synthetic_evictions, holders.synthetic_lists,
                      holders.guest_lists, holders.retiring, holders.reinitialized,
                      s.reinitialized_objects, gate != nullptr ? gate->DescribeMemory() : "");
+        }
+        // The process's own memory by kind, its largest allocations and what grew, once a minute
+        // (Common::ProcessMemoryCensus; EDEN_MEMORY_CENSUS_SEC, 0: off).
+        if (census_every != 0 && ++census_ticks >= census_every) {
+            census_ticks = 0;
+            for (const std::string& line : Common::ProcessMemoryCensus()) {
+                LOG_INFO(Core, "[mem] {}", line);
+            }
         }
         last_presents = presents.load();
     }
