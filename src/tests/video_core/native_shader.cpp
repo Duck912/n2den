@@ -4375,38 +4375,6 @@ TEST_CASE("Native warp sum OR and unsigned extrema reduce only active lanes", "[
 }
 
 
-TEST_CASE("Native guarded register-to-uniform broadcast keeps the uniform when no lane's guard holds", "[native-shader]") {
-    // @P1 R2UR UR5, R2 and R2UR UR5, R2. Ocarina of Time's foliage program 04267529795c1382 guards one:
-    // written unconditionally, an empty ballot read lane 31 and bent every broad-leaf bush over.
-    const bool guarded = GENERATE(false, true);
-    std::array<Native, 2> input{{{{guarded ? 0x020513c2U : 0x020573c2U, 0, 0x000e0000, 0}}, VertexTransform.back()}};
-    Shader::ObjectPool<IR::Inst> pool;
-    IR::Block block{pool};
-    TranslateScalarNative(input, block);
-    for (const u32 active : {1U, 0x80000000U, 0x80000001U, 0x55555555U, 0xffffffffU}) {
-        for (const u32 selected : {0U, 1U, 0x80000000U, 0xaaaaaaaaU, 0xffffffffU}) {
-            std::array<std::array<u32, IR::NUM_REGS>, 32> registers{};
-            std::array<std::array<bool, 7>, 32> predicates{};
-            for (u32 lane = 0; lane < 32; ++lane) {
-                registers[lane][2] = 100 + lane * 17;
-                registers[lane][221] = 0xcafebeef;
-                for (u32 p = 0; p < 7; ++p) predicates[lane][p] = ((lane + p) & 1) != 0;
-                predicates[lane][1] = (selected & (1U << lane)) != 0;
-            }
-            const auto original = predicates;
-            ExecuteNativeWarp(block, active, registers, predicates);
-            REQUIRE(predicates == original);
-            const u32 ballot = guarded ? active & selected : active;
-            const u32 first = ballot ? static_cast<u32>(std::countr_zero(ballot)) : 0;
-            for (u32 lane = 0; lane < 32; ++lane) {
-                const bool written = (active & (1U << lane)) != 0 && ballot != 0;
-                REQUIRE(registers[lane][221] == (written ? 100 + first * 17 : 0xcafebeef));
-            }
-        }
-    }
-}
-
-
 TEST_CASE("Native histogram pointer carry and global reduction retain the address and addend", "[native-shader]") {
     const std::array<Native, 4> input{{
         {{0x00007a10, 0x00001000, 0x07f1e0ff, 0}},
@@ -10029,6 +9997,39 @@ bool IsDirectSignedField(const IR::Value& value, u32 reg, u32 offset, u32 count)
            inst->Arg(1).U32() == offset && inst->Arg(2).U32() == count;
 }
 } // Anonymous namespace
+
+TEST_CASE("Direct native guarded register-to-uniform broadcast keeps the uniform when no lane's guard holds", "[native-shader]") {
+    // @P1 R2UR UR5, R2 and R2UR UR5, R2 through the Ampere visitor (TranslateScalarNative would test the
+    // lowering instead). Ocarina of Time's foliage program 04267529795c1382 guards one: written
+    // unconditionally, an empty ballot read lane 31 and bent every broad-leaf bush over.
+    const bool guarded = GENERATE(false, true);
+    const std::array<Native, 1> input{{{{guarded ? 0x020513c2U : 0x020573c2U, 0, 0x000e0000, 0}}}};
+    Shader::ObjectPool<IR::Inst> pool;
+    IR::Block block{pool};
+    TranslateDirectNative(input, block);
+    const u32 uniform = Shader::Ampere::UNIFORM_REGISTER_BASE + 5;
+    for (const u32 active : {1U, 0x80000000U, 0x80000001U, 0x55555555U, 0xffffffffU}) {
+        for (const u32 selected : {0U, 1U, 0x80000000U, 0xaaaaaaaaU, 0xffffffffU}) {
+            std::array<std::array<u32, IR::NUM_REGS>, 32> registers{};
+            std::array<std::array<bool, 7>, 32> predicates{};
+            for (u32 lane = 0; lane < 32; ++lane) {
+                registers[lane][2] = 100 + lane * 17;
+                registers[lane][uniform] = 0xcafebeef;
+                for (u32 p = 0; p < 7; ++p) predicates[lane][p] = ((lane + p) & 1) != 0;
+                predicates[lane][1] = (selected & (1U << lane)) != 0;
+            }
+            const auto original = predicates;
+            ExecuteNativeWarp(block, active, registers, predicates);
+            REQUIRE(predicates == original);
+            const u32 ballot = guarded ? active & selected : active;
+            const u32 first = ballot ? static_cast<u32>(std::countr_zero(ballot)) : 0;
+            for (u32 lane = 0; lane < 32; ++lane) {
+                const bool written = (active & (1U << lane)) != 0 && ballot != 0;
+                REQUIRE(registers[lane][uniform] == (written ? 100 + first * 17 : 0xcafebeef));
+            }
+        }
+    }
+}
 
 TEST_CASE("Direct native 3D explicit-LOD offset sample takes lod and packed offsets from the second group", "[native-shader]") {
     // TEX.LL.AOFFI RZ, R4, R16, R20, 0x2, 0x8, 3D, 0x1 (Ocarina fragment 045ac3d7b2c01d2b)
