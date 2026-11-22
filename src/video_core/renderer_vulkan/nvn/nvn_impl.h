@@ -594,6 +594,10 @@ struct InFlight {
     /// Device-local chunks the storage shadows of this submission live in (returned to the free
     /// list by the completion thread).
     std::vector<std::shared_ptr<ShadowChunk>> shadow;
+    /// Scratch chunk the alias byte transfers of this submission share (also held in `shadow`);
+    /// grown by taking a larger one. One chunk per transfer took ~20 chunks per submission while
+    /// walking in OoT and, with 15 submissions in flight, over 2 GiB of device memory.
+    std::shared_ptr<ShadowChunk> alias_scratch;
     /// Query slots and timestamp reports (NvnIndirect); null until the submission reports a counter.
     std::unique_ptr<CounterFlight> counters;
     /// GPU timestamps of this submission (EDEN_NX2_NVN_GPU_PROFILE); null when the profiler is off.
@@ -948,6 +952,7 @@ struct Context::Impl {
         std::atomic<u64> alias_transfers{};      ///< overlapping textures' contents copied over
         std::atomic<u64> alias_byte_transfers{}; ///< ... through the pool's bytes (alias shader)
         std::atomic<u64> alias_byte_bytes{};     ///< bytes of window those moved
+        std::atomic<u64> alias_scratch_reuses{}; ///< of them that reused the submission's scratch
         std::atomic<u64> alias_overlaps_seen{};  ///< textures created over another's storage
         /// Resolution scaling (nvn_rescale.h): passes drawn at the scaled size, scaled passes that
         /// fell back to guest size (an ineligible attachment), downscale / upscale blits recorded

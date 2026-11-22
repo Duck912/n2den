@@ -4001,12 +4001,29 @@ bool Recorder::TransferOverlapBytes(Storage& source, Storage& destination, const
         why = "the shared bytes do not fit the transfer scratch buffer";
         return false;
     }
-    std::shared_ptr<ShadowChunk> scratch = impl.draw_resources->AcquireShadow(total);
-    if (!scratch) {
-        why = "no scratch memory for the transfer";
-        return false;
+    // One scratch per submission, shared by its transfers (EDEN_NX2_NVN_ALIAS_SCRATCH_SHARE=0: one
+    // chunk per transfer as before). Reuse orders this transfer after the last one's buffer reads
+    // and writes with a barrier below.
+    static const bool share_scratch = [] {
+        const char* const value = std::getenv("EDEN_NX2_NVN_ALIAS_SCRATCH_SHARE");
+        return value == nullptr || value[0] != '0';
+    }();
+    bool reused_scratch = false;
+    std::shared_ptr<ShadowChunk> scratch;
+    if (share_scratch && flight.alias_scratch && flight.alias_scratch->size >= total) {
+        scratch = flight.alias_scratch;
+        reused_scratch = true;
+    } else {
+        scratch = impl.draw_resources->AcquireShadow(total);
+        if (!scratch) {
+            why = "no scratch memory for the transfer";
+            return false;
+        }
+        flight.shadow.push_back(scratch);
+        if (share_scratch) {
+            flight.alias_scratch = scratch;
+        }
     }
-    flight.shadow.push_back(scratch);
 
     NoteTouched(source.shared_from_this());
     const bool saved = track_writes;
@@ -4025,6 +4042,21 @@ bool Recorder::TransferOverlapBytes(Storage& source, Storage& destination, const
         return out;
     };
     const std::vector<VkBufferImageCopy> destination_regions = regions(destination_pieces);
+    if (reused_scratch) {
+        // The previous transfer's compute writes and its copy back into the image read this buffer.
+        cmd.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                            VkMemoryBarrier{
+                                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                                .pNext = nullptr,
+                                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT |
+                                                 VK_ACCESS_SHADER_WRITE_BIT,
+                                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT |
+                                                 VK_ACCESS_SHADER_READ_BIT |
+                                                 VK_ACCESS_SHADER_WRITE_BIT,
+                            });
+        impl.stats.alias_scratch_reuses.fetch_add(1, std::memory_order_relaxed);
+    }
     cmd.CopyImageToBuffer(*source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer,
                           regions(source_pieces));
     cmd.CopyImageToBuffer(*destination.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer,

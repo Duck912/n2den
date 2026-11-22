@@ -1474,6 +1474,7 @@ void Context::Impl::CompleteMain() {
         if (!flight->arena.empty()) {
             draw_resources->ReleaseArenas(flight->arena);
         }
+        flight->alias_scratch.reset();
         if (!flight->shadow.empty()) {
             draw_resources->ReleaseShadows(flight->shadow);
         }
@@ -2456,6 +2457,8 @@ void Context::CollectStats(std::vector<VideoCommon::Nvn::SinkStat>& out) const {
                    impl->stats.alias_byte_transfers.load()});
     out.push_back({"alias_transfers: MiB of window those moved",
                    impl->stats.alias_byte_bytes.load() >> 20});
+    out.push_back({"alias_transfers: reused the submission's scratch chunk",
+                   impl->stats.alias_scratch_reuses.load()});
     if (impl->RescaleFactor().Active()) {
         out.push_back({"resolution scale: passes drawn at the scaled size",
                        impl->stats.rescale_passes.load()});
