@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <compare>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -23,6 +24,7 @@
 #include <thread>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -87,6 +89,15 @@ class DrawContext;
 class PresentChain;
 
 namespace VC = VideoCommon::Nvn;
+
+/// The physical bytes a virtual pool maps a 64 KiB sparse tile onto: the physical pool and the
+/// offset in it. serial 0: none known (the tile straddles runs, or is unmapped). Sparse tiles with
+/// the same key read the same bytes and share device pages (nvn_sparse.h, SparseShareEnabled).
+struct SparsePhysicalTile {
+    u64 serial{};
+    u64 offset{};
+    friend auto operator<=>(const SparsePhysicalTile&, const SparsePhysicalTile&) = default;
+};
 
 /// 64-bit content hash for change detection (mirror pages, storage signatures; nvn_upload.cpp):
 /// a stripe hash in XXH3's construction, CityHash64 with EDEN_NVN_PAGE_HASH=city. Values are only
@@ -2027,6 +2038,9 @@ struct Context::Impl {
     /// covers all of it.
     bool ResolveVirtualRange(const Pool& virtual_pool, u64 offset, u64 size, Pool*& physical,
                              u64& physical_offset) const;
+    /// The physical tile behind the sparse tile at `offset` of `virtual_pool` (one run must hold
+    /// all 64 KiB of it), or SparsePhysicalTile{}.
+    [[nodiscard]] SparsePhysicalTile SparseTilePhysical(const Pool& virtual_pool, u64 offset) const;
 
     // --- storages, virtual pools, CPU coherency (nvn_storage.cpp) ---
     /// Creates the VkImage of `s` on first use. False when it cannot be created (logged once).
@@ -2139,6 +2153,9 @@ struct Context::Impl {
     /// Logs where the device memory of the storages goes (every 900 presents): per kind, and the
     /// largest ones.
     void LogStorageCensus();
+    /// With the census: how many mapped sparse tiles share physical tiles (each gets pages of its
+    /// own), per sparse storage and over all of them.
+    void LogSparseAliasing(const std::unordered_set<const Storage*>& storages);
     /// Removes every storage of the pool from the cache and the pool index.
     void EvictPoolStorages(u64 pool_serial);
     /// Why `address` does not resolve, for the log (virtual pools: unmapped or scattered).

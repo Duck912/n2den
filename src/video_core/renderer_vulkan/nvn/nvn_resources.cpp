@@ -1647,9 +1647,12 @@ std::shared_ptr<Texture> Context::Impl::BuildTexture(const VC::TextureDesc& d) {
         const char* reason = "";
         if (std::shared_ptr<SparseBacking> sparse =
                 SparseBacking::Make(*storage, device, virtual_pool.size, reason)) {
-            sparse->Remap(0, layout.size, [&](u64 offset, u64 size) {
-                return VirtualRangeMapped(virtual_pool, begin + offset, size);
-            });
+            sparse->Remap(
+                0, layout.size,
+                [&](u64 offset, u64 size) {
+                    return VirtualRangeMapped(virtual_pool, begin + offset, size);
+                },
+                [&](u64 offset) { return SparseTilePhysical(virtual_pool, begin + offset); });
             storage->sparse = std::move(sparse);
             if (sparse_virtual_pools.insert(d.pool_serial).second) {
                 mkw_sparse_users_dirty = true;

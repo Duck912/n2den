@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -233,6 +235,8 @@ std::shared_ptr<SparseBacking> SparseBacking::FromLayout(SparseLayout layout) {
     backing->tile_flags_.assign(backing->layout_.TileCount(), 0);
     backing->tail_flags_.assign(backing->layout_.layers, 0);
     backing->tile_hash_.assign(backing->layout_.TileCount(), 0);
+    backing->tile_key_.assign(backing->layout_.TileCount(), SparsePhysicalTile{});
+    backing->bound_key_.assign(backing->layout_.TileCount(), SparsePhysicalTile{});
     return backing;
 }
 
@@ -240,8 +244,21 @@ SparseBacking::~SparseBacking() {
     if (!pool_) {
         return;
     }
-    for (const u32 page : tile_pages_) {
-        pool_->Free(page);
+    // A shared page sits in the slots of every tile using it: free the shares once, and only the
+    // pages of the tiles that use none.
+    const u32 slots = host_per_x_ * host_per_y_;
+    for (u32 id = 0; slots != 0 && id < static_cast<u32>(bound_key_.size()); ++id) {
+        if (bound_key_[id].serial != 0 && shared_.contains(bound_key_[id])) {
+            continue;
+        }
+        for (u32 i = 0; i < slots; ++i) {
+            pool_->Free(tile_pages_[static_cast<size_t>(id) * slots + i]);
+        }
+    }
+    for (const auto& [key, share] : shared_) {
+        for (const u32 page : share.pages) {
+            pool_->Free(page);
+        }
     }
     for (const std::vector<u32>& pages : tail_pages_) {
         for (const u32 page : pages) {
@@ -365,6 +382,8 @@ bool SparseBacking::Attach(Context::Impl& impl, const Storage& s, const char*& r
         impl.sparse_pages = std::make_shared<SparsePagePool>(*impl.allocator, device_budget);
     }
     pool_ = impl.sparse_pages;
+    // The image was created with VK_IMAGE_CREATE_SPARSE_ALIASED_BIT under the same condition.
+    share_ = SparseShareEnabled(impl.device);
     // MKW's foliage/lightmap atlas copies write the coarse levels without MapVirtual for
     // their guest tail bytes. Keep host backing for these levels, as mkw-recomp does in
     // runtime/gfx/vk/tex/vk_sparse.c (tail_alloc), rather than discarding those GPU writes.
@@ -375,6 +394,53 @@ bool SparseBacking::Attach(Context::Impl& impl, const Storage& s, const char*& r
         }
     }
     return true;
+}
+
+bool SparseShareEnabled(const Device& device) {
+    static const bool setting = [] {
+        const char* env = std::getenv("EDEN_NX2_SPARSE_SHARE");
+        return env == nullptr || std::string_view{env} != "0";
+    }();
+    return setting && device.IsSparseResidencyAliasedSupported();
+}
+
+void SparseBacking::SetTileMapped(u32 id, bool mapped, SparsePhysicalTile key) {
+    u8& flags = tile_flags_[id];
+    tile_key_[id] = mapped ? key : SparsePhysicalTile{};
+    SetMapped(flags, id, false, mapped);
+    // Still mapped, but onto other physical bytes: its pages (maybe a share) hold the old ones.
+    if (share_ && mapped && (flags & Bound) != 0 && bound_key_[id] != tile_key_[id]) {
+        flags |= Rekey;
+    }
+}
+
+void SparseBacking::ReleaseTilePages(u32 id, u32 slots) {
+    const SparsePhysicalTile key = bound_key_[id];
+    bound_key_[id] = SparsePhysicalTile{};
+    ReleasePages(key, &tile_pages_[static_cast<size_t>(id) * slots], slots);
+}
+
+void SparseBacking::ReleasePages(SparsePhysicalTile key, u32* pages, u32 slots) {
+    if (key.serial != 0) {
+        if (const auto it = shared_.find(key); it != shared_.end()) {
+            if (it->second.users > 1) {
+                --shared_tiles_;
+            }
+            if (--it->second.users == 0) {
+                // The last user: the pages go once the unbinds have run.
+                for (const u32 page : it->second.pages) {
+                    if (page != SparsePagePool::NoPage) {
+                        deferred_free_.push_back(page);
+                    }
+                }
+                shared_.erase(it);
+            }
+            std::fill(pages, pages + slots, SparsePagePool::NoPage);
+            return;
+        }
+    }
+    deferred_free_.insert(deferred_free_.end(), pages, pages + slots);
+    std::fill(pages, pages + slots, SparsePagePool::NoPage);
 }
 
 void SparseBacking::Queue(u8& flags, u32 id, bool tail) {
@@ -467,8 +533,11 @@ void SparseBacking::HostTilesOfTile(u32 id, std::vector<HostTile>& out) const {
 
 bool SparseBacking::BindUnit(Context::Impl& impl, const Storage& s, bool tail, u32 id, bool bind,
                              std::vector<VkSparseImageMemoryBind>& image_binds,
-                             std::vector<VkSparseMemoryBind>& opaque_binds) {
+                             std::vector<VkSparseMemoryBind>& opaque_binds, bool* reused) {
     static_cast<void>(impl);
+    if (reused) {
+        *reused = false;
+    }
     const u32 layer = tail ? id : layout_.Tile(id).layer;
     std::span<const HostTile> tiles;
     u32 slots = 0;
@@ -494,7 +563,57 @@ bool SparseBacking::BindUnit(Context::Impl& impl, const Storage& s, bool tail, u
         pool_->Free(pages[index]);
         pages[index] = SparsePagePool::NoPage;
     };
-    if (bind) {
+    if (bind && share_ && !tail && tile_key_[id].serial != 0) {
+        // The pages of the physical tile this one maps, if another mapped tile has them: they hold
+        // its bytes already (uploaded or written by the GPU through that tile), as on the console,
+        // where both tiles read the same memory.
+        const SparsePhysicalTile key = tile_key_[id];
+        auto it = shared_.find(key);
+        const bool existing = it != shared_.end();
+        if (!existing) {
+            it = shared_.emplace(key, Share{std::vector<u32>(slots, SparsePagePool::NoPage), 0, 0})
+                     .first;
+        }
+        Share& share = it->second;
+        std::vector<u32> fresh; // slots no tile of the share needed before (edge tiles use fewer)
+        bool ok = true;
+        for (const HostTile& tile : tiles) {
+            u32& page = share.pages[tile.slot];
+            if (page == SparsePagePool::NoPage) {
+                page = pool_->Allocate(memory_type_bits_);
+                if (page == SparsePagePool::NoPage) {
+                    ok = false;
+                    break;
+                }
+                fresh.push_back(tile.slot);
+            }
+        }
+        if (!ok) {
+            for (const u32 slot : fresh) {
+                pool_->Free(share.pages[slot]);
+                share.pages[slot] = SparsePagePool::NoPage;
+            }
+            if (share.users == 0) {
+                shared_.erase(it);
+            }
+            return false;
+        }
+        std::copy(share.pages.begin(), share.pages.end(), pages);
+        if (share.users > 0) {
+            ++shared_tiles_;
+        }
+        ++share.users;
+        bound_key_[id] = key;
+        if (existing && fresh.empty()) {
+            tile_hash_[id] = share.hash;
+            if (reused) {
+                *reused = true;
+            }
+        }
+    } else if (bind) {
+        if (!tail) {
+            bound_key_[id] = SparsePhysicalTile{}; // pages of its own
+        }
         // Memory for every host block first: a failure leaves nothing bound.
         const auto need = [&](u32 index) {
             if (pages[index] == SparsePagePool::NoPage) {
@@ -541,8 +660,12 @@ bool SparseBacking::BindUnit(Context::Impl& impl, const Storage& s, bool tail, u
         });
     }
     if (!bind) {
-        deferred_free_.insert(deferred_free_.end(), pages, pages + slots);
-        std::fill(pages, pages + slots, SparsePagePool::NoPage);
+        if (tail) {
+            deferred_free_.insert(deferred_free_.end(), pages, pages + slots);
+            std::fill(pages, pages + slots, SparsePagePool::NoPage);
+        } else {
+            ReleaseTilePages(id, slots); // a share keeps its pages while another tile uses them
+        }
     }
     bound_pages_ += bind ? tiles.size() + opaque_count : 0;
     bound_pages_ -= bind ? 0 : (std::min<u64>)(bound_pages_, tiles.size() + opaque_count);
@@ -566,9 +689,39 @@ bool SparseBacking::Prepare(Context::Impl& impl, const Storage& s, Uploads& uplo
             const bool mapped = (flags & Mapped) != 0;
             const bool want = mapped || (tail && persistent_tails_);
             const bool have = (flags & Bound) != 0;
-            if (want && !have) {
+            if (!tail && want && have && (flags & Rekey) != 0) {
+                // Mapped onto other physical bytes while bound: take the new physical tile's pages
+                // (shared or new) and then give up the old ones. Binding over the old binding
+                // replaces it, so no unbind is needed. Without memory the old binding stays (still
+                // valid memory) and it is tried again later.
+                const u32 slots = host_per_x_ * host_per_y_;
+                u32* const tile_pages = &tile_pages_[static_cast<size_t>(id) * slots];
+                std::vector<u32> old_pages(tile_pages, tile_pages + slots);
+                const SparsePhysicalTile old_key = bound_key_[id];
+                std::fill(tile_pages, tile_pages + slots, SparsePagePool::NoPage);
+                bound_key_[id] = SparsePhysicalTile{};
+                const u64 counted = bound_pages_;
+                bool reused = false;
                 if (exhausted || !pool_->HasRoom() ||
-                    !BindUnit(impl, s, tail, id, true, image_binds, opaque_binds)) {
+                    !BindUnit(impl, s, false, id, true, image_binds, opaque_binds, &reused)) {
+                    std::copy(old_pages.begin(), old_pages.end(), tile_pages);
+                    bound_key_[id] = old_key;
+                    exhausted = true;
+                    keep.push_back(id);
+                    continue;
+                }
+                bound_pages_ = counted; // the tile was counted when first bound
+                ReleasePages(old_key, old_pages.data(), slots);
+                flags &= static_cast<u8>(~Rekey);
+                if (reused) {
+                    flags &= static_cast<u8>(~Dirty); // the share holds the new bytes already
+                }
+                bound_now.emplace_back(false, id);
+                ++binds;
+            } else if (want && !have) {
+                bool reused = false;
+                if (exhausted || !pool_->HasRoom() ||
+                    !BindUnit(impl, s, tail, id, true, image_binds, opaque_binds, &reused)) {
                     exhausted = true;
                     if (!std::exchange(starved_logged_, true)) {
                         LOG_WARNING(Render_Vulkan,
@@ -582,11 +735,17 @@ bool SparseBacking::Prepare(Context::Impl& impl, const Storage& s, Uploads& uplo
                     continue;
                 }
                 flags |= Bound;
+                flags &= static_cast<u8>(~Rekey);
+                if (reused) {
+                    // Another mapped tile's pages hold these physical bytes (uploaded, or written by
+                    // the GPU): an upload from the guest bytes would only replace them with older ones.
+                    flags &= static_cast<u8>(~Dirty);
+                }
                 bound_now.emplace_back(tail, id);
                 ++binds;
             } else if (!want && have) {
                 BindUnit(impl, s, tail, id, false, image_binds, opaque_binds);
-                flags &= static_cast<u8>(~Bound);
+                flags &= static_cast<u8>(~(Bound | Rekey));
                 ++unbinds;
             }
             flags &= static_cast<u8>(~Queued);
@@ -665,7 +824,10 @@ bool SparseBacking::Prepare(Context::Impl& impl, const Storage& s, Uploads& uplo
             // units are tried again at the next use.
             for (const auto& [tail, id] : bound_now) {
                 u8& flags = tail ? tail_flags_[id] : tile_flags_[id];
-                flags &= static_cast<u8>(~Bound);
+                flags &= static_cast<u8>(~(Bound | Rekey));
+                if ((flags & Mapped) != 0) {
+                    flags |= Dirty; // a reused share skipped its upload: the next bind may not reuse
+                }
                 Queue(flags, id, tail);
                 std::vector<VkSparseImageMemoryBind> unused_image;
                 std::vector<VkSparseMemoryBind> unused_opaque;

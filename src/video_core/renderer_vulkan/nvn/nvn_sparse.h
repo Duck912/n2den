@@ -18,6 +18,7 @@
 #pragma once
 
 #include <algorithm>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -87,6 +88,13 @@ private:
     u32 empty_blocks_{0};
 };
 
+/// Whether tiles of one sparse storage that map the same physical bytes share device pages
+/// (needs sparseResidencyAliased; EDEN_NX2_SPARSE_SHARE=0 turns it off). Mario Kart World maps
+/// ever more virtual atlas tiles onto the physical tiles it has (2.5 per physical tile on average
+/// after three minutes, up to 10): with pages per mapped tile its video memory grew until the
+/// driver paged it to system RAM.
+[[nodiscard]] bool SparseShareEnabled(const Device& device);
+
 /// The tile state of one sparse storage.
 class SparseBacking {
 public:
@@ -96,6 +104,7 @@ public:
         Dirty = 2,  ///< the bytes behind the tile changed since the last upload
         Bound = 4,  ///< device memory is bound for the tile's host pages
         Queued = 8, ///< on the pending list
+        Rekey = 16, ///< bound for other physical bytes than it maps now: bind its share again
     };
 
     /// The units a `Prepare` found ready to upload (mapped, bound, dirty).
@@ -125,14 +134,17 @@ public:
     }
 
     /// The pool's mapping of [begin, end) of the storage changed. `mapped(offset, size)` says
-    /// whether any run of the pool covers storage bytes [offset, offset + size).
-    template <typename MappedFn>
-    void Remap(u64 begin, u64 end, MappedFn&& mapped) {
+    /// whether any run of the pool covers storage bytes [offset, offset + size);
+    /// `physical(offset)` names the physical tile a mapped tile at storage `offset` reads
+    /// (SparsePhysicalTile{} when it cannot say).
+    template <typename MappedFn, typename PhysicalFn>
+    void Remap(u64 begin, u64 end, MappedFn&& mapped, PhysicalFn&& physical) {
         layout_.ForEachUnit(
             begin, end,
             [&](u32 id) {
-                SetMapped(tile_flags_[id], id, false,
-                          mapped(layout_.TileOffset(id), SPARSE_TILE_BYTES));
+                const u64 offset = layout_.TileOffset(id);
+                const bool is_mapped = mapped(offset, SPARSE_TILE_BYTES);
+                SetTileMapped(id, is_mapped, is_mapped ? physical(offset) : SparsePhysicalTile{});
             },
             [&](u32 layer) {
                 SetMapped(tail_flags_[layer], layer, true,
@@ -162,6 +174,15 @@ public:
 
     void SetTileHash(u32 id, u64 hash) {
         tile_hash_[id] = hash;
+        if (bound_key_[id].serial != 0) {
+            if (const auto it = shared_.find(bound_key_[id]); it != shared_.end()) {
+                it->second.hash = hash; // the shared pages hold these bytes now
+            }
+        }
+    }
+    /// Mapped tiles that use the device pages of another mapped tile (the aliases a share saved).
+    [[nodiscard]] u64 SharedTiles() const noexcept {
+        return shared_tiles_;
     }
     /// The next mapped, bound, clean tile to compare with its bytes (round robin), or ~0u.
     [[nodiscard]] u32 NextVerifyTile();
@@ -176,6 +197,15 @@ public:
     }
     [[nodiscard]] u32 MappedTiles() const noexcept {
         return mapped_tiles_;
+    }
+    /// Calls `fn(id, storage_offset)` for every mapped tile (diagnostics: the aliasing census).
+    template <typename Fn>
+    void ForEachMappedTile(Fn&& fn) const {
+        for (u32 id = 0; id < static_cast<u32>(tile_flags_.size()); ++id) {
+            if ((tile_flags_[id] & Mapped) != 0) {
+                fn(id, layout_.TileOffset(id));
+            }
+        }
     }
     [[nodiscard]] u32 StarvedUnits() const noexcept {
         return starved_;
@@ -194,13 +224,23 @@ private:
     };
 
     void SetMapped(u8& flags, u32 id, bool tail, bool mapped);
+    /// SetMapped of tile `id`, which maps physical tile `key` now (serial 0 when unmapped or not
+    /// known); a bound tile whose key changed is marked Rekey.
+    void SetTileMapped(u32 id, bool mapped, SparsePhysicalTile key);
+    /// Gives up tile `id`'s device pages for an unbind or a rebind: its share loses a user (the
+    /// pages are freed with the last), or its own pages are freed. The slots read NoPage after.
+    void ReleaseTilePages(u32 id, u32 slots);
+    /// The same for pages `pages` (`slots` of them) that held physical tile `key` (serial 0: own).
+    void ReleasePages(SparsePhysicalTile key, u32* pages, u32 slots);
     void Queue(u8& flags, u32 id, bool tail);
     /// Host tiles of guest tile `id` / of the tail levels held in host tiles.
     void HostTilesOfTile(u32 id, std::vector<HostTile>& out) const;
     std::vector<u32>& TilePages(u32 id);
+    /// `reused` (bind of a tile only): set when every page came from a share whose pages already
+    /// hold the physical tile's bytes, so the tile needs no upload.
     bool BindUnit(Context::Impl& impl, const Storage& s, bool tail, u32 id, bool bind,
                   std::vector<VkSparseImageMemoryBind>& image_binds,
-                  std::vector<VkSparseMemoryBind>& opaque_binds);
+                  std::vector<VkSparseMemoryBind>& opaque_binds, bool* reused = nullptr);
 
     SparseLayout layout_;
     UploadPlan tail_plan_;
@@ -231,6 +271,17 @@ private:
     u32 starved_{0};
     u32 verify_cursor_{0};
     std::vector<u32> deferred_free_; ///< pages of unbound units, freed once the binds ran
+    // Page sharing (SparseShareEnabled): tiles mapping the same physical tile use one set of pages.
+    struct Share {
+        std::vector<u32> pages; ///< host_per_x_ * host_per_y_ slots, NoPage where none is needed yet
+        u32 users{};            ///< bound tiles using them
+        u64 hash{};             ///< of the guest bytes last uploaded into them (VerifySparse)
+    };
+    bool share_{false};
+    std::vector<SparsePhysicalTile> tile_key_;  ///< what each tile maps now (serial 0: none)
+    std::vector<SparsePhysicalTile> bound_key_; ///< what each bound tile's pages hold
+    std::map<SparsePhysicalTile, Share> shared_;
+    u64 shared_tiles_{0};
     bool starved_logged_{false};
     bool persistent_tails_{false}; ///< MKW writes coarse levels without mapping guest tail pages
     /// Everything pending found no page at generation `starved_generation_`.

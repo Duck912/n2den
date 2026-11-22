@@ -615,7 +615,8 @@ bool Context::Impl::EnsureImage(Storage& s) {
             // Tile-backed: a sparse residency image with no memory; the tiles the pool maps get
             // theirs (SparseBacking::Prepare).
             const char* reason = "the device cannot create a sparse residency image";
-            s.image = allocator->CreateUnbackedImage(image_info);
+            // Aliased when tiles may share pages (SparseBacking::Attach reads the same condition).
+            s.image = allocator->CreateUnbackedImage(image_info, SparseShareEnabled(device));
             if (s.image && s.sparse->Attach(*this, s, reason)) {
                 s.current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
                 stats.storages_created.fetch_add(1, std::memory_order_relaxed);
@@ -737,6 +738,17 @@ void Context::Impl::GatherVirtual(const Pool& pool, u64 offset, u64 size, u8* ou
             memory->Read(source.address + source_offset, target, end - begin);
         }
     }
+}
+
+SparsePhysicalTile Context::Impl::SparseTilePhysical(const Pool& virtual_pool, u64 offset) const {
+    // One run must hold the whole tile: only then do two tiles with this key read the same bytes.
+    Pool* physical = nullptr;
+    u64 physical_offset = 0;
+    if (!ResolveVirtualRange(virtual_pool, offset, SPARSE_TILE_BYTES, physical, physical_offset) ||
+        physical == nullptr) {
+        return SparsePhysicalTile{};
+    }
+    return SparsePhysicalTile{physical->serial, physical_offset};
 }
 
 bool Context::Impl::ResolveVirtualRange(const Pool& virtual_pool, u64 offset, u64 size,
@@ -936,9 +948,12 @@ void Context::Impl::MapVirtualNow(u64 pool_serial, const std::vector<VC::Virtual
                 // Tile by tile: only the tiles of the range are bound, unbound or uploaded again.
                 const u64 from = (std::max)(begin, s->first) - s->first;
                 const u64 to = (std::min)(end, s->first + storage.layout.size) - s->first;
-                storage.sparse->Remap(from, to, [&](u64 offset, u64 size) {
-                    return VirtualRangeMapped(pool, s->first + offset, size);
-                });
+                storage.sparse->Remap(
+                    from, to,
+                    [&](u64 offset, u64 size) {
+                        return VirtualRangeMapped(pool, s->first + offset, size);
+                    },
+                    [&](u64 offset) { return SparseTilePhysical(pool, s->first + offset); });
                 continue;
             }
             storage.contents_valid = false;
@@ -1723,6 +1738,84 @@ void Context::Impl::NoteTextureHoldersNow(VC::TextureHolderReport& report) {
     holder_report_seen.store(true, std::memory_order_release);
 }
 
+void Context::Impl::LogSparseAliasing(const std::unordered_set<const Storage*>& storages) {
+    // Diagnostics for virtual-texture memory: each mapped tile of a sparse storage gets device
+    // pages of its own (SparseBacking::BindUnit), so tiles that a game maps onto the same physical
+    // bytes (a shared fallback page, or one page in several atlases) are backed more than once.
+    // Per storage and over all of them: mapped tiles, distinct physical tiles behind them, and the
+    // most tiles on one physical tile.
+    using PhysicalTile = std::pair<u64, u64>; // physical pool serial, tile-aligned offset
+    std::map<PhysicalTile, u32> all;
+    u64 all_mapped = 0;
+    u64 all_unresolved = 0;
+    u32 logged = 0;
+    for (const Storage* s : storages) {
+        if (!s->sparse) {
+            continue;
+        }
+        const auto pool_it = pools.find(s->pool_serial);
+        if (pool_it == pools.end()) {
+            continue;
+        }
+        const auto& runs = pool_it->second->virtual_runs;
+        std::map<PhysicalTile, u32> mine;
+        u64 mapped = 0;
+        u64 unresolved = 0;
+        s->sparse->ForEachMappedTile([&](u32, u64 tile_offset) {
+            ++mapped;
+            const u64 at = s->pool_offset + tile_offset;
+            auto it = runs.upper_bound(at);
+            if (it == runs.begin()) {
+                ++unresolved;
+                return;
+            }
+            --it;
+            if (at >= it->first + it->second.size) {
+                ++unresolved;
+                return;
+            }
+            const u64 physical = it->second.physical_offset + (at - it->first);
+            const PhysicalTile key{it->second.physical_serial,
+                                   physical / SPARSE_TILE_BYTES * SPARSE_TILE_BYTES};
+            ++mine[key];
+            ++all[key];
+        });
+        all_mapped += mapped;
+        all_unresolved += unresolved;
+        if (mapped == 0 || logged >= 24) {
+            continue;
+        }
+        ++logged;
+        u32 most = 0;
+        std::set<u64> physical_pools;
+        for (const auto& [key, count] : mine) {
+            most = (std::max)(most, count);
+            physical_pools.insert(key.first);
+        }
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] sparse aliasing: {}x{}x{} fmt {:#x} pool {:#x} +{:#x}: {} mapped tiles "
+                 "({} MiB guest), {} unresolved, {} distinct physical tiles in {} physical pools, "
+                 "most tiles on one physical tile {}, bound {} MiB, tiles sharing pages {}",
+                 s->extent.width, s->extent.height, s->layers, s->desc.format, s->pool_serial,
+                 s->pool_offset, mapped, (mapped * SPARSE_TILE_BYTES) >> 20, unresolved, mine.size(),
+                 physical_pools.size(), most, s->sparse->BoundBytes() >> 20,
+                 s->sparse->SharedTiles());
+    }
+    if (all_mapped == 0) {
+        return;
+    }
+    u32 most = 0;
+    u64 shared_tiles = 0; // distinct physical tiles that more than one mapped tile uses
+    for (const auto& [key, count] : all) {
+        most = (std::max)(most, count);
+        shared_tiles += count > 1 ? 1 : 0;
+    }
+    LOG_INFO(Render_Vulkan,
+             "[nvn] sparse aliasing, all storages: {} mapped tiles, {} unresolved, {} distinct physical "
+             "tiles ({} of them used more than once), most mapped tiles on one physical tile {}",
+             all_mapped, all_unresolved, all.size(), shared_tiles, most);
+}
+
 void Context::Impl::LogStorageCensus() {
     std::unordered_set<const Storage*> seen;
     struct Kind {
@@ -1793,6 +1886,7 @@ void Context::Impl::LogStorageCensus() {
              mib(other.bytes), other.count, mib(gpu_written.bytes), gpu_written.count,
              mib(storage_cache_bytes), sparse_pages ? mib(sparse_pages->UsedBytes()) : 0,
              sparse_pages ? mib(sparse_pages->ReservedBytes()) : 0);
+    LogSparseAliasing(seen);
     if (smart_bc.enabled) {
         const auto total = [](const std::atomic<u64>& value) {
             return value.load(std::memory_order_relaxed);
