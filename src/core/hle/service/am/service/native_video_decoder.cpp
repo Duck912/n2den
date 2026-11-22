@@ -1301,10 +1301,14 @@ private:
             // The command 200 helper (Kirby Air Riders) sends codec 1, input format 3 and output format 3
             // (NV12 pools): treated as the AV1 decoder, the only decoder whose input format is 3. This
             // pairing is inferred, the codec numbering of the real server was not decoded.
+            // 200 and 201 share one implementation on the console, so codec 1 / input 3 / output 3 is
+            // accepted on 201 too: Nintendo Switch Sports sends it on 201 for its VP9 movies
+            // (OpDemo.webm), then configures "video/vp9", which swaps in the FFmpeg VP9 decoder below.
+            // Refused, its movie thread panicked and the picture stayed black with sound playing.
             const bool is_av1 = kind == NativeVideoKind::Decoder &&
                                 ((!is_200 && request->codec == 3 &&
                                   (request->output_format == 2 || request->output_format == 3)) ||
-                                 (is_200 && request->codec == 1 && request->output_format == 3)) &&
+                                 (request->codec == 1 && request->output_format == 3)) &&
                                 request->input_format == 3 && request->output_mode == 1;
             // Input format 1 is the H.264 shape on both commands: codec 0 on the older one, codec 1
             // on command 200 (Kirby and the Forgotten Land S2 in-game movies; the game aborted on
