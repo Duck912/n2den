@@ -428,8 +428,8 @@ public:
     bool HostEnsureContents(Storage& storage, bool will_overwrite) override {
         return EnsureContents(storage, will_overwrite);
     }
-    bool HostEnsureTargetContents(Storage& storage) override {
-        return EnsureTargetContents(storage);
+    bool HostEnsureTargetContents(Storage& storage, bool cleared_whole) override {
+        return EnsureTargetContents(storage, cleared_whole);
     }
     bool HostNeedsCommands(Storage& storage, bool will_overwrite) override {
         storage.last_used_seq = flight.seq;
@@ -881,7 +881,10 @@ private:
     /// EnsureContents(s, true) for a render target of a pass, except on the storage's first use:
     /// then the new image is filled from the guest bytes, or zero-cleared when they cannot be
     /// uploaded, instead of keeping undefined contents (EDEN_NX2_NVN_TARGET_FIRST_INIT=0: off).
-    bool EnsureTargetContents(Storage& s);
+    /// `cleared_whole` (the op opening the pass clears the whole image, unconditionally): the
+    /// first use needs no fill either, the clear defines every texel before anything reads them
+    /// (EDEN_NX2_NVN_TARGET_CLEAR_SKIP=0: fill anyway).
+    bool EnsureTargetContents(Storage& s, bool cleared_whole);
     /// Resolution scaling (nvn_rescale.h). The guest-sized image made from the twin (a downscale
     /// blit) when the twin is newer; outside a render pass.
     void MakeNativeCurrent(Storage& s);
@@ -2202,10 +2205,25 @@ bool TargetFirstInit() {
     }();
     return on;
 }
+/// EDEN_NX2_NVN_TARGET_CLEAR_SKIP (default 1): no first-use fill of a render target when the op
+/// that opens the pass clears its whole image (DrawContext::OpeningClear).
+bool TargetClearSkip() {
+    static const bool on = [] {
+        const char* value = std::getenv("EDEN_NX2_NVN_TARGET_CLEAR_SKIP");
+        return value == nullptr || *value == '\0' || value[0] != '0';
+    }();
+    return on;
+}
 } // Anonymous namespace
 
-bool Recorder::EnsureTargetContents(Storage& s) {
+bool Recorder::EnsureTargetContents(Storage& s, bool cleared_whole) {
     if (s.contents_valid || !TargetFirstInit()) {
+        return EnsureContents(s, true);
+    }
+    if (cleared_whole && TargetClearSkip() && s.scale_owner == nullptr && !s.sparse) {
+        // New image whose first use is a clear of all of it: the upload would be overwritten
+        // before any draw, blend or sample of this pass can read it.
+        impl.stats.target_first_skipped.fetch_add(1, std::memory_order_relaxed);
         return EnsureContents(s, true);
     }
     if (!impl.EnsureImage(s)) {

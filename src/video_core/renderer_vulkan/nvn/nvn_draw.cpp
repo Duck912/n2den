@@ -1106,6 +1106,7 @@ void DrawContext::RevertTargetScale() {
 
 bool DrawContext::BeginPass() {
     const ReplayPhases::Scope phase{ReplayPhases::Phase::BeginPassOnly};
+    const OpeningClear opening = std::exchange(opening_clear, OpeningClear{});
     if (pass_open) {
         return true;
     }
@@ -1131,6 +1132,8 @@ bool DrawContext::BeginPass() {
         Storage* storage;
         AttachmentShape shape;
         VkImageView view;
+        bool depth_slot;
+        u32 slot;
     };
     std::array<Attachment, MAX_COLOR_TARGETS + 1> attachments{};
     u32 attachment_count = 0;
@@ -1162,7 +1165,7 @@ bool DrawContext::BeginPass() {
         layers = (std::min)(layers, shape.layer_count);
         samples = static_cast<u32>(storage.samples);
         (is_depth ? key.depth : key.color[slot]) = static_cast<s32>(shape.format);
-        attachments[attachment_count++] = {&texture, &storage, shape, VK_NULL_HANDLE};
+        attachments[attachment_count++] = {&texture, &storage, shape, VK_NULL_HANDLE, is_depth, slot};
         return true;
     };
     for (u32 slot = 0; slot < color_target_count; ++slot) {
@@ -1208,7 +1211,12 @@ bool DrawContext::BeginPass() {
         // A render target is written before it is read in nearly every case: its stale guest bytes
         // are not uploaded again (this also creates the lazy image). The first use initialises a
         // new image, whose Vulkan contents are otherwise undefined (random per boot).
-        if (!host->HostEnsureTargetContents(*attachment.storage)) {
+        const bool cleared_whole =
+            opening.active &&
+            (attachment.depth_slot ? opening.depth
+                                   : (opening.color_mask >> attachment.slot & 1) != 0) &&
+            ClearCoversImage(*attachment.storage, attachment.shape.layer_count, native_extent, layers);
+        if (!host->HostEnsureTargetContents(*attachment.storage, cleared_whole)) {
             host->HostFailed("SetRenderTargets", fmt::format("no image for render target {:#x}",
                                                              attachment.texture->serial));
             return false;
@@ -1878,6 +1886,93 @@ VtxCov DrawContext::VtxCovServeOrMiss(BufferRef& ref, u64 address, u64 size, boo
     return VtxCovServed(it->second.reason) ? VtxCov::Dropped : it->second.reason;
 }
 
+void DrawContext::AddClearsAhead(OpeningClear& opening) {
+    const std::span<const u64> ahead = host->HostRecordsAhead();
+    constexpr size_t MAX_RECORDS = 64;
+    size_t index = 0;
+    for (size_t records = 0; records < MAX_RECORDS && index < ahead.size(); ++records) {
+        const auto* header = reinterpret_cast<const VC::RecordHeader*>(&ahead[index]);
+        if (header->size < sizeof(VC::RecordHeader) || header->size % 8 != 0 ||
+            index + header->size / 8 > ahead.size()) {
+            return;
+        }
+        const size_t payload = header->size - sizeof(VC::RecordHeader);
+        switch (static_cast<VC::Op>(header->op)) {
+        case VC::Op::ClearColor:
+            if (payload >= sizeof(VC::ClearColorPayload)) {
+                const auto& c = *reinterpret_cast<const VC::ClearColorPayload*>(header + 1);
+                if ((c.mask & 0xF) == 0xF && c.index >= 0 &&
+                    static_cast<u32>(c.index) < MAX_COLOR_TARGETS) {
+                    opening.color_mask |= 1u << c.index;
+                }
+            }
+            break;
+        case VC::Op::ClearDepthStencil:
+            if (payload >= sizeof(VC::ClearDepthStencilPayload) && depth_target.texture &&
+                depth_target.texture->storage) {
+                const auto& c = *reinterpret_cast<const VC::ClearDepthStencilPayload*>(header + 1);
+                const Storage& target = *depth_target.texture->storage;
+                if ((!target.host.depth || c.depth_mask) &&
+                    (!target.host.stencil || (static_cast<u32>(c.stencil_mask) & 0xFF) == 0xFF)) {
+                    opening.depth = true;
+                }
+            }
+            break;
+        // State that neither reads nor moves the targets, nor changes what a clear covers.
+        case VC::Op::SetViewports:
+        case VC::Op::SetDepthRanges:
+        case VC::Op::BindProgram:
+        case VC::Op::BindState:
+        case VC::Op::BindVertexAttribs:
+        case VC::Op::BindVertexStreams:
+        case VC::Op::BindVertexBuffers:
+        case VC::Op::BindUniformBuffers:
+        case VC::Op::BindStorageBuffers:
+        case VC::Op::BindTextures:
+        case VC::Op::BindSeparateTextures:
+        case VC::Op::BindSeparateSamplers:
+        case VC::Op::BindImages:
+        case VC::Op::SetStencil:
+        case VC::Op::SetPolygonOffset:
+        case VC::Op::SetTexturePool:
+        case VC::Op::SetSamplerPool:
+        case VC::Op::SetBlendColor:
+        case VC::Op::SetDepthClamp:
+        case VC::Op::SetAlphaRef:
+        case VC::Op::PushConstants:
+        case VC::Op::SetPrimitiveRestart:
+        case VC::Op::SetViewportSwizzles:
+        case VC::Op::SetSampleMask:
+        case VC::Op::SetPointSize:
+        case VC::Op::SetLineWidth:
+        case VC::Op::SetProvokingVertex:
+            break;
+        default:
+            return;
+        }
+        index += header->size / 8;
+    }
+}
+
+bool DrawContext::ClearCoversImage(const Storage& storage, u32 attached_layers,
+                                   VkExtent2D pass_extent, u32 pass_layers) const {
+    // Only a plain guest-sized 2D image: one level, one depth slice, every layer attached and
+    // cleared (the clear spans the framebuffer's layers), and the pass as large as the image.
+    if (storage.levels != 1 || storage.extent.depth > 1 || storage.scaled ||
+        storage.scale_owner != nullptr || attached_layers != storage.layers ||
+        pass_layers != storage.layers || pass_extent.width != storage.extent.width ||
+        pass_extent.height != storage.extent.height) {
+        return false;
+    }
+    if ((scissors_set & 1) == 0) {
+        return true; // ClearRect: the whole pass
+    }
+    const VC::ScissorRect& s = scissors[0];
+    return s.x <= 0 && s.y <= 0 &&
+           static_cast<s64>(s.x) + s.width >= static_cast<s64>(storage.extent.width) &&
+           static_cast<s64>(s.y) + s.height >= static_cast<s64>(storage.extent.height);
+}
+
 VkRect2D DrawContext::ClearRect() const {
     // The game's rectangle in its own pixels, then in the pixels the pass draws at.
     VkRect2D rect{{0, 0}, framebuffer_extent};
@@ -1919,8 +2014,15 @@ void DrawContext::ClearColor(const VC::ClearColorPayload& p) {
         return finish();
     }
     {
+        if (!pass_open && !host->HostConditional()) {
+            opening_clear = {.active = true,
+                             .depth = false,
+                             .color_mask = (p.mask & 0xF) == 0xF ? 1u << p.index : 0u};
+            AddClearsAhead(opening_clear);
+        }
         const bool suspended = host->HostSuspendCondition();
         const bool ready = TargetsUsable() && BeginPass();
+        opening_clear = {};
         if (suspended) {
             host->HostResumeCondition();
         }
@@ -1974,8 +2076,17 @@ void DrawContext::ClearDepthStencil(const VC::ClearDepthStencilPayload& p) {
         return finish();
     }
     {
+        if (!pass_open && !host->HostConditional() && depth_target.texture->storage) {
+            const Storage& target = *depth_target.texture->storage;
+            const bool depth_done = !target.host.depth || p.depth_mask;
+            const bool stencil_done =
+                !target.host.stencil || (static_cast<u32>(p.stencil_mask) & 0xFF) == 0xFF;
+            opening_clear = {.active = true, .depth = depth_done && stencil_done, .color_mask = 0};
+            AddClearsAhead(opening_clear);
+        }
         const bool suspended = host->HostSuspendCondition();
         const bool ready = TargetsUsable() && BeginPass();
+        opening_clear = {};
         if (suspended) {
             host->HostResumeCondition();
         }

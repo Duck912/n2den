@@ -151,7 +151,8 @@ public:
     /// first use its image is filled from the guest bytes (zero-cleared when they cannot be
     /// uploaded) instead of being left undefined: pixels the game never overwrites (partial
     /// draws, blending onto the old contents) then hold what the console memory holds.
-    virtual bool HostEnsureTargetContents(Storage& storage) = 0;
+    /// `cleared_whole`: the op opening the pass clears this attachment's whole image.
+    virtual bool HostEnsureTargetContents(Storage& storage, bool cleared_whole) = 0;
     /// True when HostEnsureContents(storage, false) would record commands (first upload, CPU
     /// change, overlapping writes); creates the image. Safe inside a render pass.
     virtual bool HostNeedsCommands(Storage& storage, bool will_overwrite) = 0;
@@ -896,6 +897,24 @@ private:
 
     // ---- per command buffer / pass state ----
     bool pass_open{false};
+    /// Set by ClearColor / ClearDepthStencil right before their BeginPass, taken (and reset) by
+    /// BeginPass: the op about to open the pass clears this attachment with every channel (depth
+    /// and stencil), outside any GPU render condition. BeginPass decides whether the clear covers
+    /// the whole image (EnsureTargetContents' cleared_whole).
+    struct OpeningClear {
+        bool active{false};
+        bool depth{false};  ///< the depth/stencil attachment is cleared whole
+        u32 color_mask{};   ///< bit k: color slot k is cleared with every channel
+    };
+    OpeningClear opening_clear{};
+    /// The op about to open a pass clears `opening`: adds the clears that follow it before anything
+    /// that could read or change the targets (only state binds in between; stops at a scissor,
+    /// target or render-condition change, a draw, dispatch, copy, report, barrier or sync).
+    void AddClearsAhead(OpeningClear& opening);
+    /// Whether a clear of the pass rectangle covers `storage`'s whole image (one level, every
+    /// layer attached, the scissor and the pass span all of it).
+    [[nodiscard]] bool ClearCoversImage(const Storage& storage, u32 attached_layers,
+                                        VkExtent2D pass_extent, u32 pass_layers) const;
     void NoteFlipTarget(const std::shared_ptr<Storage>& storage, VkImageLayout sampled_layout);
     /// Storages that flip between attachment and sampled use, with the layout they are sampled in:
     /// a pass that begins moves them to it before its first draw, so a draw that samples one

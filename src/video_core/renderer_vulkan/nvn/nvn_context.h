@@ -254,6 +254,7 @@ struct ContextStats {
     u64 depth_upload_unsupported{};
     u64 target_first_uploads{};
     u64 target_first_clears{};
+    u64 target_first_skipped{};
     u64 virtual_maps{};
     u64 virtual_unresolved{};
     u64 virtual_sparse_binds{};
