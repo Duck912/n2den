@@ -1,6 +1,6 @@
 # Game progress
 
-Last updated: 2026-11-18.
+Last updated: 2026-11-22.
 
 This page tracks how far each tested Switch 2 game gets in n2den, per graphics backend, and what is known to
 be wrong. It only lists what has actually been run; a game that is not here has not been tested.
@@ -12,6 +12,7 @@ for n2den's own changes, not as what another machine will reach.
 
 | Status | Meaning |
 |---|---|
+| **Playable** | Can be played normally: boots, menus, movies and gameplay work, no known crashes in play. |
 | **In-game** | Reaches gameplay or its opening 3D sequence and renders it correctly as far as checked. |
 | **Boots** | Starts and shows a picture, with known rendering or stability faults. |
 | **Unstable** | Can crash, or hang the graphics driver. Not recommended. |
@@ -24,7 +25,8 @@ for n2den's own changes, not as what another machine will reach.
 | The Legend of Zelda: Ocarina of Time (Switch 2) | In-game | In-game | Works |
 | Fire Emblem: Fortune's Weave | In-game | In-game | CPU code only |
 | Mario Kart World | Not tested | Unstable | Not usable |
-| Fast Fusion | In-game | In-game | Works |
+| Fast Fusion | Playable | Playable | Works |
+| Kirby and the Forgotten Land – Nintendo Switch 2 Edition + Star-Crossed World | Playable | Playable | Works |
 
 "Prepared launch" means the game's CPU code and graphics pipelines are built before play starts, so that
 nothing has to be compiled while playing.
@@ -79,9 +81,9 @@ Known issues:
 
 ## Fast Fusion
 
-- **Emulated GPU:** in-game. The game's own DLSS upscaling is sharp in every mode, with no ghosting in Ultra
+- **Emulated GPU:** playable. The game's own DLSS upscaling is sharp in every mode, with no ghosting in Ultra
   Quality.
-- **NVN-HLE (Vulkan):** in-game with PC DLSS. Races render correctly across the game's quality modes. Fixed on
+- **NVN-HLE (Vulkan):** playable with PC DLSS. Races render correctly across the game's quality modes. Fixed on
   the way: a GPU hang at race start, a washed-out race and a black or splotchy race (see
   [nvn-hle-debugging.md](nvn-hle-debugging.md)).
 - **Prepared launch:** works. CPU code is prebuilt (941,676 blocks) and pipelines rebuild before the first
@@ -91,3 +93,16 @@ Known issues:
 - **Known issues on NVN-HLE:** a boot crash (device lost on the first submission, about one boot in five) is
   mitigated by giving feedback scratch images their own memory; still being monitored. Without PC DLSS the game
   falls back to FSR1, because its own DLSS network has no runner under NVN-HLE.
+
+## Kirby and the Forgotten Land – Nintendo Switch 2 Edition + Star-Crossed World
+
+Tested from a repacked `.nx` with the Star-Crossed World add-on; title screen, notice, difficulty select,
+opening movie, first level and in-game movies.
+
+- **Emulated GPU:** playable. Boots, renders the right way up and plays.
+- **NVN-HLE (Vulkan):** playable. Title, menus, movies and gameplay render correctly; no crashes in play.
+- **Prepared launch:** works. CPU code is prebuilt, and pipelines rebuild before the first frame once the game
+  has been played on that machine. On a machine that has never run it, the prepare step finds only 37 of the
+  1,183 stages a list needs in the game's files (the add-on is scanned too); the rest are built at run time.
+- **Needed:** the game uses an older SDK (Generic_19_3_7), and its Switch 2 data lives in the add-on, so the
+  add-on must be in the container. Packers that wrote its RomFS folders unlinked are handled.
