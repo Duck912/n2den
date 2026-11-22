@@ -15,6 +15,9 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <iterator>
+#include <span>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -31,6 +34,8 @@
 
 #include "./A64/testenv.h"
 #include "common/logging.h"
+#include "common/lz4_compression.h"
+#include "common/zbic_compression.h"
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
 #include "dynarmic/frontend/A64/decoder/a64.h"
 #include "dynarmic/frontend/A64/translate/impl/impl.h"
@@ -190,6 +195,45 @@ public:
         return true;
     }
 };
+
+// nsotext <in.nso> <out.bin>: writes the decompressed .text segment, decompressed as the NSO loader does it
+// (src/core/loader/nso.cpp: flag bit 0 = text compressed, bit 7 = ZBIC instead of LZ4).
+int NsoText(const char* in_path, const char* out_path) {
+    std::ifstream in(in_path, std::ios::binary);
+    std::vector<u8> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (data.size() < 0x100 || std::memcmp(data.data(), "NSO0", 4) != 0) {
+        std::fprintf(stderr, "%s: not an NSO\n", in_path);
+        return 1;
+    }
+    const auto rd = [&](size_t off) {
+        u32 v;
+        std::memcpy(&v, data.data() + off, 4);
+        return v;
+    };
+    const u32 flags = rd(0xC), file_off = rd(0x10), size = rd(0x18), csize = rd(0x60);
+    const bool compressed = (flags & 1) != 0;
+    const size_t stored = compressed ? csize : size;
+    if (size_t{file_off} + stored > data.size()) {
+        std::fprintf(stderr, "%s: text segment past the end of the file\n", in_path);
+        return 1;
+    }
+    std::vector<u8> text(size);
+    const u8* src = data.data() + file_off;
+    if (!compressed) {
+        std::memcpy(text.data(), src, size);
+    } else if ((flags >> 7) & 1) {
+        if (::Common::Compression::DecompressDataZBIC(text, std::span<const u8>{src, stored}) != int(size)) {
+            std::fprintf(stderr, "%s: ZBIC decompression failed\n", in_path);
+            return 1;
+        }
+    } else if (::Common::Compression::DecompressDataLZ4(text.data(), size, src, stored) != int(size)) {
+        std::fprintf(stderr, "%s: LZ4 decompression failed\n", in_path);
+        return 1;
+    }
+    std::ofstream out(out_path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(text.data()), static_cast<std::streamsize>(text.size()));
+    return out ? 0 : 1;
+}
 
 // Prints, for each hex word on the command line, the name of the first decoder entry that matches it.
 int Names(int argc, char** argv) {
@@ -506,6 +550,9 @@ int main(int argc, char** argv) {
     }
     if (argc >= 2 && std::string(argv[1]) == "irdump") {
         return IrDump(argc - 2, argv + 2);
+    }
+    if (argc >= 4 && std::string(argv[1]) == "nsotext") {
+        return NsoText(argv[2], argv[3]);
     }
     if (argc >= 2 && std::string(argv[1]) == "names") {
         return Names(argc - 2, argv + 2);
