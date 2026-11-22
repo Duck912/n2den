@@ -97,6 +97,9 @@ enum class AppletId : u32 {
     Lhub = 0x35,
     SoftwareKeyboardNative = 0x01020011,
     ControllerNative = 0x0100000C,
+    // Shop/web page applet of older Switch 2 SDKs (Generic_19_3_7): web-applet TLV arguments,
+    // read back by nn::ec as a 0x1010-byte WebCommonReturnValue (Kirby Forgotten Land notice).
+    ShopNative = 0x01000032,
 };
 
 constexpr AppletId GetFrontendAppletId(AppletId id) {
@@ -105,6 +108,8 @@ constexpr AppletId GetFrontendAppletId(AppletId id) {
         return AppletId::SoftwareKeyboard;
     case AppletId::ControllerNative:
         return AppletId::Controller;
+    case AppletId::ShopNative:
+        return AppletId::Shop;
     default:
         return id;
     }
