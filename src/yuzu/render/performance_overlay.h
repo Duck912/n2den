@@ -67,7 +67,11 @@ private:
         std::vector<Cell> cells;
         QString note; ///< Small dim text in place of cells
         bool separator_before = false;
+        /// The first cell's value in the large font (the FPS reading); the other cells follow it
+        /// on the same line instead of in the columns.
+        bool big = false;
         int y = 0;
+        int height = 0;
     };
     struct FrameStats {
         std::optional<double> current_ms;
@@ -151,6 +155,7 @@ private:
     QFont m_labelFont;
     QFont m_valueFont;
     QFont m_smallFont;
+    QFont m_bigFont;
     std::vector<Row> m_rows;
     QString m_header;
     QString m_footer;

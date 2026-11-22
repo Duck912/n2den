@@ -14,6 +14,7 @@
 
 #include "common/boot_counter.h"
 #include "common/diag_request.h"
+#include "common/emu_counters.h"
 #include "common/logging.h"
 #include "shader_recompiler/stage.h"
 #include "video_core/nvn/prerec_probe.h"
@@ -2585,6 +2586,7 @@ u32 IndexSize(u32 type) {
 bool DrawContext::PrepareDraw(u32 mode, u32 element_count, const IndexRange* index,
                               PreparedDraw& out, HostIndex& host_index) {
     ++counters.draws;
+    Common::EmuCounters::draws.Add(); // the performance overlay's DRAWS row
     namespace Phases = ReplayPhases;
     if (Phases::Enabled()) [[unlikely]] {
         Phases::Count(Phases::Counter::Draws);

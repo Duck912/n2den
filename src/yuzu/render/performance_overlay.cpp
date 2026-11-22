@@ -139,7 +139,11 @@ PerformanceOverlay::PerformanceOverlay(MainWindow* parent)
     m_smallFont = QFont(family);
     m_smallFont.setPixelSize(10);
     m_smallFont.setWeight(QFont::Medium);
-    for (QFont* font : {&m_labelFont, &m_valueFont, &m_smallFont}) {
+    // The FPS reading: readable at a glance over a busy scene.
+    m_bigFont = QFont(family);
+    m_bigFont.setPixelSize(28);
+    m_bigFont.setWeight(QFont::Bold);
+    for (QFont* font : {&m_labelFont, &m_valueFont, &m_smallFont, &m_bigFont}) {
         font->setStyleStrategy(QFont::PreferAntialias);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
         // Digits of equal width keep columns from twitching as values change.
@@ -361,7 +365,10 @@ void PerformanceOverlay::addThreadRows() {
 
     // Guest cores by index; everything else summed into what it works on.
     std::map<int, double> cores;
-    enum Group { Front, Back, Vulkan, Present, Shaders, Decode, Audio, Timing, Ui, Other, Count };
+    enum Group {
+        Front, Back, Replay, Hash, Complete, Vulkan, Present, Shaders, Decode,
+        Audio, Timing, Ui, Net, Other, Count
+    };
     std::array<std::optional<double>, Count> groups;
     const auto add = [&](Group group, double percent) {
         groups[group] = groups[group].value_or(0.0) + percent;
@@ -376,6 +383,21 @@ void PerformanceOverlay::addThreadRows() {
             add(Front, thread.percent);
         } else if (name == QLatin1String("GPUBack")) {
             add(Back, thread.percent);
+        } else if (name == QLatin1String("NvnReplay")) {
+            // NVN-HLE: the thread that replays the game's draw calls on Vulkan.
+            add(Replay, thread.percent);
+        } else if (name == QLatin1String("NvnPrehash") || name == QLatin1String("NvnTexPrehash")) {
+            add(Hash, thread.percent);
+        } else if (name == QLatin1String("NvnComplete") || name == QLatin1String("NvnBacking") ||
+                   name == QLatin1String("NvnScreenshot")) {
+            add(Complete, thread.percent);
+        } else if (name.startsWith(QLatin1String("NvnPipeline"))) {
+            add(Shaders, thread.percent);
+        } else if (name == QLatin1String("NvnDecode") ||
+                   (name.startsWith(QLatin1String("Nvn")) && name.endsWith(QLatin1String("Init")))) {
+            add(Decode, thread.percent);
+        } else if (name.startsWith(QLatin1String("bsdsocket"))) {
+            add(Net, thread.percent);
         } else if (name == QLatin1String("VulkanWorker")) {
             add(Vulkan, thread.percent);
         } else if (name == QLatin1String("VulkanPresent")) {
@@ -430,12 +452,16 @@ void PerformanceOverlay::addThreadRows() {
     add_rows(tr("RENDER"), GpuColor,
              collect({{Front, tr("gpu")},
                       {Back, tr("back")},
+                      {Replay, tr("replay")},
+                      {Hash, tr("hash")},
+                      {Complete, tr("complete")},
                       {Vulkan, tr("vk")},
                       {Present, tr("present")},
                       {Shaders, tr("shaders")},
                       {Decode, tr("decode")}}));
     std::vector<std::pair<QString, double>> host_readings =
-        collect({{Audio, tr("audio")}, {Timing, tr("timing")}, {Ui, tr("ui")}, {Other, tr("other")}});
+        collect({{Audio, tr("audio")}, {Timing, tr("timing")}, {Ui, tr("ui")}, {Net, tr("net")},
+                 {Other, tr("other")}});
     if (m_system.cpu_kernel) {
         // Time inside the OS (page faults, system calls) out of all the CPU time the emulator used.
         host_readings.emplace_back(tr("kernel"), *m_system.cpu_kernel);
@@ -557,9 +583,11 @@ void PerformanceOverlay::rebuildRows() {
         m_rows.push_back({tr("CPU"), CpuColor,
                           {cell({}, Number(sys.cpu_process, 0), percent),
                            cell({}, Number(ToMiB(sys.ram_process), 0), MB)}});
-        m_rows.push_back({apiLabel(), FpsColor,
-                          {cell({}, Number(fps, 0), tr("FPS")),
-                           cell({}, Number(frames.current_ms, 1), tr("ms"))}});
+        Row api{apiLabel(), FpsColor,
+                {cell({}, Number(fps, 0), tr("FPS")),
+                 cell({}, Number(frames.current_ms, 1), tr("ms"))}};
+        api.big = true;
+        m_rows.push_back(std::move(api));
         m_header.clear();
         m_footer.clear();
         relayout();
@@ -606,6 +634,7 @@ void PerformanceOverlay::rebuildRows() {
             {cell({}, Number(fps, 0), tr("FPS")), cell({}, Number(frames.current_ms, 1), tr("ms")),
              cell(tr("speed"), Number(speed, 0), percent, slow ? WarnColor : ValueColor)}};
     api.separator_before = true;
+    api.big = true;
     m_rows.push_back(std::move(api));
     m_rows.push_back({tr("FRAME"), FrameColor,
                       {cell(tr("min"), Number(frames.min_ms, 1), {}),
@@ -649,17 +678,23 @@ void PerformanceOverlay::relayout() {
     const QFontMetrics label_fm(m_labelFont);
     const QFontMetrics value_fm(m_valueFont);
     const QFontMetrics small_fm(m_smallFont);
+    const QFontMetrics big_fm(m_bigFont);
 
     // Widths only grow, so the panel does not breathe as numbers change.
     size_t columns = 0;
     for (const Row& row : m_rows) {
         m_labelWidth = std::max(m_labelWidth, label_fm.horizontalAdvance(row.label));
-        columns = std::max(columns, row.cells.size());
+        if (!row.big) {
+            columns = std::max(columns, row.cells.size());
+        }
     }
     m_prefixWidths.resize(std::max(m_prefixWidths.size(), columns), 0);
     m_valueWidths.resize(std::max(m_valueWidths.size(), columns), 0);
     m_unitWidths.resize(std::max(m_unitWidths.size(), columns), 0);
     for (const Row& row : m_rows) {
+        if (row.big) {
+            continue; // laid out on its own line (bigRowWidth)
+        }
         for (size_t i = 0; i < row.cells.size(); ++i) {
             const Cell& c = row.cells[i];
             if (!c.prefix.isEmpty()) {
@@ -684,8 +719,27 @@ void PerformanceOverlay::relayout() {
         }
     }
     content_width = std::max(content_width, m_advanced ? AdvancedMinContent : SimpleMinContent);
+    // A big row: label, the large value (room for three digits), its unit, then the other cells.
+    for (const Row& row : m_rows) {
+        if (!row.big || row.cells.empty()) {
+            continue;
+        }
+        int width = m_labelWidth + LabelGap +
+                    std::max(big_fm.horizontalAdvance(row.cells[0].value),
+                             big_fm.horizontalAdvance(QStringLiteral("000"))) +
+                    UnitGap + small_fm.horizontalAdvance(row.cells[0].unit);
+        for (size_t i = 1; i < row.cells.size(); ++i) {
+            const Cell& c = row.cells[i];
+            width += ColumnGap + (c.prefix.isEmpty() ? 0 : small_fm.horizontalAdvance(c.prefix) + PrefixGap) +
+                     std::max(value_fm.horizontalAdvance(c.value),
+                              value_fm.horizontalAdvance(QStringLiteral("00.0"))) +
+                     (c.unit.isEmpty() ? 0 : UnitGap + small_fm.horizontalAdvance(c.unit));
+        }
+        content_width = std::max(content_width, width);
+    }
 
     const int row_height = std::max(label_fm.height(), value_fm.height());
+    const int big_row_height = std::max(row_height, big_fm.ascent() + small_fm.descent() + 2);
     int y = PadY;
     // Header line: the GPU name (Advanced) and the "Advanced" tick on the right, in both modes.
     m_headerY = y;
@@ -699,7 +753,8 @@ void PerformanceOverlay::relayout() {
             y += SectionGap;
         }
         row.y = y;
-        y += row_height + RowGap;
+        row.height = row.big ? big_row_height : row_height;
+        y += row.height + RowGap;
     }
     y += GraphGap - RowGap;
     const int graph_height = m_advanced ? AdvancedGraphHeight : SimpleGraphHeight;
@@ -874,11 +929,46 @@ void PerformanceOverlay::paintEvent(QPaintEvent*) {
             painter.setPen(SeparatorColor);
             painter.drawLine(PadX, sy, PadX + content_width, sy);
         }
-        const int baseline = row.y + ascent;
+        // A big row shares one baseline at the bottom of its line.
+        const int baseline = row.big ? row.y + row.height - small_fm.descent() - 1 : row.y + ascent;
         painter.setFont(m_labelFont);
         paintText(painter, PadX, baseline, row.label, row.label_color);
 
         int x = PadX + m_labelWidth + LabelGap;
+        if (row.big && !row.cells.empty()) {
+            const QFontMetrics big_fm(m_bigFont);
+            const Cell& lead = row.cells[0];
+            const int lead_width = std::max(big_fm.horizontalAdvance(lead.value),
+                                            big_fm.horizontalAdvance(QStringLiteral("000")));
+            painter.setFont(m_bigFont);
+            paintText(painter, x + lead_width - big_fm.horizontalAdvance(lead.value), baseline,
+                      lead.value, lead.color);
+            x += lead_width + UnitGap;
+            painter.setFont(m_smallFont);
+            paintText(painter, x, baseline, lead.unit, DimColor);
+            x += small_fm.horizontalAdvance(lead.unit);
+            for (size_t i = 1; i < row.cells.size(); ++i) {
+                const Cell& c = row.cells[i];
+                x += ColumnGap;
+                if (!c.prefix.isEmpty()) {
+                    painter.setFont(m_smallFont);
+                    paintText(painter, x, baseline, c.prefix, DimColor);
+                    x += small_fm.horizontalAdvance(c.prefix) + PrefixGap;
+                }
+                const int value_width = std::max(value_fm.horizontalAdvance(c.value),
+                                                 value_fm.horizontalAdvance(QStringLiteral("00.0")));
+                painter.setFont(m_valueFont);
+                paintText(painter, x + value_width - value_fm.horizontalAdvance(c.value), baseline,
+                          c.value, c.color);
+                x += value_width;
+                if (!c.unit.isEmpty()) {
+                    painter.setFont(m_smallFont);
+                    paintText(painter, x + UnitGap, baseline, c.unit, DimColor);
+                    x += UnitGap + small_fm.horizontalAdvance(c.unit);
+                }
+            }
+            continue;
+        }
         if (!row.note.isEmpty()) {
             painter.setFont(m_smallFont);
             paintText(painter, x, baseline,
