@@ -11,6 +11,8 @@
 #include <span>
 #include <vector>
 
+#include <openssl/evp.h>
+
 #include "common/common_funcs.h"
 #include "common/hex_util.h"
 #include "common/logging.h"
@@ -104,44 +106,80 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     Kernel::CodeSet codeset;
     codeset.memory.resize(module_start + last_segment_it->location + last_segment_it->size);
     {
-        std::vector<u8> compressed_data(*std::ranges::max_element(nso_header.segments_compressed_size));
         std::vector<u8> decompressed_size(std::ranges::max_element(nso_header.segments, [](auto const& a, auto const& b) {
             return a.size < b.size;
         })->size);
+        // Also holds uncompressed segments, so make room for the largest of either.
+        std::vector<u8> compressed_data(std::max<std::size_t>(
+            *std::ranges::max_element(nso_header.segments_compressed_size), decompressed_size.size()));
+        static constexpr const char* segment_names[3]{"text", "ro", "data"};
         for (std::size_t i = 0; i < nso_header.segments.size(); ++i) {
-            nso_file.Read(compressed_data.data(), nso_header.segments_compressed_size[i], nso_header.segments[i].offset);
+            const u32 stored_size = nso_header.IsSegmentCompressed(i)
+                ? u32(nso_header.segments_compressed_size[i]) : u32(nso_header.segments[i].size);
+            const std::size_t got = nso_file.Read(compressed_data.data(), stored_size, nso_header.segments[i].offset);
+            if (got != stored_size) {
+                // A file shorter than its header says is a damaged dump (for example one copied in
+                // text mode, which turns every CR LF byte pair into LF). Loading it would run a
+                // garbled code image, so refuse it here.
+                LOG_CRITICAL(Loader,
+                             "NSO {}: {} segment needs {:#x} bytes at file offset {:#x}, but the file "
+                             "({:#x} bytes) holds only {:#x}; the module file is damaged",
+                             nso_file.GetName(), segment_names[i], stored_size,
+                             u32(nso_header.segments[i].offset), nso_file.GetSize(), got);
+                return std::nullopt;
+            }
+            const u8* segment_data = compressed_data.data();
             if (nso_header.IsSegmentCompressed(i)) {
+                int r;
                 if (nso_header.IsZBICCompressed()) {
                     // ZBIC compression
-                    const int r = Common::Compression::DecompressDataZBIC(
+                    r = Common::Compression::DecompressDataZBIC(
                         std::span<u8>{decompressed_size}.first(nso_header.segments[i].size),
                         std::span<const u8>{compressed_data}.first(nso_header.segments_compressed_size[i])
                     );
-                    ASSERT(r > 0);
                 } else {
                     // LZ4 compression
-                    int r = Common::Compression::DecompressDataLZ4(
+                    r = Common::Compression::DecompressDataLZ4(
                         decompressed_size.data(),
                         nso_header.segments[i].size,
                         compressed_data.data(),
                         nso_header.segments_compressed_size[i]
                     );
-                    ASSERT(r == int(nso_header.segments[i].size));
                 }
-
-                std::memcpy(
-                    codeset.memory.data() + module_start + nso_header.segments[i].location,
-                    decompressed_size.data(),
-                    nso_header.segments[i].size
-                );
-            } else {
-                // Not compressed
-                std::memcpy(
-                    codeset.memory.data() + module_start + nso_header.segments[i].location,
-                    compressed_data.data(),
-                    nso_header.segments[i].size
-                );
+                if (r != int(nso_header.segments[i].size)) {
+                    LOG_CRITICAL(Loader,
+                                 "NSO {}: {} segment failed to decompress ({}, result {}, expected "
+                                 "{:#x} bytes); the module file is damaged",
+                                 nso_file.GetName(), segment_names[i],
+                                 nso_header.IsZBICCompressed() ? "ZBIC" : "LZ4", r,
+                                 u32(nso_header.segments[i].size));
+                    return std::nullopt;
+                }
+                segment_data = decompressed_size.data();
             }
+
+            // Bits 3-5 of the flags ask for the segment's SHA-256 to be checked, as the console's
+            // loader does. This catches damage that still happens to decompress.
+            if (((nso_header.flags >> (3 + i)) & 1) != 0) {
+                NSOHeader::SHA256Hash hash{};
+                unsigned int hash_len = 0;
+                EVP_Digest(segment_data, nso_header.segments[i].size, hash.data(), &hash_len,
+                           EVP_sha256(), nullptr);
+                if (hash != nso_header.segment_hashes[i]) {
+                    LOG_CRITICAL(Loader,
+                                 "NSO {}: {} segment SHA-256 {} does not match the header's {}; the "
+                                 "module file is damaged",
+                                 nso_file.GetName(), segment_names[i], Common::HexToString(hash),
+                                 Common::HexToString(nso_header.segment_hashes[i]));
+                    return std::nullopt;
+                }
+            }
+
+            std::memcpy(
+                codeset.memory.data() + module_start + nso_header.segments[i].location,
+                segment_data,
+                nso_header.segments[i].size
+            );
             codeset.segments[i].addr = module_start + nso_header.segments[i].location;
             codeset.segments[i].offset = module_start + nso_header.segments[i].location;
             codeset.segments[i].size = nso_header.segments[i].size;
