@@ -635,6 +635,16 @@ DrawResources::Scratch* DrawResources::GetScratch(const Storage& source, u32 slo
     storage->create_flags |= source.create_flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     storage->usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                      VK_IMAGE_USAGE_SAMPLED_BIT;
+    // Feedback scratch images get their own allocation (EDEN_NX2_NVN_SCRATCH_DEDICATED=0: shared
+    // blocks). Fast Fusion lost the device on about one boot in five: Aftermath showed a ROP write
+    // refused (illegal access, not a translation fault) inside a fresh scratch sub-allocated in a
+    // shared block, during frame 1's feedback copy of its 8181x1721 R8 mip chain. With a dedicated
+    // allocation: 0 of 13 boots crashed (3 of 15 without). The cause below the allocation is not
+    // known; scratches are few and kept for the session, so their own memory costs nothing.
+    static const bool dedicated = [] {
+        const char* v = std::getenv("EDEN_NX2_NVN_SCRATCH_DEDICATED");
+        return v == nullptr || *v == '\0' || v[0] != '0';
+    }();
     try {
         storage->image = impl.allocator->CreateImage({
             .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -652,7 +662,7 @@ DrawResources::Scratch* DrawResources::GetScratch(const Storage& source, u32 slo
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = nullptr,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        });
+        }, dedicated);
     } catch (const vk::Exception& exception) {
         LOG_ERROR(Render_Vulkan, "[nvn] feedback scratch image ({}x{}x{}, format {}) failed: {}",
                   source.extent.width, source.extent.height, source.extent.depth,

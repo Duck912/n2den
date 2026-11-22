@@ -24,7 +24,7 @@ for n2den's own changes, not as what another machine will reach.
 | The Legend of Zelda: Ocarina of Time (Switch 2) | In-game | In-game | Works |
 | Fire Emblem: Fortune's Weave | Not tested | In-game | CPU code only |
 | Mario Kart World | Not tested | Unstable | Not usable |
-| Fast Fusion | In-game | In-game | Not tested |
+| Fast Fusion | In-game | In-game | Works |
 
 "Prepared launch" means the game's CPU code and graphics pipelines are built before play starts, so that
 nothing has to be compiled while playing.
@@ -84,5 +84,10 @@ Known issues:
 - **NVN-HLE (Vulkan):** in-game with PC DLSS. Races render correctly across the game's quality modes. Fixed on
   the way: a GPU hang at race start, a washed-out race and a black or splotchy race (see
   [nvn-hle-debugging.md](nvn-hle-debugging.md)).
-- **Known issues on NVN-HLE:** an intermittent crash on boot (device lost on the first submission, before the
-  menu). Without PC DLSS the game falls back to FSR1, because its own DLSS network has no runner under NVN-HLE.
+- **Prepared launch:** works. CPU code is prebuilt (941,676 blocks) and pipelines rebuild before the first
+  frame from a state list once the game has been played on that machine (1,182 pipelines, none compiled during
+  a race). Pipelines for a machine that has never run the game are not covered yet: the game keeps its shaders in its own `SHN!` files (`romfs/shaders/*.shdr`, code
+  LZ4-compressed), which the prepare step can't read yet, so it finds 0 of the 419 stages a list needs.
+- **Known issues on NVN-HLE:** a boot crash (device lost on the first submission, about one boot in five) is
+  mitigated by giving feedback scratch images their own memory; still being monitored. Without PC DLSS the game
+  falls back to FSR1, because its own DLSS network has no runner under NVN-HLE.

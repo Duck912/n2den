@@ -631,7 +631,14 @@ bool Context::Impl::EnsureImage(Storage& s) {
             s.contents_valid = false;
             s.origin = StorageOrigin::None;
         }
-        s.image = allocator->CreateImage(image_info, false, AllocationKind::StorageImage);
+        // EDEN_NX2_NVN_STORAGE_DEDICATED=1: render-target-capable storages get their own allocation
+        // (boot-crash A/B: a ROP write fault inside a fresh render target placed in a shared block).
+        static const bool dedicated_targets = [] {
+            const char* v = std::getenv("EDEN_NX2_NVN_STORAGE_DEDICATED");
+            return v != nullptr && *v != '\0' && v[0] != '0';
+        }();
+        const bool dedicated = dedicated_targets && s.host.attachable;
+        s.image = allocator->CreateImage(image_info, dedicated, AllocationKind::StorageImage);
     } catch (const vk::Exception& exception) {
         s.image_failed = true;
         stats.textures_failed.fetch_add(1, std::memory_order_relaxed);
@@ -642,6 +649,18 @@ bool Context::Impl::EnsureImage(Storage& s) {
     }
     s.current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     s.last_used_present = stats.presents.load(std::memory_order_relaxed);
+    static const bool boot_diag = [] {
+        const char* v = std::getenv("EDEN_NX2_NVN_BOOT_DIAG");
+        return v != nullptr && *v != '\0' && v[0] != '0';
+    }();
+    if (boot_diag && s.last_used_present < 3) {
+        // EDEN_NX2_NVN_BOOT_DIAG=1 (Aftermath names a faulting resource only by size and age):
+        // every image created in the first frames with its memory size.
+        LOG_INFO(Render_Vulkan, "[nvn] boot image {:#x}: {}x{}x{} L{} A{} fmt {} usage {:#x} mem {} bytes",
+                 reinterpret_cast<uintptr_t>(*s.image), s.extent.width, s.extent.height,
+                 s.extent.depth, s.levels, s.layers, static_cast<int>(s.host.format), s.usage,
+                 device.GetLogical().GetImageMemoryRequirements(*s.image).size);
+    }
     stats.storages_created.fetch_add(1, std::memory_order_relaxed);
     if (s.cached) {
         storage_cache_bytes += s.vram_bytes;

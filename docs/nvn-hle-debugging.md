@@ -138,12 +138,19 @@ and answer (method, output size, optimal/max/min render size). Games usually ask
 - The log is buffered. A run that is killed (rather than closed) can lose its last lines: set `flush_line=true`
   in the config's `[Miscellaneous]` section while debugging, and back to `false` afterwards.
 - Only one emulator instance at a time; a build cannot replace the executable while it runs.
+- Aftermath GPU crash dumps (`log\gpucrash\crash*.nv-gpudmp`) are moved to `log\gpucrash-saved\` at the next
+  launch instead of being deleted with the folder.
 - Programs and dumps taken from a game are the game's data. Keep them local.
 
 ## Open issues (Fast Fusion, NVN-HLE)
 
-- Intermittent boot crash: device lost on the first submission, a few seconds after launch, before the menu.
-  Not tied to HDR or to the fixes above.
+- Boot crash (device lost on the first submission, about one boot in five), mitigated, cause unknown. Aftermath
+  showed a ROP write refused inside a freshly created feedback scratch image (the frame-1 copy of an 8181x1721
+  R8 mip chain), sub-allocated in a shared memory block. Copy regions, barriers and the validation layer's
+  sync checks were clean. Feedback scratch images now get their own allocation: 0 of 13 boots crashed, against
+  3 of 15. `EDEN_NX2_NVN_SCRATCH_DEDICATED=0` restores shared blocks; `EDEN_NX2_NVN_STORAGE_DEDICATED=1` does
+  the same for render-target storages; `EDEN_NX2_NVN_BOOT_DIAG=1` logs every image created in the first
+  frames and each frame-1 feedback copy with memory sizes, to match against an Aftermath dump.
 - With PC DLSS, the game renders at the minimum size NVN-HLE reports (output / 3) from Balanced mode up, because
   `nvnDlssNetworkBuilderGetOptimalSettings` answers with PC ratios.
 - The game's own DLSS network (CUDA kernels) has no runner under NVN-HLE; without PC DLSS it falls back to FSR1.

@@ -1978,6 +1978,26 @@ void DrawContext::RecordFeedbackCopies(DrawPlan& plan) {
             host->HostTransitionMany(layouts);
         }
         host->HostFlushBarrier();
+        static const bool boot_diag = [] {
+            const char* v = std::getenv("EDEN_NX2_NVN_BOOT_DIAG");
+            return v != nullptr && *v != '\0' && v[0] != '0';
+        }();
+        if (boot_diag && impl.presents_recorded < 2) {
+            // EDEN_NX2_NVN_BOOT_DIAG=1: the frame-1 feedback copies with both images' memory sizes.
+            const auto mem = [&](const Storage& x) {
+                return impl.device.GetLogical().GetImageMemoryRequirements(*x.image).size;
+            };
+            LOG_INFO(Render_Vulkan,
+                     "[nvn] f{} feedback copy src {:#x} {}x{}x{} L{} A{} fmt {} mem {} -> dst {:#x} "
+                     "{}x{}x{} L{} A{} mem {}; copy L{}+{} A{}+{} retype {}",
+                     impl.presents_recorded + 1, reinterpret_cast<uintptr_t>(*source.image),
+                     source.extent.width, source.extent.height, source.extent.depth, source.levels,
+                     source.layers, static_cast<int>(source.host.format), mem(source),
+                     reinterpret_cast<uintptr_t>(*scratch.image), scratch.extent.width,
+                     scratch.extent.height, scratch.extent.depth, scratch.levels, scratch.layers,
+                     mem(scratch), copy.level, copy.levels, copy.layer, copy.layers,
+                     copy.retype_layers);
+        }
         if (copy.retype_layers != 0) {
             // A 1x1x1 2D placeholder sampled as 3D or cube: its single texel goes to the typed
             // scratch (a 2D layer copies to a 3D depth slice and to every cube face).
