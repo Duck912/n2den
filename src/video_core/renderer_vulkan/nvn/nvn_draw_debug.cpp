@@ -334,8 +334,18 @@ void DrawContext::DebugOnDraw(u32 mode) {
     line += " tex=[";
     for (const DrawPlan::ImageBinding& b : draw_plan.bindings) {
         const Storage& s = *b.texture->storage;
-        line += fmt::format("{:x}:{}x{}:f{}{} ", b.texture->serial, s.extent.width, s.extent.height,
+        line += fmt::format("{:x}:{}x{}:f{}{}", b.texture->serial, s.extent.width, s.extent.height,
                             static_cast<int>(s.host.format), b.scratch ? "(copy)" : "");
+        // Where the bytes live and whether the image holds them: pool address+offset/flags,
+        // origin (0 never uploaded, 1 CPU, 2 GPU) and contents_valid. Finds textures that are
+        // never filled from guest memory (a movie frame a decoder writes there).
+        if (const auto pool = impl.pools.find(s.pool_serial); pool != impl.pools.end()) {
+            line += fmt::format("@{:#x}+{:#x}/{:#x}{}", pool->second->address, s.pool_offset,
+                                pool->second->flags, pool->second->IsVirtual() ? "v" : "");
+        } else {
+            line += "@nopool";
+        }
+        line += fmt::format(":o{}v{} ", static_cast<int>(s.origin), s.contents_valid ? 1 : 0);
     }
     line += fmt::format("] inline_updates={} fallbacks=[{}]", inline_updates.size(), dbg_notes);
     emit(line);

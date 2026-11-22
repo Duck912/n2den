@@ -34,6 +34,7 @@
 #include "video_core/nvn_draw_probe.h"
 #include "video_core/nx2.h"
 #include "video_core/renderer_base.h"
+#include "video_core/renderer_vulkan/nvn/nvn_viewport.h"
 #include "video_core/renderer_vulkan/nvn/nvn_condition_prefetch.h"
 #include "video_core/renderer_vulkan/nvn/nvn_draw.h"
 #include "video_core/renderer_vulkan/nvn/nvn_impl.h"
@@ -5663,9 +5664,24 @@ void Recorder::LogOp(VC::Op op, const void* payload, size_t payload_size) {
     case VC::Op::ClearTexture:
         line("ClearTexture");
         break;
-    case VC::Op::CopyBufferToTexture:
-        line("CopyBufferToTexture");
+    case VC::Op::CopyBufferToTexture: {
+        // The source and the pool it resolves to (backing 1 imported, 2 mirror, 3 device local,
+        // 4 virtual): a copy from a pool the replay never refreshes copies stale bytes silently.
+        VC::CopyBufferTexturePayload p{};
+        std::memcpy(&p, payload, (std::min)(payload_size, sizeof(p)));
+        Pool* pool{};
+        u64 offset{};
+        if (impl.ResolveBuffer(p.buffer, 1, pool, offset) && pool) {
+            line(fmt::format("CopyBufferToTexture src {:#x} -> pool {:#x}+{:#x} flags {:#x} backing {} "
+                             "stride {} region {}x{}",
+                             p.buffer, pool->address, offset, pool->flags,
+                             static_cast<int>(pool->backing), p.row_stride, p.region.width,
+                             p.region.height));
+        } else {
+            line(fmt::format("CopyBufferToTexture src {:#x} (unresolved)", p.buffer));
+        }
         break;
+    }
     case VC::Op::CopyTextureToBuffer:
         line("CopyTextureToBuffer");
         break;
@@ -6273,6 +6289,9 @@ bool Recorder::RecordWindowFilter(Texture& texture, VkFormat source_format, cons
         static_cast<f32>(crop.x + crop.width) / static_cast<f32>(source.extent.width),
         static_cast<f32>(crop.y + crop.height) / static_cast<f32>(source.extent.height),
     };
+    if (PresentFlipsRows(impl.device_window_origin.load(std::memory_order_relaxed))) {
+        std::swap(uv.top, uv.bottom); // bottom-up window image (LowerLeftStoresRowsBottomUp)
+    }
     const auto upscale = [&](auto& pass) {
         if (pass) {
             view = pass->Record(impl.device, Cmd(), 0, *source.image, view,
@@ -6487,6 +6506,9 @@ void Recorder::RecordPresent(Texture& texture, Frame& frame, std::vector<Frame*>
         if (raw_copy) {
             source = RawPresentCopy(s, raw_format);
         }
+        // A bottom-up window image (LowerLeftStoresRowsBottomUp) is blitted with its rows reversed.
+        const bool flip_rows =
+            PresentFlipsRows(impl.device_window_origin.load(std::memory_order_relaxed));
         const s32 blit_width = static_cast<s32>(picture_rect.width);
         const s32 blit_height = static_cast<s32>(picture_rect.height);
         const s32 blit_x = static_cast<s32>(picture_rect.x);
@@ -6533,9 +6555,10 @@ void Recorder::RecordPresent(Texture& texture, Frame& frame, std::vector<Frame*>
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-            .srcOffsets = {{static_cast<s32>(crop_rect.x), static_cast<s32>(crop_rect.y), 0},
+            .srcOffsets = {{static_cast<s32>(crop_rect.x),
+                            static_cast<s32>(flip_rows ? crop_rect.y + crop_rect.height : crop_rect.y), 0},
                            {static_cast<s32>(crop_rect.x + crop_rect.width),
-                            static_cast<s32>(crop_rect.y + crop_rect.height), 1}},
+                            static_cast<s32>(flip_rows ? crop_rect.y : crop_rect.y + crop_rect.height), 1}},
             .dstSubresource{
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .mipLevel = 0,
@@ -6921,11 +6944,15 @@ void Recorder::RecordPictureReadback(PictureReadback& readback, VkImage source_i
         barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         Cmd().PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                               barrier);
+        // Same row order as the present blit (a bottom-up LOWER_LEFT window image is reversed).
+        const bool flip_rows =
+            PresentFlipsRows(impl.device_window_origin.load(std::memory_order_relaxed));
+        const s32 top = static_cast<s32>(source.y);
+        const s32 bottom = static_cast<s32>(source.y + source.height);
         const VkImageBlit blit{
             .srcSubresource{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-            .srcOffsets = {{static_cast<s32>(source.x), static_cast<s32>(source.y), 0},
-                           {static_cast<s32>(source.x + source.width),
-                            static_cast<s32>(source.y + source.height), 1}},
+            .srcOffsets = {{static_cast<s32>(source.x), flip_rows ? bottom : top, 0},
+                           {static_cast<s32>(source.x + source.width), flip_rows ? top : bottom, 1}},
             .dstSubresource{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
             .dstOffsets = {{static_cast<s32>(target.x), static_cast<s32>(target.y), 0},
                            {static_cast<s32>(target.x + target.width),

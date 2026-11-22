@@ -14,6 +14,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "common/common_types.h"
 
@@ -35,6 +36,40 @@ struct ViewportRect {
         return {rect.x, top, rect.width, rect.height};
     }
     return {rect.x, top + rect.height, rect.width, -rect.height};
+}
+
+/// LOWER_LEFT games store render targets bottom-up, as OpenGL does: window row y is image row y,
+/// clip +y points to higher rows, and textures they render are sampled the same way. The window is
+/// flipped once when presented (PresentFlipsRows). Found on Kirby and the Forgotten Land (never
+/// sets an origin, so NVN's default LOWER_LEFT): with the UPPER_LEFT rule every render-to-texture
+/// layer (text, buttons) came out upside down, and a sub-target viewport landed in the wrong half.
+/// EDEN_NX2_NVN_LOWER_LEFT_ROWS=0 restores the old rule (the image's first row is its top).
+[[nodiscard]] inline bool LowerLeftStoresRowsBottomUp() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_NVN_LOWER_LEFT_ROWS");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+/// Whether draws use LOWER_LEFT window space: the game's device origin (0 lower left, 1 upper left)
+/// unless EDEN_NX2_NVN_ORIGIN=lower|upper overrides it (experiments).
+[[nodiscard]] inline bool EffectiveLowerLeft(u32 device_origin) {
+    static const int origin_override = [] {
+        const char* value = std::getenv("EDEN_NX2_NVN_ORIGIN");
+        return value == nullptr ? -1 : (value[0] == 'u' ? 1 : 0);
+    }();
+    return origin_override >= 0 ? origin_override == 0 : device_origin == 0;
+}
+
+/// The window image is stored bottom-up and must be flipped once when presented.
+[[nodiscard]] inline bool PresentFlipsRows(u32 device_origin) {
+    return EffectiveLowerLeft(device_origin) && LowerLeftStoresRowsBottomUp();
+}
+
+/// Viewport for a LOWER_LEFT game whose rows are stored bottom-up: positive height at `rect.y`.
+[[nodiscard]] constexpr ViewportRect ToVulkanViewportBottomUp(ViewportRect rect) {
+    return {rect.x, rect.y, rect.width, rect.height};
 }
 
 /// First row of a scissor rectangle of `height` rows starting at `y` in NVN window space.

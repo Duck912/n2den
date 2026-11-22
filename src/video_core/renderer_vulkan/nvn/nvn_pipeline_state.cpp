@@ -604,10 +604,14 @@ DynamicFixedState MakeDynamicFixedState(const GraphicsFixedState& state) {
     default:
         break;
     }
-    // The replay's viewports are negative-height whatever the window origin (nvn_viewport.h), so
-    // the NVN winding is the Vulkan one.
+    // Negative-height viewports keep the NVN winding as the Vulkan one. A LOWER_LEFT game whose
+    // rows are stored bottom-up gets a positive-height viewport (ToVulkanViewportBottomUp, same
+    // condition as nvn_draw.cpp's viewport), which mirrors the winding: invert the front face, or
+    // back-face culling drops the game's front faces (Kirby and the Forgotten Land: black opening
+    // movie, missing level geometry). EDEN_NX2_NVN_FACE=1 still inverts on top for experiments.
     const bool nvn_ccw = VCN::PolygonState::FrontFace(state.polygon) != 0;
-    out.front_face = VulkanFrontFaceCcw(nvn_ccw, Debug::Get().face == 1)
+    const bool mirrored = PresentFlipsRows(state.window_origin) && !Debug::Get().flip_viewport;
+    out.front_face = VulkanFrontFaceCcw(nvn_ccw, (Debug::Get().face == 1) != mirrored)
                          ? VK_FRONT_FACE_COUNTER_CLOCKWISE
                          : VK_FRONT_FACE_CLOCKWISE;
     switch (VCN::PolygonState::CullFace(state.polygon)) {

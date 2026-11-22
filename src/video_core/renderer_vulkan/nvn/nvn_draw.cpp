@@ -2230,7 +2230,8 @@ void DrawContext::ApplyDynamicState(const GraphicsPipeline& active) {
     // top for UPPER_LEFT and from the bottom for LOWER_LEFT. Proven on DK (UPPER_LEFT): with a
     // positive height the G-buffer is stored upside down and render-to-texture text (the world
     // banner) is sampled flipped. EDEN_NX2_NVN_FLIP_VIEWPORT=1 inverts the rule (experiments).
-    const bool lower_left = impl.device_window_origin.load(std::memory_order_relaxed) == 0;
+    const bool lower_left =
+        EffectiveLowerLeft(impl.device_window_origin.load(std::memory_order_relaxed));
     const float surface_height = static_cast<float>(framebuffer_extent.height);
     const bool invert_y = Debug::Get().flip_viewport;
     if (dynamic_dirty & DIRTY_VIEWPORT) {
@@ -2243,8 +2244,9 @@ void DrawContext::ApplyDynamicState(const GraphicsPipeline& active) {
                 const VC::ViewportRect& r = viewports[i];
                 rect = {r.x, r.y, (std::max)(r.width, 1.0f), (std::max)(r.height, 1.0f)};
             }
-            const ViewportRect placed =
-                ToVulkanViewport(rect, surface_height, lower_left, invert_y);
+            const ViewportRect placed = lower_left && LowerLeftStoresRowsBottomUp() && !invert_y
+                                            ? ToVulkanViewportBottomUp(rect)
+                                            : ToVulkanViewport(rect, surface_height, lower_left, invert_y);
             vp[i] = {
                 .x = placed.x,
                 .y = placed.y,
@@ -2270,8 +2272,11 @@ void DrawContext::ApplyDynamicState(const GraphicsPipeline& active) {
         for (u32 i = 0; i < count; ++i) {
             if (scissors_set & (1u << i)) {
                 const VC::ScissorRect& s = scissors[i];
-                const s32 top = ScissorTopRow(
-                    s.y, s.height, static_cast<s32>(framebuffer_extent.height), lower_left);
+                const s32 top =
+                    lower_left && LowerLeftStoresRowsBottomUp()
+                        ? s.y
+                        : ScissorTopRow(s.y, s.height, static_cast<s32>(framebuffer_extent.height),
+                                        lower_left);
                 const s32 x0 = std::clamp(s.x, 0, static_cast<s32>(framebuffer_extent.width));
                 const s32 y0 = std::clamp(top, 0, static_cast<s32>(framebuffer_extent.height));
                 const s32 x1 = std::clamp(s.x + (std::max)(s.width, 0), x0,
