@@ -1206,8 +1206,9 @@ bool DrawContext::BeginPass() {
             host->HostMakeNativeCurrent(*attachment.storage);
         }
         // A render target is written before it is read in nearly every case: its stale guest bytes
-        // are not uploaded (this also creates the lazy image).
-        if (!host->HostEnsureContents(*attachment.storage, true)) {
+        // are not uploaded again (this also creates the lazy image). The first use initialises a
+        // new image, whose Vulkan contents are otherwise undefined (random per boot).
+        if (!host->HostEnsureTargetContents(*attachment.storage)) {
             host->HostFailed("SetRenderTargets", fmt::format("no image for render target {:#x}",
                                                              attachment.texture->serial));
             return false;

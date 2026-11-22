@@ -252,6 +252,8 @@ struct ContextStats {
     u64 hash_ns{};
     u64 hash_bytes{};
     u64 depth_upload_unsupported{};
+    u64 target_first_uploads{};
+    u64 target_first_clears{};
     u64 virtual_maps{};
     u64 virtual_unresolved{};
     u64 virtual_sparse_binds{};

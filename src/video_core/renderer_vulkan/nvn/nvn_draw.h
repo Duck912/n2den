@@ -147,6 +147,11 @@ public:
     /// Creates the image and loads the guest contents on first use (outside a render pass only).
     /// False: the image could not be created (the op must be dropped).
     virtual bool HostEnsureContents(Storage& storage, bool will_overwrite) = 0;
+    /// HostEnsureContents for a render target the pass is about to draw into. On the storage's
+    /// first use its image is filled from the guest bytes (zero-cleared when they cannot be
+    /// uploaded) instead of being left undefined: pixels the game never overwrites (partial
+    /// draws, blending onto the old contents) then hold what the console memory holds.
+    virtual bool HostEnsureTargetContents(Storage& storage) = 0;
     /// True when HostEnsureContents(storage, false) would record commands (first upload, CPU
     /// change, overlapping writes); creates the image. Safe inside a render pass.
     virtual bool HostNeedsCommands(Storage& storage, bool will_overwrite) = 0;

@@ -427,6 +427,9 @@ public:
     bool HostEnsureContents(Storage& storage, bool will_overwrite) override {
         return EnsureContents(storage, will_overwrite);
     }
+    bool HostEnsureTargetContents(Storage& storage) override {
+        return EnsureTargetContents(storage);
+    }
     bool HostNeedsCommands(Storage& storage, bool will_overwrite) override {
         storage.last_used_seq = flight.seq;
         storage.last_used_present = impl.stats.presents.load(std::memory_order_relaxed);
@@ -874,6 +877,10 @@ private:
     /// the guest-sized image is only made current when guest bytes have to change it anyway.
     /// Without it a storage whose twin is newer gets its guest-sized image from the twin first.
     bool EnsureContents(Storage& s, bool will_overwrite, bool keep_scaled = false);
+    /// EnsureContents(s, true) for a render target of a pass, except on the storage's first use:
+    /// then the new image is filled from the guest bytes, or zero-cleared when they cannot be
+    /// uploaded, instead of keeping undefined contents (EDEN_NX2_NVN_TARGET_FIRST_INIT=0: off).
+    bool EnsureTargetContents(Storage& s);
     /// Resolution scaling (nvn_rescale.h). The guest-sized image made from the twin (a downscale
     /// blit) when the twin is newer; outside a render pass.
     void MakeNativeCurrent(Storage& s);
@@ -2177,6 +2184,61 @@ bool Recorder::EnsureContents(Storage& s, bool will_overwrite, bool keep_scaled)
         ResolveOverlaps(s);
     }
     return true;
+}
+
+namespace {
+/// EDEN_NX2_NVN_TARGET_FIRST_INIT (default 1): a render target's new image is initialised at its
+/// first use (guest bytes, else zero) instead of starting with undefined Vulkan contents.
+bool TargetFirstInit() {
+    static const bool on = [] {
+        const char* value = std::getenv("EDEN_NX2_NVN_TARGET_FIRST_INIT");
+        const bool enabled = value == nullptr || *value == '\0' || value[0] != '0';
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] render target first use: {} (EDEN_NX2_NVN_TARGET_FIRST_INIT)",
+                 enabled ? "filled from guest bytes (zero when not uploadable)"
+                         : "left undefined (legacy)");
+        return enabled;
+    }();
+    return on;
+}
+} // Anonymous namespace
+
+bool Recorder::EnsureTargetContents(Storage& s) {
+    if (s.contents_valid || !TargetFirstInit()) {
+        return EnsureContents(s, true);
+    }
+    if (!impl.EnsureImage(s)) {
+        return false;
+    }
+    // Twins take their pixels from the guest-sized image (PrepareScaledTarget); tile-backed sparse
+    // storages bind and upload per tile in SyncSparse. Neither starts from a new whole image here.
+    if (s.scale_owner == nullptr && !s.sparse && !s.contents_valid) {
+        // The console draws into memory that holds whatever the pool held (zero for a new pool, an
+        // earlier target's bytes for reused memory). A new VkImage holds undefined contents that
+        // differ from boot to boot: blending onto them, or sampling texels no draw covered, gave
+        // random per-run results.
+        UploadStorage(s); // sets contents_valid when it uploaded
+        if (s.contents_valid) {
+            impl.stats.target_first_uploads.fetch_add(1, std::memory_order_relaxed);
+        } else if (!s.host.depth && !s.host.stencil) {
+            const bool saved = track_writes;
+            track_writes = false;
+            PrepareImages({{&s, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
+            track_writes = saved;
+            const VkImageSubresourceRange range{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = VK_REMAINING_MIP_LEVELS,
+                .baseArrayLayer = 0,
+                .layerCount = VK_REMAINING_ARRAY_LAYERS,
+            };
+            Cmd().ClearColorImage(*s.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VkClearColorValue{}, range);
+            barrier_pending = true;
+            impl.stats.target_first_clears.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    return EnsureContents(s, true);
 }
 
 namespace {
