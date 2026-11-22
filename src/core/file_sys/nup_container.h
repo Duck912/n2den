@@ -161,6 +161,11 @@ public:
     VirtualDir GetRomFSDir(std::size_t package_index);
     VirtualDir GetPackageDir(std::size_t package_index);
 
+    /// Directories no parent and no package references, gathered under one "romfs" directory.
+    /// Some packers write a base package whose romfs directory has no children while its
+    /// top-level folders sit in the TOC unlinked (KirbySwitch2.nup); nullptr when there are none.
+    VirtualDir GetUnlinkedRomFSDir();
+
     /// Stream-hashes every member file against its stored SHA-256.
     Loader::ResultStatus VerifyIntegrity(
         std::function<bool(std::size_t, std::size_t)> progress_callback) const;

@@ -8,6 +8,7 @@
 #include "core/core.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/nx_archive.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/vfs/vfs.h"
@@ -127,6 +128,25 @@ AppLoader::LoadResult AppLoader_NX::Load(Kernel::KProcess& process, Core::System
         process.GetProcessId(), title_id,
         std::make_shared<FileSys::RomFSFactory>(*this, system.GetContentProvider(),
                                                 system.GetFileSystemController()));
+
+    // Add-on content (dlc/<title id>/<version>/romfs in the packed tree) is served to the game
+    // through aoc:u and OpenDataStorageByDataId.
+    for (const auto& add_on : archive->GetAddOns()) {
+        const auto add_on_root = archive->MountSnapshot(add_on.snapshot);
+        auto romfs = add_on_root ? add_on_root->GetSubdirectory("romfs") : nullptr;
+        if (romfs == nullptr) {
+            romfs = add_on_root;
+        }
+        if (romfs == nullptr ||
+            (romfs->GetFiles().empty() && romfs->GetSubdirectories().empty())) {
+            continue;
+        }
+        // aoc:u looks add-ons up by the running program, which may sit outside its application's
+        // range (Kirby S2 Edition: application 01004D300C5AE000, program 04004D300C5AE001).
+        system.GetFileSystemController().RegisterLooseAddOnContent(
+            FileSys::GetBaseTitleID(archive->GetSelection().program_id), add_on.title_id,
+            FileSys::CreateRomFS(romfs));
+    }
 
     is_loaded = true;
     return result;

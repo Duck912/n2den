@@ -55,6 +55,16 @@ public:
     /// the file tree and block index. Files and directories keep the archive open on their own.
     VirtualDir Mount();
 
+    /// Add-on content stored by its add-on title id (nxconvert pack-nup / pack-tree dlc/ folders).
+    struct AddOn {
+        u64 title_id{};
+        u32 snapshot{};
+    };
+    /// Add-ons of the selected application, newest version of each title id.
+    std::vector<AddOn> GetAddOns() const;
+    /// Root directory of any snapshot of the archive (an add-on's holds romfs/).
+    VirtualDir MountSnapshot(u32 snapshot);
+
     /// Reads and checks every block. Mounts the archive if needed.
     bool VerifyAll();
 

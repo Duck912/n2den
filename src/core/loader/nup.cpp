@@ -13,6 +13,7 @@
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/vfs/vfs_vector.h"
@@ -245,10 +246,7 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
                                                       NupContainer::PackageKind::Addon;
                                            });
     if (addon_count > 0) {
-        LOG_WARNING(Loader,
-                    "NUP container has {} add-on content package(s); AoC mounting is not "
-                    "supported yet",
-                    addon_count);
+        LOG_DEBUG(Loader, "NUP container has {} add-on content package(s)", addon_count);
     }
 }
 
@@ -279,6 +277,22 @@ AppLoader::LoadResult AppLoader_NUP::Load(Kernel::KProcess& process, Core::Syste
         std::make_shared<FileSys::RomFSFactory>(*this, system.GetContentProvider(),
                                                 system.GetFileSystemController()));
 
+    // Add-on packages are served to the game through aoc:u and OpenDataStorageByDataId.
+    const auto& packages = nup->GetPackages();
+    for (std::size_t i = 0; i < packages.size(); ++i) {
+        if (packages[i].kind != FileSys::NupContainer::PackageKind::Addon) {
+            continue;
+        }
+        const auto romfs_dir = nup->GetRomFSDir(i);
+        if (romfs_dir == nullptr ||
+            (romfs_dir->GetFiles().empty() && romfs_dir->GetSubdirectories().empty())) {
+            continue;
+        }
+        system.GetFileSystemController().RegisterLooseAddOnContent(
+            FileSys::GetBaseTitleID(base_title_id), packages[i].title_id,
+            FileSys::CreateRomFS(romfs_dir));
+    }
+
     is_loaded = true;
     return result;
 }
@@ -293,7 +307,17 @@ ResultStatus AppLoader_NUP::VerifyIntegrity(
 
 ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
     const auto base_index = nup->FindBasePackage();
-    const auto base_romfs = base_index ? nup->GetRomFSDir(*base_index) : FileSys::VirtualDir{};
+    auto base_romfs = base_index ? nup->GetRomFSDir(*base_index) : FileSys::VirtualDir{};
+    const auto is_empty = [](const FileSys::VirtualDir& dir) {
+        return dir == nullptr || (dir->GetFiles().empty() && dir->GetSubdirectories().empty());
+    };
+    if (is_empty(base_romfs)) {
+        // Recovery for NUPs whose base romfs folders were written unlinked by an old packer
+        // (KirbySwitch2.nup: 9386 base files in 14 parentless folders).
+        if (auto unlinked = nup->GetUnlinkedRomFSDir()) {
+            base_romfs = std::move(unlinked);
+        }
+    }
     const auto update_index = nup->FindBestUpdatePackage();
     const auto update_romfs =
         update_index ? nup->GetRomFSDir(*update_index) : FileSys::VirtualDir{};

@@ -394,6 +394,45 @@ std::vector<u8> NxArchive::ReadIcon() {
     return ReadMedia(impl->catalog, applications[impl->application].icon_index);
 }
 
+std::vector<NxArchive::AddOn> NxArchive::GetAddOns() const {
+    std::vector<AddOn> out;
+    const auto& applications = impl->catalog.applications();
+    if (impl->application >= applications.size()) {
+        return out;
+    }
+    const auto& app = applications[impl->application];
+    const auto& snapshots = impl->catalog.snapshots();
+    for (u32 i = app.first_snapshot; i < app.first_snapshot + app.snapshot_count; ++i) {
+        const auto title_id = snapshots[i].addon_title_id();
+        if (snapshots[i].type != 2 || !title_id) {
+            continue;
+        }
+        const auto same = std::find_if(out.begin(), out.end(),
+                                       [&](const AddOn& a) { return a.title_id == *title_id; });
+        if (same == out.end()) {
+            out.push_back({*title_id, i});
+        } else if (snapshots[i].numeric_version > snapshots[same->snapshot].numeric_version) {
+            same->snapshot = i;
+        }
+    }
+    return out;
+}
+
+VirtualDir NxArchive::MountSnapshot(u32 snapshot) {
+    if (!impl->selection.bootable || snapshot >= impl->catalog.snapshots().size()) {
+        return nullptr;
+    }
+    if (Mount() == nullptr) {
+        return nullptr;
+    }
+    std::scoped_lock lock{impl->mount_mutex};
+    const auto root = impl->session->archive().root_directory(snapshot);
+    if (!root) {
+        return nullptr;
+    }
+    return std::make_shared<NxDirectory>(impl->session, *root.value, "nx");
+}
+
 VirtualDir NxArchive::Mount() {
     if (!impl->selection.bootable) {
         return nullptr;

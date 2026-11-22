@@ -37,6 +37,7 @@
 #include "core/hle/nvn/function_table.h"
 #include "core/hle/nvn/hle_runtime.h"
 #include "core/hle/nvn/package_shaders.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/romfs.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/filesystem/romfs_controller.h"
@@ -78,7 +79,29 @@ void InstallPackageStageSource(Core::System& system) {
             if (!root) {
                 return std::string{"RomFS not readable"};
             }
-            return ScanPackageShaders(root, visit).Summary();
+            std::string summary = ScanPackageShaders(root, visit).Summary();
+            // Add-on packages the loader registered (Switch 2 Editions keep their Switch 2 data,
+            // shaders included, in an add-on: Kirby and the Forgotten Land found 0 of 1183 stages
+            // in the base RomFS alone).
+            auto& fsc = system.GetFileSystemController();
+            // Registered under the program's base id; the RomFS controller may report the
+            // application id instead (an .nx whose application id differs from the program id).
+            std::vector<u64> add_ons =
+                fsc.ListLooseAddOnContent(FileSys::GetBaseTitleID(program_id));
+            if (add_ons.empty()) {
+                add_ons = fsc.ListLooseAddOnContent(
+                    FileSys::GetBaseTitleID(system.GetApplicationProcessProgramID()));
+            }
+            for (const u64 add_on : add_ons) {
+                const FileSys::VirtualFile add_on_file = fsc.OpenLooseAddOnContent(add_on);
+                const FileSys::VirtualDir add_on_root =
+                    add_on_file ? FileSys::ExtractRomFS(add_on_file) : nullptr;
+                if (add_on_root) {
+                    summary += fmt::format("; add-on {:016X}: {}", add_on,
+                                           ScanPackageShaders(add_on_root, visit).Summary());
+                }
+            }
+            return summary;
         });
 }
 

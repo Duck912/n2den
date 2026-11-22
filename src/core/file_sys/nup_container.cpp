@@ -767,6 +767,42 @@ VirtualDir NupContainer::BuildPackageDir(u32 dir_index) {
     return out;
 }
 
+VirtualDir NupContainer::GetUnlinkedRomFSDir() {
+    // Only slots inside a directory's child range count: the broken packer leaves the base
+    // romfs folders' slots in the child array behind a romfs record with child_count 0.
+    std::vector<bool> referenced(dirs.size(), false);
+    for (const auto& node : dirs) {
+        const u64 end = static_cast<u64>(node.first_child) + node.child_count;
+        for (u64 slot = node.first_child; slot < end; ++slot) {
+            if (children[slot] < dirs.size()) {
+                referenced[children[slot]] = true;
+            }
+        }
+    }
+    for (const auto& package : packages) {
+        for (const u32 dir : {package.root_dir, package.exefs_dir, package.romfs_dir}) {
+            if (dir != NoDir && dir < dirs.size()) {
+                referenced[dir] = true;
+            }
+        }
+    }
+    auto out = std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{},
+                                                    std::vector<VirtualDir>{}, "romfs");
+    std::size_t count = 0;
+    for (u32 dir = 0; dir < dirs.size(); ++dir) {
+        if (!referenced[dir] && !dirs[dir].name.empty()) {
+            out->AddDirectory(BuildPackageDir(dir));
+            ++count;
+        }
+    }
+    if (count == 0) {
+        return nullptr;
+    }
+    LOG_WARNING(Loader, "NUP base romfs is empty; using {} unlinked top-level directories instead",
+                count);
+    return out;
+}
+
 VirtualDir NupContainer::GetExeFSDir(std::size_t package_index) {
     if (package_index >= packages.size() || packages[package_index].exefs_dir == NoDir) {
         return nullptr;
