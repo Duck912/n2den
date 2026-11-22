@@ -6,6 +6,8 @@
 
 #ifdef HAS_NSIGHT_AFTERMATH
 
+#include <chrono>
+#include <filesystem>
 #include <mutex>
 #include <span>
 #include <string>
@@ -52,6 +54,25 @@ NsightAftermathTracker::NsightAftermathTracker() {
     }
     dump_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "gpucrash";
 
+    // The folder is emptied at every launch (shader sources pile up), but a crash dump written by
+    // the previous boot is the only record of a GPU fault once the emulator has closed: move
+    // crash*.nv-gpudmp(.json) to log/gpucrash-saved/<file time>-<name> first.
+    {
+        std::error_code ec;
+        const std::filesystem::path saved =
+            Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "gpucrash-saved";
+        for (const auto& entry : std::filesystem::directory_iterator(dump_dir, ec)) {
+            const std::string name = Common::FS::PathToUTF8String(entry.path().filename());
+            if (!entry.is_regular_file(ec) || !name.starts_with("crash")) {
+                continue;
+            }
+            std::filesystem::create_directories(saved, ec);
+            const auto stamp = std::chrono::duration_cast<std::chrono::seconds>(
+                                   entry.last_write_time(ec).time_since_epoch())
+                                   .count();
+            std::filesystem::rename(entry.path(), saved / fmt::format("{}-{}", stamp, name), ec);
+        }
+    }
     Common::FS::RemoveDirRecursively(dump_dir);
     if (!Common::FS::CreateDir(dump_dir)) {
         LOG_ERROR(Render_Vulkan, "Failed to create Nsight Aftermath dump directory");
