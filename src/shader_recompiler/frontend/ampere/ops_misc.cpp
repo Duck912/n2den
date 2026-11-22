@@ -173,12 +173,22 @@ void Visitor::LDC() {
     const s32 offset = static_cast<s16>(Take(38, 16));
     const u32 cbuf_index = Take(54, 5);
     const u32 width = Take(73, 3);
-    Require(Take(78, 2) == 0, "native indexed constant load mode");
+    // Mode 0: default. Mode 2 (.IS, segmented): Ra + offset is an address in a flat view of the
+    // constant buffers, buffer index in its high 16 bits and byte offset in its low 16 bits, as
+    // the Maxwell front end's LDC (load_constant.cpp). Kirby and the Forgotten Land S2 fragment
+    // programs use `LDC.IS Rd, c[0x0][Ra]` (nvdisasm). .IL / .ISL stay rejected (not seen).
+    const u32 mode = Take(78, 2);
+    Require(mode == 0 || mode == 2, "native indexed constant load mode");
     Require(Take(91, 1) == 0, "native bindless constant load");
     Require(width <= 6, "native constant load width");
     Require(cbuf_index < 18, "native constant buffer index");
-    const IR::U32 binding{ir.Imm32(cbuf_index)};
-    const IR::U32 byte_offset{ir.IAdd(X(offset_reg), ir.Imm32(static_cast<u32>(offset)))};
+    IR::U32 binding{ir.Imm32(cbuf_index)};
+    IR::U32 byte_offset{ir.IAdd(X(offset_reg), ir.Imm32(static_cast<u32>(offset)))};
+    if (mode == 2) {
+        const IR::U32 address{byte_offset};
+        binding = ir.IAdd(ir.BitFieldExtract(address, ir.Imm32(16), ir.Imm32(16)), binding);
+        byte_offset = ir.BitFieldExtract(address, ir.Imm32(0), ir.Imm32(16));
+    }
     if (width < 4) {
         // 8 or 16 bit element, zero or sign extended (types U8, S8, U16, S16).
         X(dest, IR::U32{ir.GetCbuf(binding, byte_offset, width < 2 ? 8 : 16, (width & 1) != 0)});

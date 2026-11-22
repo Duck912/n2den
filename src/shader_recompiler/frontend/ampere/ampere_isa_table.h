@@ -11,7 +11,7 @@ struct IsaRow {
     std::array<u32, 4> known;
 };
 
-inline constexpr size_t ISA_ROW_COUNT = 639;
+inline constexpr size_t ISA_ROW_COUNT = 640;
 struct IsaListEntry {
     u32 op12;
     IsaRow row;
@@ -297,6 +297,7 @@ inline constexpr IsaListEntry ISA_ROWS[] = {
     {0x80a, {"FSet", {0xffffffffU, 0xffffffffU, 0x0781ff00U, 0xfffffe00U}}},
     {0x80b, {"FSetP", {0xff00ffffU, 0xffffffffU, 0x07ffff00U, 0xfffffe00U}}},
     {0x80c, {"ISetP", {0xff00ffffU, 0xffffffffU, 0x07fe7ff0U, 0xfffffe00U}}},
+    {0x80d, {"CSMTEST", {0x0000ffffU, 0xcfffffffU, 0x07fe7c00U, 0xfffffe00U}}},
     {0x810, {"IAdd3/IAdd3X", {0xffffffffU, 0xffffffffU, 0x07ffefffU, 0xfffffe00U}}},
     {0x811, {"Lea/LeaX", {0xffffffffU, 0xffffffffU, 0x078fffffU, 0xfffffe00U}}},
     {0x812, {"Lop3", {0xffffffffU, 0xffffffffU, 0x078fffffU, 0xfffffe00U}}},

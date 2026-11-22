@@ -641,6 +641,29 @@ void Visitor::Run() {
         break;
     case 0x918: // NOP
         break;
+    case 0x80d: { // CSMTEST: a test of shading-mode state the IR does not model.
+        // Fields (nvdisasm 13.0): immediate 32..59, .R/.A 62..63, .AND/.OR/.XOR 74..75, test
+        // 76..78, results 81..83 and 84..86, source predicate 87..90. Kirby and the Forgotten Land
+        // S2 has this pair in about 170 vertex programs (title scene, opening movie):
+        //   CSMTEST.RA.F.AND PT, PT, 0x4321111, PT    results discarded: no effect
+        //   CSMTEST.A.FCSM_TR.AND P0, PT, 0x0, PT     then @P0 EXIT before the outputs are stored
+        // The test is taken as false, so the vertex takes the full path and stores its outputs
+        // (true would leave every vertex without outputs). Inferred from that code, not from a
+        // reference; Eglantine's lowering does the same for Kirby Air Riders.
+        Take(32, 28);
+        Take(62, 2);
+        const u32 combine = Take(74, 2);
+        Take(76, 3);
+        const u32 first = Take(81, 3);
+        const u32 second = Take(84, 3);
+        const u32 source = Take(87, 4);
+        if (first != 7 || second != 7) {
+            // Only the seen form: one result, AND with PT, second result discarded.
+            Require(second == 7 && combine == 0 && source == 7, "native CSM test mode");
+            SetPred(first, ir.Imm1(false));
+        }
+        break;
+    }
     case 0x942: // BREAK Bx: only drops threads from the barrier; the following BRA leaves the loop
         Take(16, 4);
         Take(87, 4); // the predicate only chooses which threads leave; threads run independently here
