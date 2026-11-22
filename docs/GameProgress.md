@@ -22,7 +22,7 @@ for n2den's own changes, not as what another machine will reach.
 | Game | Emulated GPU | NVN-HLE (Vulkan) | Prepared launch |
 |---|---|---|---|
 | The Legend of Zelda: Ocarina of Time (Switch 2) | In-game | In-game | Works |
-| Fire Emblem: Fortune's Weave | Not tested | In-game | CPU code only |
+| Fire Emblem: Fortune's Weave | In-game | In-game | CPU code only |
 | Mario Kart World | Not tested | Unstable | Not usable |
 | Fast Fusion | In-game | In-game | Works |
 
