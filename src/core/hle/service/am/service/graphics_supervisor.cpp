@@ -17,6 +17,7 @@
 #include "core/hle/service/nvdrv/core/nvmap.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/hle/service/nvnflinger/buffer_transform_flags.h"
 #include "core/hle/service/nvnflinger/buffer_queue_producer.h"
 #include "core/hle/service/nvnflinger/ui/graphic_buffer.h"
 #include "core/hle/kernel/k_client_session.h"
@@ -1195,10 +1196,14 @@ private:
         const u32 image_width = (image->preference[2] & 0xffffU) + 1;
         const u32 image_height = (image->preference[2] >> 16) + 1;
         R_UNLESS(packet[6] == 0 && present_width <= image_width &&
-                 present_height <= image_height && packet[8] == 3 &&
+                 present_height <= image_height &&
+                 // Layout 3; older SDKs (Generic_19_3_7) set 0x4 in the high half for a
+                 // bottom-up image (Kirby and the Forgotten Land S2 renders LOWER_LEFT and was
+                 // upside down on the emulated path): presented with a vertical flip below.
+                 (packet[8] == 3 || packet[8] == 0x40003) &&
                  image->preference[4] == 7 &&
                  (image->preference[6] == 1 || image->preference[6] == 4) &&
-                 state.output_encoding == 0x14,
+                 (state.output_encoding == 0x14 || state.output_encoding == 0x5),
                  Kernel::ResultNotImplemented);
         const u32 fence_id = ~packet[22];
         R_UNLESS(packet[23] == 0 && packet[25] == 0 &&
@@ -1236,6 +1241,10 @@ private:
         android::QueueBufferInput input{};
         android::QueueBufferOutput output{};
         input.crop = {0, 0, static_cast<s32>(present_width), static_cast<s32>(present_height)};
+        if ((packet[8] >> 16) == 4) {
+            input.transform = static_cast<android::NativeWindowTransform>(
+                android::BufferTransformFlags::FlipV);
+        }
         // Word 12 is (swap interval << 16) | refresh rate (0x1003c, then 0x2003c once the game
         // is past its boot logos). Fortune's Weave runs at interval 2 (30 fps); forcing 1 made
         // it run at double speed.
@@ -1315,8 +1324,10 @@ private:
             result = Kernel::ResultNotFound;
             if (token && state != m_client_states.end()) {
                 result = Kernel::ResultNotImplemented;
-                // Only the SDK's observed default output encoding is supported.
-                if (encoding == 0x14) {
+                // The SDK's observed default output encodings: 0x14, and 0x5 from older SDKs
+                // (Generic_19_3_7, Kirby and the Forgotten Land S2; meaning of the older value not
+                // decoded, presentation does no conversion for either).
+                if (encoding == 0x14 || encoding == 0x5) {
                     state->output_encoding = encoding;
                     result = ResultSuccess;
                 }

@@ -517,8 +517,10 @@ IGpuSession::IGpuSession(Core::System& system, std::shared_ptr<Nvidia::Module> m
         {33, &IGpuSession::CreateAddressSpace, "CreateAddressSpace"},
         {41, &IGpuSession::CreateGraphicsDevice, "CreateGraphicsDevice"},
         {42, &IGpuSession::DestroyGraphicsDevice, "DestroyGraphicsDevice"},
-        {201, &IGpuSession::GetAddressSpacePartition, "GetGsvPartition"},
-        {202, &IGpuSession::GetAddressSpacePartition, "GetUserPartition"},
+        // Version 3 (Generic_19_3_7): 201 is the user partition, 202 the gsv one (sdk 0x3d4188
+        // stores the 201 reply where GetUserPartitionGpuAddressMin/Max read it).
+        {201, &IGpuSession::GetAddressSpacePartition, "GetUserPartition"},
+        {202, &IGpuSession::GetAddressSpacePartition, "GetGsvPartition"},
     };
     if (m_version == 3) {
         RegisterHandlersTipc(functions_v3);
@@ -572,7 +574,7 @@ void IGpuSession::GetAddressSpacePartition(HLERequestContext& ctx) {
     Result result = Kernel::ResultInvalidCombination;
     std::array<u64, 9> values{};
     const bool legacy = m_version == 3;
-    const bool user = ctx.GetCommand() == (legacy ? 202u : 203u);
+    const bool user = ctx.GetCommand() == (legacy ? 201u : 203u);
     if (!user) {
         values[0] = ~u64{0}; // No supervisor-owned partition is reserved by this adapter.
     }
