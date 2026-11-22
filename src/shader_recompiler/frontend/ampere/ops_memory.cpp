@@ -202,18 +202,26 @@ void Visitor::STG() {
 }
 
 // R2UR: broadcast a register from the first active lane whose guard holds into a uniform register.
-// The uniform register is written unconditionally, like the Maxwell sequence of the lowering.
+// With a guard (@P R2UR URd, Rs) the uniform register keeps its value when no lane's guard holds:
+// without that vote the empty ballot picks lane 31 and every lane reads that lane's register
+// (Ocarina of Time's foliage program 04267529795c1382: the bend blend factor became 1 for every leaf,
+// so the broad-leaf bushes of Kokiri Forest drew bent over and brown side up). Unguarded, every
+// executing lane is in the ballot and the register is written unconditionally.
 void Visitor::R2UR() {
     const u32 destination = Take(16, 6);
     Ignore(22, 2);
     const u32 source = Take(24, 8);
     Require(Take(81, 3) == 7, "native register to uniform predicate output");
     Require(destination < 63, "native register to uniform destination");
-    const IR::U1 guard{guard_select ? *guard_select : ir.Imm1(true)};
+    const bool guarded{guard_select.has_value()};
+    const IR::U1 guard{guarded ? *guard_select : ir.Imm1(true)};
     const IR::U32 ballot{ir.SubgroupBallot(guard)};
     const IR::U32 lowest{ir.BitwiseAnd(ballot, ir.INeg(ballot))};
     const IR::U32 lane{ir.FindUMsb(lowest)};
-    const IR::U32 value{ir.ShuffleIndex(X(source), lane, ir.Imm32(31U), ir.Imm32(0U))};
+    IR::U32 value{ir.ShuffleIndex(X(source), lane, ir.Imm32(31U), ir.Imm32(0U))};
+    if (guarded) {
+        value = IR::U32{ir.Select(ir.VoteAny(guard), value, UR(destination))};
+    }
     guard_select.reset();
     UR(destination, value);
 }
