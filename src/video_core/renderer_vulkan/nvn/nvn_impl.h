@@ -997,6 +997,7 @@ struct Context::Impl {
         std::atomic<u64> target_first_clears{};  ///< render targets zero-cleared at first use
         /// render targets whose first use opened with a clear of the whole image: no fill
         std::atomic<u64> target_first_skipped{};
+        std::atomic<u64> target_zero_clears{}; ///< first uploads of zero bytes done as a clear
         std::atomic<u64> virtual_maps{};
         std::atomic<u64> virtual_unresolved{};
         std::atomic<u64> virtual_sparse_binds{};

@@ -1129,6 +1129,9 @@ private:
     /// PrepareImages records GPU writes (Storage::origin); uploads and overlap transfers are not
     /// writes of the texture.
     bool track_writes{true};
+    /// Set by EnsureTargetContents around a render target's first upload: all-zero guest bytes are
+    /// cleared on the GPU instead of staged and untiled (EDEN_NX2_NVN_TARGET_ZERO_CLEAR=0: off).
+    bool upload_zero_as_clear{false};
 
     // Staging arena.
     u64 chunk_used{};
@@ -2216,6 +2219,39 @@ bool TargetClearSkip() {
 }
 } // Anonymous namespace
 
+namespace {
+bool TargetZeroClear() {
+    static const bool on = [] {
+        const char* const value = std::getenv("EDEN_NX2_NVN_TARGET_ZERO_CLEAR");
+        return value == nullptr || value[0] != '0';
+    }();
+    return on;
+}
+
+bool BytesAllZero(const u8* data, u64 size) {
+    u64 i = 0;
+    for (; i < size && (reinterpret_cast<uintptr_t>(data + i) % alignof(u64)) != 0; ++i) {
+        if (data[i] != 0) {
+            return false;
+        }
+    }
+    u64 any = 0;
+    for (; i + 64 <= size; i += 64) {
+        const u64* const words = reinterpret_cast<const u64*>(data + i);
+        any |= words[0] | words[1] | words[2] | words[3] | words[4] | words[5] | words[6] | words[7];
+        if (any != 0) {
+            return false;
+        }
+    }
+    for (; i < size; ++i) {
+        if (data[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+} // Anonymous namespace
+
 bool Recorder::EnsureTargetContents(Storage& s, bool cleared_whole) {
     if (s.contents_valid || !TargetFirstInit()) {
         return EnsureContents(s, true);
@@ -2236,7 +2272,9 @@ bool Recorder::EnsureTargetContents(Storage& s, bool cleared_whole) {
         // earlier target's bytes for reused memory). A new VkImage holds undefined contents that
         // differ from boot to boot: blending onto them, or sampling texels no draw covered, gave
         // random per-run results.
+        upload_zero_as_clear = TargetZeroClear();
         UploadStorage(s); // sets contents_valid when it uploaded
+        upload_zero_as_clear = false;
         if (s.contents_valid) {
             impl.stats.target_first_uploads.fetch_add(1, std::memory_order_relaxed);
         } else if (!s.host.depth && !s.host.stencil) {
@@ -2657,9 +2695,16 @@ void Recorder::UploadStorage(Storage& s) {
             impl.stats.astc_cpu_fallbacks.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    // A new colour render target over zero bytes (a fresh pool, or memory the game zeroed): zero
+    // bits are zero in every uncompressed colour format, so a clear writes the same texels without
+    // the staging fill or the GPU untile.
+    const bool zero_clear = !on_gpu && upload_zero_as_clear && cpu_visible &&
+                            plan.decode == UploadPlan::Decode::None && !s.host.bc_standin &&
+                            !s.host.needs_transcode && s.aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+                            BytesAllZero(data, size);
     // Block-linear bytes the CPU would only untile: the GPU does it.
     bool untiled_on_gpu = false;
-    if (!on_gpu && !plan.linear && impl.untile_gpu_enabled &&
+    if (!on_gpu && !zero_clear && !plan.linear && impl.untile_gpu_enabled &&
         plan.staging_size >= UNTILE_GPU_MIN_BYTES) {
         untiled_on_gpu = UploadUntileOnGpu(s, plan, pool, data, size);
         if (!untiled_on_gpu) {
@@ -2667,7 +2712,24 @@ void Recorder::UploadStorage(Storage& s) {
         }
     }
     StagingRange staging{};
-    if (on_gpu) {
+    if (zero_clear) {
+        const bool saved = track_writes;
+        track_writes = false;
+        PrepareImages({{&s, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
+        track_writes = saved;
+        const VkImageSubresourceRange range{
+            .aspectMask = s.aspect,
+            .baseMipLevel = 0,
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        };
+        Cmd().ClearColorImage(*s.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VkClearColorValue{},
+                              range);
+        barrier_pending = true;
+        impl.stats.target_zero_clears.fetch_add(1, std::memory_order_relaxed);
+        log_staged = log_filled = std::chrono::steady_clock::now();
+    } else if (on_gpu) {
         impl.stats.astc_gpu_uploads.fetch_add(1, std::memory_order_relaxed);
         impl.stats.astc_gpu_bytes.fetch_add(size, std::memory_order_relaxed);
         log_staged = log_filled = std::chrono::steady_clock::now();

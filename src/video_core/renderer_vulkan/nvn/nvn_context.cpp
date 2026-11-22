@@ -1753,6 +1753,7 @@ ContextStats Context::Stats() const {
         .target_first_uploads = s.target_first_uploads.load(relaxed),
         .target_first_clears = s.target_first_clears.load(relaxed),
         .target_first_skipped = s.target_first_skipped.load(relaxed),
+        .target_zero_clears = s.target_zero_clears.load(relaxed),
         .virtual_maps = s.virtual_maps.load(relaxed),
         .virtual_unresolved = s.virtual_unresolved.load(relaxed),
         .virtual_sparse_binds = s.virtual_sparse_binds.load(relaxed),
@@ -2499,6 +2500,7 @@ void Context::CollectStats(std::vector<VideoCommon::Nvn::SinkStat>& out) const {
     out.push_back({"render targets filled from guest bytes at first use", s.target_first_uploads});
     out.push_back({"render targets zero-cleared at first use (guest bytes not uploadable)", s.target_first_clears});
     out.push_back({"render targets not filled at first use: the pass opened with a clear of the whole image", s.target_first_skipped});
+    out.push_back({"render targets filled at first use by a clear: the guest bytes were all zero", s.target_zero_clears});
     out.push_back({"virtual_unresolved", s.virtual_unresolved});
     out.push_back({"sparse virtual pools checked for CPU writes", s.sparse_write_pool_checks});
     out.push_back({"graphics driver bank uploads", s.driver_bank_uploads});
