@@ -227,6 +227,7 @@ private:
         DropAv1InFlight();
         h264_context.reset();
         h264_decoder.reset();
+        ffmpeg_vp9 = false;
         h264_timestamps.clear();
         if (transfer_memory) transfer_memory->Close(kernel);
         transfer_memory = nullptr;
@@ -381,7 +382,8 @@ private:
             pending_inputs.pop_front();
             R_SUCCEED();
         }
-        auto bytes = ToAnnexB(input.bytes);
+        // VP9 frames go to FFmpeg as submitted; only H.264 needs Annex B start codes.
+        std::vector<u8> bytes = ffmpeg_vp9 ? input.bytes : ToAnnexB(input.bytes);
         const size_t size = bytes.size();
         bytes.resize(size + AV_INPUT_BUFFER_PADDING_SIZE);
         FFmpeg::Packet packet(std::span<const u8>{bytes.data(), size});
@@ -1183,6 +1185,34 @@ private:
                     return mime.size() == text.size() + 1 && std::memcmp(mime.data(), text.data(), text.size()) == 0 &&
                            mime.back() == 0;
                 };
+                // The initializer's codec field does not tell VP9 from AV1 (Kirby and the Forgotten
+                // Land initializes with the shape treated as AV1, then configures "video/vp9"): swap
+                // the libgav1 backend for an FFmpeg VP9 decoder on the synchronous FFmpeg path.
+                // The same for a decoder initialized in the H.264 shape (command 200, input format 1).
+                if (!ffmpeg_vp9 && (decoder || h264_context) && mime_is("video/vp9")) {
+                    if (decoder) {
+                        decode_worker = std::jthread{};
+                        decode_busy = false;
+                        decoder.reset();
+                        DropAv1InFlight();
+                    }
+                    h264_context.reset();
+                    h264_decoder.reset();
+                    auto vp9_decoder =
+                        std::make_unique<FFmpeg::Decoder>(Tegra::Host1x::NvdecCommon::VideoCodec::VP9);
+                    if (vp9_decoder->GetCodec()) {
+                        auto vp9_context = std::make_unique<FFmpeg::DecoderContext>(*vp9_decoder);
+                        if (vp9_context->OpenContext(*vp9_decoder)) {
+                            h264_decoder = std::move(vp9_decoder);
+                            h264_context = std::move(vp9_context);
+                            ffmpeg_vp9 = true;
+                            LOG_INFO(Service_AM, "Native video decoder uses FFmpeg VP9 for \"video/vp9\"");
+                        }
+                    }
+                    if (!ffmpeg_vp9) {
+                        LOG_ERROR(Service_AM, "Native VP9 decoder could not be opened");
+                    }
+                }
                 LOG_DEBUG(Service_AM, "native video configure buffer bytes={}, head={:02x}{:02x}{:02x}{:02x}",
                           mime.size(), mime.size() > 0 ? mime[0] : 0, mime.size() > 1 ? mime[1] : 0,
                           mime.size() > 2 ? mime[2] : 0, mime.size() > 3 ? mime[3] : 0);
@@ -1202,7 +1232,10 @@ private:
                 if (h264_context || mime_is("video/av1")) {
                     result = Kernel::ResultInvalidSize;
                     if (request->input_capacity <= transfer_memory->GetSize()) {
-                        if (h264_context && !mime.empty()) {
+                        // A mime string ("video/avc") is not codec data: only reopen with real
+                        // parameter sets.
+                        const bool mime_string = mime.size() > 6 && std::memcmp(mime.data(), "video/", 6) == 0;
+                        if (h264_context && !ffmpeg_vp9 && !mime.empty() && !mime_string) {
                             auto reopened = std::make_unique<FFmpeg::DecoderContext>(*h264_decoder);
                             if (reopened->OpenContext(*h264_decoder, mime)) {
                                 h264_context = std::move(reopened);
@@ -1273,7 +1306,12 @@ private:
                                   (request->output_format == 2 || request->output_format == 3)) ||
                                  (is_200 && request->codec == 1 && request->output_format == 3)) &&
                                 request->input_format == 3 && request->output_mode == 1;
-            const bool is_h264 = kind == NativeVideoKind::Decoder && request->codec == 0 &&
+            // Input format 1 is the H.264 shape on both commands: codec 0 on the older one, codec 1
+            // on command 200 (Kirby and the Forgotten Land S2 in-game movies; the game aborted on
+            // the refusal). Inferred like the AV1 pairing above; Configure's mime may still switch
+            // the backend to VP9.
+            const bool is_h264 = kind == NativeVideoKind::Decoder &&
+                                 ((!is_200 && request->codec == 0) || (is_200 && request->codec == 1)) &&
                                  request->input_format == 1 && (request->output_format == 2 || request->output_format == 3) &&
                                  request->output_mode == 1;
             if (is_av1 || is_h264) {
@@ -1540,6 +1578,8 @@ private:
     std::unique_ptr<libgav1::Decoder> decoder;
     std::unique_ptr<FFmpeg::Decoder> h264_decoder;
     std::unique_ptr<FFmpeg::DecoderContext> h264_context;
+    // h264_decoder/h264_context hold an FFmpeg VP9 decoder (same output path, no Annex B).
+    bool ffmpeg_vp9{};
     std::map<u64, u64> h264_timestamps;
     std::optional<GraphicsSupervisorProtocol::VideoDecoderConfiguration> configuration;
     KernelHelpers::ServiceContext context;
