@@ -43,6 +43,17 @@
 
 namespace Core::Memory {
 
+// Unmapped reads/writes are logged in full for the first 64 of a session, then once at each power of
+// two with the running count: a game writing through a null pointer in a loop (Nintendo Switch Sports
+// after a failed buffer setup) otherwise fills the 100 MB log in seconds and hides everything after.
+static std::atomic<u64> unmapped_access_count{0};
+static inline u64 CountUnmappedAccess() {
+    return unmapped_access_count.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+static inline bool ShouldLogUnmappedAccess(u64 n) {
+    return n <= 64 || (n & (n - 1)) == 0;
+}
+
 static inline bool AddressSpaceContains(const Common::PageTable& table, const Common::ProcessAddress addr, const std::size_t size) {
     const Common::ProcessAddress max_addr = 1ULL << table.GetAddressSpaceBits();
     return addr + size >= addr && addr + size <= max_addr;
@@ -700,7 +711,10 @@ struct Memory::Impl final : PageClaimSink {
     inline T Read(Common::ProcessAddress vaddr) noexcept requires(std::is_trivially_copyable_v<T>) {
         const u64 addr = GetInteger(vaddr);
         if (auto const ptr = GetPointerImpl(addr, [addr]() {
-            LOG_ERROR(HW_Memory, "Unmapped Read{} @ {:#016x}", sizeof(T) * 8, addr);
+            if (const u64 n = CountUnmappedAccess(); ShouldLogUnmappedAccess(n)) {
+                LOG_ERROR(HW_Memory, "Unmapped Read{} @ {:#016x} (unmapped access #{})", sizeof(T) * 8,
+                          addr, n);
+            }
         }, [&]() {
             HandleRasterizerDownload(addr, sizeof(T));
         }); ptr) [[likely]] {
@@ -722,7 +736,10 @@ struct Memory::Impl final : PageClaimSink {
         const u64 addr = GetInteger(vaddr);
         bool cached = false;
         if (auto const ptr = GetPointerImpl(addr, [addr, data]() {
-            LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x}", sizeof(T) * 8, addr, u64(data));
+            if (const u64 n = CountUnmappedAccess(); ShouldLogUnmappedAccess(n)) {
+                LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x} (unmapped access #{})",
+                          sizeof(T) * 8, addr, u64(data), n);
+            }
         }, [&]() {
             cached = true;
             RasterizerPreWrite(addr, sizeof(T));

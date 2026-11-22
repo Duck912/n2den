@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <string>
+
+#include <fmt/format.h>
 
 #include "common/boot_counter.h"
 #include "common/logging.h"
@@ -93,12 +96,27 @@ void nvnBufferInitialize(Call& c) {
         return;
     }
     if (!pool_info || !c.rec.BufferInitialize(buffer, pool, offset, size)) {
-        static Common::BootCounter logged;
-        if (logged.First()) {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+            // lr and the builder words find the game code that built it (a null pool is usually an
+            // earlier call that failed and was not checked).
             LOG_WARNING(Core,
                         "[nvn] BufferInitialize failed (pool {:#x} offset {:#x} size {:#x}): the "
-                        "pool is not an initialized memory pool",
-                        pool, offset, size);
+                        "pool is not an initialized memory pool; lr={:#x} buffer={:#x} builder={:#x} "
+                        "words {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+                        pool, offset, size, c.ctx.lr, buffer, builder, c.Load<u64>(builder),
+                        c.Load<u64>(builder + 8), c.Load<u64>(builder + 16), c.Load<u64>(builder + 24),
+                        c.Load<u64>(builder + 32), c.Load<u64>(builder + 40), c.Load<u64>(builder + 48),
+                        c.Load<u64>(builder + 56));
+            // Guest frame-pointer chain: who passed the null pool down.
+            std::string frames;
+            u64 fp = c.ctx.r[29];
+            for (int i = 0; i < 8 && fp != 0 && (fp & 0xF) == 0; ++i) {
+                const u64 ret = c.Load<u64>(fp + 8);
+                frames += fmt::format(" {:#x}", ret);
+                fp = c.Load<u64>(fp);
+            }
+            LOG_WARNING(Core, "[nvn] BufferInitialize failed: guest frames{}", frames);
         }
         c.ret.SetBool(false);
         return;

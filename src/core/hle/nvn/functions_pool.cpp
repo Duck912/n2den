@@ -305,6 +305,13 @@ void nvnMemoryPoolInitialize(Call& c) {
         return;
     }
     if (!c.rec.MemoryPoolInitialize(pool, storage, size, flags)) {
+        // Games often carry on with a null pool after this (Switch Sports' buffer allocator).
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+            LOG_WARNING(Core, "[nvn] MemoryPoolInitialize failed in the recorder: pool {:#x} storage {:#x} "
+                              "size {:#x} flags {:#x} lr={:#x}",
+                        pool, storage, size, flags, c.ctx.lr);
+        }
         c.ret.SetBool(false);
         return;
     }
