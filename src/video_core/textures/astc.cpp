@@ -2156,6 +2156,90 @@ bool IsOpaque(std::span<const uint8_t> data) {
     return true;
 }
 
+// True when every alpha endpoint of an LDR block is 255, so every texel's alpha decodes to 255
+// whatever its weights (both ends of the interpolation are 0xFFFF after the 8-to-16-bit expansion,
+// dual plane included). Encoders write the RGBA endpoint modes (12, 13) for opaque textures too;
+// counted as alpha, those took a BC3 stand-in where BC1 holds them (Mario Kart World's ASTC 8x8
+// textures). Parses the block as DecompressBlock does, up to the endpoints; false for anything it
+// does not fully decode (void extent, error, HDR modes), which the caller treats as before.
+static bool AlphaEndpointsOpaque(std::span<const u8> block) {
+    InputBitStream strm(block.first(16));
+    const TexelWeightParams weight_params = DecodeBlockInfo(strm);
+    if (weight_params.m_bError || weight_params.m_bVoidExtentLDR || weight_params.m_bVoidExtentHDR ||
+        weight_params.GetNumWeightValues() > 64) {
+        return false;
+    }
+    const u32 partitions = strm.ReadBits<2>() + 1;
+    if (partitions == 4 && weight_params.m_bDualPlane) {
+        return false;
+    }
+    u32 modes[4] = {0, 0, 0, 0};
+    u8 color_data[16]{};
+    OutputBitStream color_stream(color_data, 16 * 8, 0);
+    u32 base_cem = 0;
+    if (partitions == 1) {
+        modes[0] = strm.ReadBits<4>();
+    } else {
+        static_cast<void>(strm.ReadBits<10>()); // partition index
+        base_cem = strm.ReadBits<6>();
+    }
+    const u32 base_mode = base_cem & 3;
+    const u32 weight_bits = weight_params.GetPackedBitSize();
+    if (weight_bits < 24 || weight_bits > 96) {
+        return false;
+    }
+    s32 remaining = 128 - static_cast<s32>(weight_bits) - static_cast<s32>(strm.GetBitsRead());
+    u32 extra_cem_bits = 0;
+    if (base_mode != 0) {
+        extra_cem_bits = partitions == 2 ? 2 : partitions == 3 ? 5 : 8;
+    }
+    remaining -= static_cast<s32>(extra_cem_bits);
+    const u32 selector_bits = weight_params.m_bDualPlane ? 2 : 0;
+    remaining -= static_cast<s32>(selector_bits);
+    if (remaining <= 0) {
+        return false;
+    }
+    const u32 color_bits = static_cast<u32>(remaining);
+    while (remaining > 0) {
+        const u32 count = static_cast<u32>((std::min)(remaining, 8));
+        color_stream.WriteBits(strm.ReadBits(count), count);
+        remaining -= 8;
+    }
+    static_cast<void>(strm.ReadBits(selector_bits));
+    if (base_mode != 0) {
+        u32 cem = ((strm.ReadBits(extra_cem_bits) << 6) | base_cem) >> 2;
+        bool c[4]{};
+        for (u32 i = 0; i < partitions; ++i) {
+            c[i] = (cem & 1) != 0;
+            cem >>= 1;
+        }
+        for (u32 i = 0; i < partitions; ++i) {
+            modes[i] = (((base_mode - (c[i] ? 0 : 1)) << 2) | (cem & 3));
+            cem >>= 2;
+        }
+    } else if (partitions > 1) {
+        for (u32 i = 0; i < partitions; ++i) {
+            modes[i] = base_cem >> 2;
+        }
+    }
+    for (u32 i = 0; i < partitions; ++i) {
+        if (modes[i] >= 16 || IsHDRColorEndpointMode(modes[i])) {
+            return false;
+        }
+    }
+    u32 color_values[32];
+    DecodeColorValues(color_values, color_data, modes, partitions, color_bits);
+    const u32* values = color_values;
+    for (u32 i = 0; i < partitions; ++i) {
+        Pixel first, second;
+        ComputeEndpoints(first, second, values, modes[i]);
+        if (first.A() != 255 || second.A() != 255) {
+            return false;
+        }
+    }
+    return true;
+}
+
 Channels ClassifyChannels(std::span<const uint8_t> data, uint32_t block_width,
                           uint32_t block_height, bool* empty) {
     // Luminance (0, 1) and luminance+alpha (4, 5) endpoints decode to R = G = B; LDR alpha comes
@@ -2226,7 +2310,8 @@ Channels ClassifyChannels(std::span<const uint8_t> data, uint32_t block_width,
             if ((modes & ColourModes) != 0) {
                 found |= Colour;
             }
-            if ((modes & AlphaModes) != 0) {
+            // An alpha endpoint mode only adds alpha when some alpha endpoint is below 255.
+            if ((modes & AlphaModes) != 0 && !AlphaEndpointsOpaque(block)) {
                 found |= Alpha;
             }
             if (info.dual_plane && (found & Colour) == 0) {
