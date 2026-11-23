@@ -88,7 +88,12 @@ HandleResult ResolveHandles(bool has_secondary, u32 index, u32 offset, u32 shift
             result.sampler = primary_sampler ? primary_ref : secondary_ref;
         } else if (primary.source == HandleSource::UniformBuffer &&
                    secondary.source == HandleSource::UniformBuffer) {
-            return fail("two uniform-buffer handle words: type key ambiguous");
+            // A texture handle and a sampler handle the game stored apart in uniform buffers
+            // (nvnDeviceGetSeparateTextureHandle / ...SamplerHandle results), ORed by the shader.
+            // Which word is which is not known here: the replay reads both and ORs them, as the
+            // shader does (a texture word has no sampler bits and a sampler word no texture id).
+            result.texture = primary_ref;
+            result.sampler = secondary_ref;
         } else {
             return fail(fmt::format("unsupported handle word pair {} + {}",
                                     HandleSourceName(primary.source),

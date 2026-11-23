@@ -1139,6 +1139,40 @@ private:
     std::vector<VkWriteDescriptorSet> scratch_writes;
     std::vector<VkDescriptorBufferInfo> scratch_buffers;
     std::vector<VkDescriptorImageInfo> scratch_images;
+    /// Texture buffer bindings of the draw being prepared: each is planned as a pool range (its
+    /// `scratch_buffers` entries) and becomes buffer views when the descriptors are written.
+    struct TexelRequest {
+        u32 write; ///< index in scratch_writes
+        u32 first; ///< first entry in scratch_texel_formats
+        u32 count;
+    };
+    std::vector<TexelRequest> scratch_texel;
+    std::vector<std::pair<u32, VkFormat>> scratch_texel_formats; ///< scratch_buffers index, format
+    std::vector<VkBufferView> scratch_texel_views;
+    /// Buffer views by buffer, range and format, kept while Impl::pool_generation is unchanged (a
+    /// pool buffer lives at least that long, as the resolved-range cache relies on); the views
+    /// of an older generation are released after the flight that last could use them.
+    struct TexelViewKey {
+        VkBuffer buffer;
+        VkDeviceSize offset;
+        VkDeviceSize range;
+        VkFormat format;
+        bool operator==(const TexelViewKey&) const = default;
+    };
+    struct TexelViewKeyHash {
+        size_t operator()(const TexelViewKey& key) const noexcept {
+            u64 hash = reinterpret_cast<u64>(key.buffer) * 0x9E3779B97F4A7C15ull;
+            hash = (hash ^ key.offset) * 0x9E3779B97F4A7C15ull;
+            hash = (hash ^ key.range) * 0x9E3779B97F4A7C15ull;
+            return static_cast<size_t>(hash ^ static_cast<u64>(key.format) ^ (hash >> 29));
+        }
+    };
+    std::unordered_map<TexelViewKey, VkBufferView, TexelViewKeyHash> texel_view_cache;
+    std::shared_ptr<std::vector<vk::BufferView>> texel_views;
+    u64 texel_views_generation{~u64{0}};
+    bool texel_no_shadow{}; ///< the range being resolved is bound through a buffer view
+    /// Turns `scratch_texel` into buffer views; a binding whose view cannot be made is dropped.
+    void FinishTexelBuffers(bool graphics);
     DrawPlan draw_plan; ///< the plan of the draw being prepared (capacity kept between draws)
     std::array<u32, 2> fallback_logged{}; ///< DescReason bits logged once, per bind point
 

@@ -392,6 +392,13 @@ std::optional<u32> DrawContext::ReadBindingHandleWord(const VC::DescriptorLayout
 
 namespace {
 
+/// A texture buffer: texels in a range of a memory pool, no image (so no storage), and a shader
+/// that fetches from it must be translated for a buffer, not for a 1D image.
+bool IsTextureBuffer(const Texture& texture) {
+    return texture.desc.target == static_cast<s32>(TexTarget::Buffer) &&
+           texture.host.format != VK_FORMAT_UNDEFINED;
+}
+
 /// What the shader translation needs to know about the texture behind a handle.
 TextureInfo InfoOfTexture(const Texture& texture) {
     const s32 target = texture.desc.view.set_target ? texture.desc.view.target : texture.desc.target;
@@ -520,7 +527,7 @@ std::unique_ptr<TextureOracle> DrawContext::FreezeOracle(
             return;
         }
         const std::shared_ptr<Texture> texture = TextureOfId(id);
-        if (texture && texture->storage) {
+        if (texture && (texture->storage || IsTextureBuffer(*texture))) {
             frozen->textures.emplace(id, InfoOfTexture(*texture));
         }
     };
@@ -607,7 +614,7 @@ TextureInfo DrawContext::QueryTexture(u32 stage, const VC::NvnHandleRecord& reco
         return {};
     }
     const std::shared_ptr<Texture>& texture = TextureOfId(VC::TextureIdOf(*word));
-    if (!texture || !texture->storage) {
+    if (!texture || (!texture->storage && !IsTextureBuffer(*texture))) {
         return {};
     }
     return InfoOfTexture(*texture);
@@ -887,6 +894,8 @@ bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool grap
     scratch_writes.clear();
     scratch_buffers.clear();
     scratch_images.clear();
+    scratch_texel.clear();
+    scratch_texel_formats.clear();
     size_t total = 0;
     for (const VC::DescriptorBinding& binding : layout.bindings) {
         total += binding.count;
@@ -1193,10 +1202,10 @@ bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool grap
         const bool ubo_candidate = uniform && !write && impl.ubo_mirror && ref.pool != nullptr &&
                                    ref.pool->backing == Pool::Backing::Imported;
         const bool shadowable =
-            ubo_candidate ||
+            !texel_no_shadow && (ubo_candidate ||
             (storage_candidate && (impl.pool_mirror_mode != 0
                                        ? true
-                                       : write && debug.shadow_storage && size <= debug.shadow_max_bytes));
+                                       : write && debug.shadow_storage && size <= debug.shadow_max_bytes)));
         plan.shadow_candidates |= shadowable;
         plan.UseRange(ref.pool, ref.pool_offset, size, write,
                       static_cast<u32>(scratch_buffers.size()), shadowable, ubo_candidate);
@@ -1362,11 +1371,18 @@ bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool grap
             for (u32 i = 0; i < count; ++i) {
                 const VC::HandleRef texture_ref = VC::HandleElement(binding.texture, i);
                 const VC::HandleRef sampler_ref = VC::HandleElement(binding.sampler, i);
-                const u32 texture_word =
+                u32 texture_word =
                     ReadBindingHandleWord(layout, binding, texture_ref,
                                           is_image ? VC::HandleWordKind::Image
                                                    : VC::HandleWordKind::Texture)
                         .value_or(0);
+                if (!is_image && texture_ref.source == VC::HandleSource::UniformBuffer &&
+                    sampler_ref.source == VC::HandleSource::UniformBuffer) {
+                    // Two stored words, either of which may be the texture's: ORed as the shader
+                    // does (each field of each word moved into the replay's pool numbering).
+                    texture_word |=
+                        ReadHandleWord(stage, sampler_ref, VC::HandleWordKind::Texture).value_or(0);
+                }
                 const u32 sampler_word =
                     sampler_ref.source != VC::HandleSource::None
                         ? ReadHandleWord(stage, sampler_ref, VC::HandleWordKind::SeparateSampler)
@@ -1676,12 +1692,59 @@ bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool grap
             write.pImageInfo = &scratch_images[first];
             break;
         }
-        default:
-            // Texel buffers: no VkBufferView support yet.
-            ++counters.descriptors_unsupported;
-            note(DescReason::TexelBuffer);
-            host->HostUnsupported("Draw", "texel buffer descriptors are not supported");
-            continue;
+        default: {
+            // Texture buffers (NVN texture target BUFFER): a range of a memory pool read as
+            // texels. Planned like a storage range, bound through a buffer view that
+            // FinishTexelBuffers makes once the range's buffer is final.
+            const bool storage_texel = binding.kind == VC::DescriptorKind::StorageTexelBuffer;
+            const size_t first = scratch_buffers.size();
+            const size_t first_format = scratch_texel_formats.size();
+            bool planned = true;
+            for (u32 i = 0; i < count && planned; ++i) {
+                const VC::HandleRef texture_ref = VC::HandleElement(binding.texture, i);
+                const u32 texture_word =
+                    ReadBindingHandleWord(layout, binding, texture_ref,
+                                          storage_texel ? VC::HandleWordKind::Image
+                                                        : VC::HandleWordKind::Texture)
+                        .value_or(0);
+                const std::shared_ptr<Texture>& texture =
+                    TextureOfId(VC::TextureIdOf(texture_word));
+                planned = false;
+                if (!texture || texture->desc.target != static_cast<s32>(TexTarget::Buffer) ||
+                    texture->host.format == VK_FORMAT_UNDEFINED) {
+                    break;
+                }
+                const auto pool = impl.pools.find(texture->desc.pool_serial);
+                const u64 bytes = u64{texture->desc.width} *
+                                  VideoCore::Surface::BytesPerBlock(texture->host.pixel_format);
+                if (pool == impl.pools.end() || bytes == 0) {
+                    break;
+                }
+                texel_no_shadow = true;
+                const VkDescriptorBufferInfo info = buffer_info(
+                    BufferBinding{pool->second->address + texture->desc.pool_offset, bytes},
+                    storage_texel && binding.is_written, false);
+                texel_no_shadow = false;
+                if (info.buffer == resources.DummyBuffer() || info.range != bytes) {
+                    break;
+                }
+                scratch_texel_formats.emplace_back(static_cast<u32>(scratch_buffers.size()),
+                                                   texture->host.format);
+                scratch_buffers.push_back(info);
+                planned = true;
+            }
+            if (!planned) {
+                scratch_buffers.resize(first);
+                scratch_texel_formats.resize(first_format);
+                ++counters.descriptors_unsupported;
+                note(DescReason::TexelBuffer);
+                host->HostUnsupported("Draw", "a texel buffer descriptor names no texture buffer");
+                continue;
+            }
+            scratch_texel.push_back({static_cast<u32>(scratch_writes.size()),
+                                     static_cast<u32>(first_format), count});
+            break;
+        }
         }
         scratch_writes.push_back(write);
     }
@@ -1934,7 +1997,9 @@ bool DrawContext::TargetOverlapsView(const Storage& storage, const ViewKey& key)
         const u32 total = storage.type == VK_IMAGE_TYPE_3D
                               ? (std::max)(storage.extent.depth >> level, 1u)
                               : storage.layers;
-        u32 count = target.ref.view.set_layers ? target.ref.view.nlayers : total;
+        u32 count = target.ref.view.set_layers && target.ref.view.nlayers != 0
+                        ? target.ref.view.nlayers
+                        : total;
         count = (std::min)((std::max)(count, 1u), total > layer ? total - layer : 1u);
         const bool levels_overlap = level >= key.base_level && level < key.base_level + key.levels;
         const bool layers_overlap = layer < key.base_layer + key.layers && key.base_layer < layer + count;
@@ -2378,6 +2443,9 @@ bool DrawContext::PushSetZero(PipelineBase& pipe, DrawPlan& plan, VkPipelineBind
                               area.data());
         }
     }
+    if (!scratch_texel.empty()) {
+        FinishTexelBuffers(bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS);
+    }
     if (scratch_writes.empty() || !pipe.set_layout) {
         return true;
     }
@@ -2421,6 +2489,81 @@ bool DrawContext::PushSetZero(PipelineBase& pipe, DrawPlan& plan, VkPipelineBind
                                     scratch_writes.data(), 0, nullptr);
     cmd.BindDescriptorSets(bind_point, *pipe.layout, 0, std::span{&set, 1}, {});
     return true;
+}
+
+void DrawContext::FinishTexelBuffers(bool graphics) {
+    static const VkDeviceSize alignment =
+        impl.device.GetPhysical().GetProperties().limits.minTexelBufferOffsetAlignment;
+    constexpr size_t MAX_CACHED_VIEWS = 8192;
+    const u64 generation = impl.pool_generation.load(std::memory_order_acquire);
+    if (!texel_views || texel_views_generation != generation ||
+        texel_view_cache.size() > MAX_CACHED_VIEWS) {
+        if (texel_views && !texel_views->empty()) {
+            impl.retired.push_back({host->HostFlight().seq,
+                                    [views = std::move(texel_views)]() mutable { views->clear(); }});
+        }
+        texel_views = std::make_shared<std::vector<vk::BufferView>>();
+        texel_view_cache.clear();
+        texel_views_generation = generation;
+    }
+    scratch_texel_views.assign(scratch_texel_formats.size(), VK_NULL_HANDLE);
+    // Last first: dropping a write moves the ones after it.
+    for (size_t r = scratch_texel.size(); r-- > 0;) {
+        const TexelRequest request = scratch_texel[r];
+        VkWriteDescriptorSet& write = scratch_writes[request.write];
+        const bool storage_texel = write.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+        bool made = true;
+        for (u32 i = 0; i < request.count && made; ++i) {
+            const auto& [info_index, format] = scratch_texel_formats[request.first + i];
+            const VkDescriptorBufferInfo& info = scratch_buffers[info_index];
+            made = info.buffer != VK_NULL_HANDLE && info.offset % alignment == 0 &&
+                   impl.device.IsFormatSupported(format,
+                                                 storage_texel
+                                                     ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT
+                                                     : VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT,
+                                                 FormatType::Buffer);
+            if (!made) {
+                static std::atomic<u32> logged{};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+                    LOG_WARNING(Render_Vulkan,
+                                "[nvn] texture buffer not bound: format {} offset {:#x} size {:#x} "
+                                "(offset alignment {}, {} texel buffer)",
+                                static_cast<int>(format), info.offset, info.range, alignment,
+                                storage_texel ? "storage" : "uniform");
+                }
+                break;
+            }
+            const TexelViewKey view_key{info.buffer, info.offset, info.range, format};
+            if (const auto cached = texel_view_cache.find(view_key);
+                cached != texel_view_cache.end()) {
+                scratch_texel_views[request.first + i] = cached->second;
+                continue;
+            }
+            try {
+                texel_views->push_back(impl.device.GetLogical().CreateBufferView({
+                    .sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .buffer = info.buffer,
+                    .format = format,
+                    .offset = info.offset,
+                    .range = info.range,
+                }));
+                scratch_texel_views[request.first + i] = *texel_views->back();
+                texel_view_cache.emplace(view_key, *texel_views->back());
+            } catch (const vk::Exception&) {
+                made = false;
+            }
+        }
+        if (made) {
+            write.pTexelBufferView = &scratch_texel_views[request.first];
+        } else {
+            ++counters.descriptors_unsupported;
+            NoteFallback(graphics, DescReason::TexelBuffer, {});
+            scratch_writes.erase(scratch_writes.begin() + request.write);
+        }
+    }
+    scratch_texel.clear();
 }
 
 VkDescriptorSet DrawContext::AllocateSet(VkDescriptorSetLayout layout) {

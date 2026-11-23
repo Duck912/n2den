@@ -1067,7 +1067,12 @@ bool DrawContext::ShapeOf(const TargetBinding& target, bool is_depth, Attachment
                                      level, layer));
         return false;
     }
-    u32 count = target.ref.view.set_layers ? target.ref.view.nlayers : total;
+    // A view's layer count of 0 is every layer from its first one (as the texture bindings read
+    // it, ViewKeyOf): a game attaches a whole 3D texture this way and routes its slices with
+    // gl_Layer.
+    u32 count = target.ref.view.set_layers && target.ref.view.nlayers != 0
+                    ? target.ref.view.nlayers
+                    : total;
     count = std::clamp(count, 1u, total - layer);
     out.format = format.format;
     out.layer_count = count;
