@@ -819,7 +819,11 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
             program != Maxwell::ShaderType::Geometry && !mesh_slot) {
             throw Shader::RuntimeError("Unsupported native graphics shader stage {}", static_cast<u32>(program));
         }
-        stage = program == Maxwell::ShaderType::VertexB ? Shader::Stage::VertexB : Shader::Stage::Fragment;
+        // InitializeNativeCode below validates and lowers the code for this stage, so it must be
+        // the real one: geometry programs were validated as fragment ones and all rejected.
+        stage = program == Maxwell::ShaderType::VertexB    ? Shader::Stage::VertexB
+                : program == Maxwell::ShaderType::Geometry ? Shader::Stage::Geometry
+                                                           : Shader::Stage::Fragment;
         if (mesh_slot) {
             // The native front end validates the program here and treats task and mesh programs
             // differently from vertex ones (their stage buffer accesses, for one), so it needs the

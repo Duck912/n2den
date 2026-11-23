@@ -65,9 +65,11 @@ private:
     }
     // Paths only nvn-hle programs take (geometry output, patch attributes, stage buffer output reads,
     // fragment traps, indexed attribute loads). The emulated GPU keeps rejecting them here, so its
-    // per-program choice between this front end and the lowering stays what it was.
+    // per-program choice between this front end and the lowering stays what it was, except for
+    // geometry programs: the emulated GPU runs the same Switch 2 code, and a geometry program needs
+    // these paths (OUT, LEPC, the exit stub) to translate here instead of in the lowering.
     [[nodiscard]] bool NativeExtensions() const {
-        return env.IsNvnHleProgram();
+        return env.IsNvnHleProgram() || env.ShaderStage() == Stage::Geometry;
     }
 
     // Uniform registers live in the top of the IR register file: UR0..UR62 are slots 192..254 and the
