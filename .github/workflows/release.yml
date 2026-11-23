@@ -113,7 +113,7 @@ jobs:
         run: |
           $env:PATH = "$env:PATH;C:\Program Files\Git\usr\bin"
           # eden-cli does not link under clang-cl yet (no wmain), so the PGO package is GUI only.
-          $targets = if ('${{ matrix.variant }}' -eq 'pgo') { @('yuzu') } else { @('yuzu', 'yuzu-cmd') }
+          [string[]]$targets = if ('${{ matrix.variant }}' -eq 'pgo') { 'yuzu' } else { 'yuzu', 'yuzu-cmd' }
           cmake --build build --target @targets --parallel $env:NUMBER_OF_PROCESSORS
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           if ('${{ matrix.variant }}' -eq 'msvc') { sccache --show-stats }
