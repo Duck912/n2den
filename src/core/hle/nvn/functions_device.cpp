@@ -262,6 +262,40 @@ void nvnDeviceRegisterFastClear(Call& c) {
     c.ret.SetBool(true);
 }
 
+/// The checkpoint settings, (const NVNdevice*, NVNboolean / u32 / int) -> NVNboolean (prototypes
+/// from ScarletNX's nvn.hook): GPU crash checkpoints, which the host does not take. They answer
+/// success, as ScarletNX does, so a game that checks the result keeps going.
+void nvnDeviceSetCheckpointSetting(Call& c) {
+    c.ret.SetBool(true);
+}
+
+/// (const NVNdevice*, u64 address, u64 size) -> u64, NVN2 (prototype from ScarletNX's nvn.hook).
+/// The handle is address>>4 in bits 0..44 and ceil(size/16) from bit 45 (0x1e0000000000 is 15<<41,
+/// so the add-then-mask rounds the size up), ScarletNX's encoding (nvn_object.c
+/// nvn_DeviceGetUniformBufferHandle). [UNVERIFIED] against a driver disassembly. Nothing on the
+/// host reads these handles yet (no bindless uniform-buffer reads in the native shader front end),
+/// so a shader that uses one will not see the buffer: logged once as a lead.
+void nvnDeviceGetUniformBufferHandle(Call& c) {
+    static_cast<void>(c.args.NextPointer());
+    const u64 address = c.args.NextU64();
+    const u64 size = c.args.NextU64();
+    static Common::BootCounter logged;
+    if (logged.First()) {
+        LOG_WARNING(Core,
+                    "[nvn] nvnDeviceGetUniformBufferHandle({:#x}, {:#x}) from {:#x}: bindless "
+                    "uniform-buffer reads are not implemented",
+                    address, size, c.ctx.lr);
+    }
+    c.ret.SetU64(((0x1e00'0000'0000ULL + (size << 41)) & 0xffff'e000'0000'0000ULL) |
+                 address >> 4);
+}
+
+/// (const NVNdevice*, NVNdebugObjectType, callback, void*): walks the debug layer's object
+/// database. The host keeps none, so the callback is never invoked.
+void nvnDeviceWalkDebugDatabase(Call& c) {
+    static_cast<void>(c);
+}
+
 void nvnDeviceSetIntermediateShaderCache(Call& c) {
     static_cast<void>(c);
 }
@@ -397,6 +431,16 @@ void RegisterDeviceFunctions(Registry& registry) {
     registry.Add<&nvnDeviceRegisterFastClear>("nvnDeviceRegisterFastClearColori");
     registry.Add<&nvnDeviceRegisterFastClear>("nvnDeviceRegisterFastClearColorui");
     registry.Add<&nvnDeviceRegisterFastClear>("nvnDeviceRegisterFastClearDepth");
+    registry.Add<&nvnDeviceRegisterFastClear>("nvnDeviceRegisterFastClearStencil");
+    registry.Add<&nvnDeviceSetCheckpointSetting>("nvnDeviceSetAutomaticCheckpointsByDebugGroup");
+    registry.Add<&nvnDeviceSetCheckpointSetting>("nvnDeviceSetAutomaticCheckpointsEnable");
+    registry.Add<&nvnDeviceSetCheckpointSetting>("nvnDeviceSetAutomaticCheckpointsMask");
+    registry.Add<&nvnDeviceSetCheckpointSetting>(
+        "nvnDeviceSetAutomaticCheckpointsSamplingInterval");
+    registry.Add<&nvnDeviceSetCheckpointSetting>("nvnDeviceSetCheckpointCallStacksEnable");
+    registry.Add<&nvnDeviceSetCheckpointSetting>("nvnDeviceSetCheckpointMaxCallStacksDepth");
+    NVN_HLE(registry, nvnDeviceGetUniformBufferHandle);
+    NVN_HLE(registry, nvnDeviceWalkDebugDatabase);
     NVN_HLE(registry, nvnDeviceGetWindowOriginMode);
     NVN_HLE(registry, nvnDeviceGetDepthMode);
     NVN_HLE(registry, nvnDeviceGetTimestampInNanoseconds);

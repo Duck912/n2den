@@ -96,6 +96,17 @@ void nvnEventBuilderGetMemoryOffset(Call& c) {
     c.ret.SetU64(c.Load<u64>(c.args.NextPointer() + EbOffset));
 }
 
+/// (const NVNeventBuilder*, ptrdiff_t* offset) -> const NVNmemoryPool* (prototype from ScarletNX's
+/// nvn.hook): both halves of SetStorage at once; a NULL offset pointer skips the offset.
+void nvnEventBuilderGetStorage(Call& c) {
+    const u64 builder = c.args.NextPointer();
+    const u64 offset_out = c.args.NextPointer();
+    if (offset_out != 0) {
+        c.Store<s64>(offset_out, c.Load<s64>(builder + EbOffset));
+    }
+    c.ret.SetU64(c.Load<u64>(builder + EbPool));
+}
+
 void nvnEventInitialize(Call& c) {
     const u64 event = c.args.NextPointer();
     const u64 builder = c.args.NextPointer();
@@ -170,6 +181,7 @@ void RegisterEventFunctions(Registry& registry) {
     NVN_HLE(registry, nvnEventBuilderSetStorage);
     NVN_HLE(registry, nvnEventBuilderGetMemoryPool);
     NVN_HLE(registry, nvnEventBuilderGetMemoryOffset);
+    NVN_HLE(registry, nvnEventBuilderGetStorage);
     NVN_HLE(registry, nvnEventInitialize);
     NVN_HLE(registry, nvnEventFinalize);
     NVN_HLE(registry, nvnEventGetValue);

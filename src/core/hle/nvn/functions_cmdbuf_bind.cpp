@@ -490,6 +490,17 @@ void nvnCommandBufferShadingRateImagePalette(Call& c) {
                  viewport, count, c.ctx.lr);
 }
 
+/// (cmd, int mode), NVN2 (prototype from ScarletNX's nvn.hook, which records it and honours only
+/// mode 1): how the palette maps the shading rate image. Ignored like the palette itself.
+void nvnCommandBufferSetShadingRatePaletteMode(Call& c) {
+    static_cast<void>(c.args.NextPointer());
+    const s32 mode = c.args.NextS32();
+    NVN_LOG_CHANGES(mode,
+                    "[nvn] nvnCommandBufferSetShadingRatePaletteMode({}) from {:#x}: the host "
+                    "shades at the full rate",
+                    mode, c.ctx.lr);
+}
+
 #undef NVN_LOG_CHANGES
 
 #undef NVN_LOG_ONCE
@@ -571,6 +582,7 @@ void RegisterCommandBufferBindFunctions(Registry& registry) {
     NVN_HLE(registry, nvnCommandBufferSetComputeOverlapMode);
     NVN_HLE(registry, nvnCommandBufferBindShadingRateImage);
     NVN_HLE(registry, nvnCommandBufferShadingRateImagePalette);
+    NVN_HLE(registry, nvnCommandBufferSetShadingRatePaletteMode);
 }
 
 } // namespace Core::NvnHle::Hle

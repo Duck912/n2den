@@ -568,6 +568,26 @@ void NoOp(Call& c) {
     static_cast<void>(c);
 }
 
+/// nvnCommandBufferInsertCheckpoint{Static,Dynamic}: (cmd, const char* label) -> NVNboolean
+/// (prototype from ScarletNX's nvn.hook). Nothing to record, but the result must be set: as a
+/// NoOp, x0 still held the command buffer pointer, so the NVNboolean was its low byte: arbitrary,
+/// depending on the object's alignment.
+void ReturnTrue(Call& c) {
+    c.ret.SetBool(true);
+}
+
+/// (cmd), prototype from ScarletNX's nvn.hook (which ignores it too): makes a compressed depth
+/// buffer readable as a texture, which Vulkan does by itself. Logged once: if depth sampled after
+/// it looks wrong, this is the lead.
+void nvnCommandBufferResolveDepthBuffer(Call& c) {
+    NVN_LOG_ONCE(logged, "[nvn] ResolveDepthBuffer from {:#x}: nothing to do on the host",
+                 c.ctx.lr);
+}
+
+/// Hardware-only hints (prototypes from ScarletNX's nvn.hook, which ignores them too):
+/// SetZCullZF32CompressionEnable (cmd, NVNboolean) and OverrideSubtileSize (cmd, NVNboolean, int)
+/// tune ZCull and the binner, which the host does not have.
+
 void nvnCommandBufferSetRecordingMode(Call& c) {
     static_cast<void>(c.args.NextPointer());
     const s32 mode = c.args.NextS32();
@@ -710,12 +730,15 @@ void RegisterCommandBufferFunctions(Registry& registry) {
         "nvnCommandBufferInsertDebugMarkerDynamic",
         "nvnCommandBufferInsertDebugMarkerCompute",
         "nvnCommandBufferInsertDebugMarkerGraphics",
-        "nvnCommandBufferInsertCheckpointStatic",
-        "nvnCommandBufferInsertCheckpointDynamic",
+        "nvnCommandBufferSetZCullZF32CompressionEnable",
+        "nvnCommandBufferOverrideSubtileSize",
     };
     for (const std::string_view name : NoOps) {
         registry.Add<&NoOp>(name);
     }
+    NVN_HLE(registry, nvnCommandBufferResolveDepthBuffer);
+    registry.Add<&ReturnTrue>("nvnCommandBufferInsertCheckpointStatic");
+    registry.Add<&ReturnTrue>("nvnCommandBufferInsertCheckpointDynamic");
 }
 
 } // namespace Core::NvnHle::Hle
