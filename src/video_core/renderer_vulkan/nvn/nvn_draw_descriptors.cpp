@@ -6,6 +6,7 @@
 // the driver/handle constant banks, and pushing/allocating the descriptor set.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <unordered_map>
@@ -1537,15 +1538,30 @@ bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool grap
                             binding.type == Shader::TextureType::Color3D ||
                             binding.type == Shader::TextureType::ColorCube ||
                             binding.type == Shader::TextureType::ColorArrayCube;
-                        if (typed_target && !is_image && s.type == VK_IMAGE_TYPE_2D &&
+                        // EDEN_NX2_NVN_NO_RETYPE=1: diagnostic, bind the null view instead.
+                        static const bool no_retype = [] {
+                            const char* v = std::getenv("EDEN_NX2_NVN_NO_RETYPE");
+                            return v != nullptr && v[0] != 0 && v[0] != 48;
+                        }();
+                        if (typed_target && !no_retype && !is_image && s.type == VK_IMAGE_TYPE_2D &&
                             s.levels == 1 && s.layers == 1 &&
                             (binding.type == Shader::TextureType::Color3D ||
                              s.extent.width == s.extent.height) &&
                             s.layers == 1 && s.samples == VK_SAMPLE_COUNT_1_BIT &&
                             !s.host.depth && !s.host.stencil) {
                             const bool cube = binding.type != Shader::TextureType::Color3D;
-                            DrawResources::Scratch* made = resources.GetRetypedScratch(
-                                s, 200u + static_cast<u32>(binding.type), cube);
+                            // The scratch takes the source's host format, which is only final once
+                            // its image exists: a smart ASTC stand-in picks its BC format when the
+                            // image is made (DK Bananza: BC3 planned, BC4 made), and a copy between
+                            // BC3 and BC4 (16- and 8-byte blocks) read past the source's memory
+                            // (DMA page fault, device lost). Making the image records nothing.
+                            if (!s.image) {
+                                impl.EnsureImage(s);
+                            }
+                            DrawResources::Scratch* made =
+                                s.image ? resources.GetRetypedScratch(
+                                              s, 200u + static_cast<u32>(binding.type), cube)
+                                        : nullptr;
                             if (made) {
                                 if (placeholder_logged
                                         .insert(texture->serial << 8 ^ static_cast<u64>(binding.type))
@@ -1553,11 +1569,15 @@ bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool grap
                                     LOG_INFO(Render_Vulkan,
                                              "[nvn] texture {:#x} ({}x{} 2D, format {:#x}) is "
                                              "sampled as {} by program {:016x} stage {}: bound as "
-                                             "a one-texel {} holding its texel",
+                                             "a one-texel {} holding its texel (host vkfmt {}, "
+                                             "sparse {}, origin {}, contents {}, image {})",
                                              texture->serial, s.extent.width, s.extent.height,
                                              s.desc.format, cube ? "a cube" : "a 3D texture",
                                              ProfStageHash(stage), stage,
-                                             cube ? "cube" : "3D texture");
+                                             cube ? "cube" : "3D texture",
+                                             static_cast<int>(s.host.format), s.sparse != nullptr,
+                                             static_cast<int>(s.origin), s.contents_valid,
+                                             static_cast<bool>(s.image));
                                 }
                                 const u32 faces = cube ? 6u : 1u;
                                 bool have_copy = false;
@@ -2064,6 +2084,14 @@ void DrawContext::RecordFeedbackCopies(DrawPlan& plan) {
                      copy.retype_layers);
         }
         if (copy.retype_layers != 0) {
+            if (source.host.format != scratch.host.format) {
+                // The source was recreated in another format after the plan chose the scratch
+                // (a stand-in refit). vkCmdCopyImage between formats of different block sizes
+                // reads past the source's memory; the scratch keeps its last texel this draw.
+                host->HostUnsupported("Draw", "one-texel placeholder copy skipped: the source "
+                                              "changed format after the plan");
+                continue;
+            }
             // A 1x1x1 2D placeholder sampled as 3D or cube: its single texel goes to the typed
             // scratch (a 2D layer copies to a 3D depth slice and to every cube face).
             for (u32 face = 0; face < copy.retype_layers; ++face) {
