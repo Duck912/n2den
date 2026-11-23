@@ -189,19 +189,7 @@ jobs:
         shell: pwsh
         run: |
           $name = "n2Den-windows-x64-$($env:GITHUB_SHA.Substring(0, 7))"
-          $pkg = "artifacts/$name"
-          New-Item -ItemType Directory -Force $pkg, symbols | Out-Null
-          Copy-Item build/bin/eden.exe "$pkg/n2Den.exe"
-          Copy-Item build/bin/eden-cli.exe "$pkg/n2Den-cli.exe"
-          Get-ChildItem build/bin -Filter *.dll | Where-Object Name -notlike 'Qt6*' | Copy-Item -Destination $pkg
-          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-compiler-runtime --no-opengl-sw --no-translations "$pkg/n2Den.exe"
-          Copy-Item "$env:VCToolsRedistDir/x64/Microsoft.VC143.CRT/*.dll" $pkg
-          Copy-Item LICENSE.txt $pkg
-          Copy-Item LICENSES "$pkg/LICENSES" -Recurse
-          (Get-Content dist/testers/README-n2den-windows.txt -Raw).Replace('@COMMIT@', $env:GITHUB_SHA) |
-            Set-Content -NoNewline "$pkg/README.txt"
-          Get-ChildItem build/bin -Filter *.pdb | Copy-Item -Destination symbols
-          Get-ChildItem $pkg | Select-Object Name, Length
+          ./tools/windows/package.ps1 -Build build -Name $name -Commit $env:GITHUB_SHA
           "PACKAGE=$name" >> $env:GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
@@ -213,6 +201,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PACKAGE }}-symbols
-          path: symbols/
+          path: artifacts/${{ env.PACKAGE }}-symbols/
           retention-days: 30
           if-no-files-found: ignore

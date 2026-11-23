@@ -1,0 +1,165 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# n2den releases. Pushing a tag v* builds two Windows packages from that commit and attaches them
+# to a draft GitHub release, which is published by hand after checking it:
+#   - MSVC: the same build as the Build workflow.
+#   - PGO: clang-cl + ThinLTO, optimized with the profile committed at pgo/n2den.profdata
+#     (trained on gameplay with an instrumented build, see docs/PGO.md). The profile is read by
+#     the LLVM version it was merged with, so the job installs that version.
+# The release text comes from .github/release-notes/<tag>.md when that file exists.
+# Run it from the Actions tab on a tag to rebuild the packages of an existing draft.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  LLVM_VERSION: 22.1.8
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.variant }}
+    runs-on: windows-2022
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [msvc, pgo]
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: CPM cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/cpm
+          key: cpm-windows-${{ hashFiles('**/cpmfile.json') }}
+          restore-keys: cpm-windows-
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.8.3
+          arch: win64_msvc2022_64
+          modules: qtcharts
+          cache: true
+
+      - name: Install Vulkan SDK
+        shell: powershell
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        if: matrix.variant == 'pgo'
+        shell: pwsh
+        run: |
+          $exe = "LLVM-$env:LLVM_VERSION-win64.exe"
+          curl.exe -fsSL --retry 5 -o $exe "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:LLVM_VERSION/$exe"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList '/S', '/D=C:\llvm'
+          & C:\llvm\bin\clang-cl.exe --version
+          & C:\llvm\bin\llvm-profdata.exe show pgo/n2den.profdata | Select-Object -First 4
+
+      - name: Compiler cache
+        if: matrix.variant == 'msvc'
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          # CPM applies patches with Git's patch.exe; append so Git's link.exe never shadows MSVC's.
+          $env:PATH = "$env:PATH;C:\Program Files\Git\usr\bin"
+          $common = @(
+            '-DCMAKE_BUILD_TYPE=Release',
+            '-DENABLE_QT=ON', '-DYUZU_USE_BUNDLED_QT=OFF', "-DQt6_DIR=$env:QT_ROOT_DIR/lib/cmake/Qt6",
+            '-DYUZU_CMD=ON', '-DYUZU_ROOM=OFF',
+            '-DBUILD_TESTING=OFF', '-DYUZU_TESTS=OFF', '-DDYNARMIC_TESTS=OFF',
+            '-DENABLE_CUBEB=OFF', '-DENABLE_RESHADE=OFF', '-DENABLE_NVIDIA_DLSS=ON', '-DENABLE_OPENGL=OFF',
+            '-DENABLE_WEB_SERVICE=OFF', '-DENABLE_UPDATE_CHECKER=OFF', '-DENABLE_LTO=OFF',
+            '-DYUZU_DISABLE_LLVM=ON', '-DENABLE_WERROR=OFF'
+          )
+          if ('${{ matrix.variant }}' -eq 'pgo') {
+            $llvm = 'C:/llvm/bin'
+            $variant = @(
+              "-DCMAKE_C_COMPILER=$llvm/clang-cl.exe", "-DCMAKE_CXX_COMPILER=$llvm/clang-cl.exe",
+              "-DCMAKE_LINKER=$llvm/lld-link.exe", "-DCMAKE_AR=$llvm/llvm-lib.exe",
+              "-DCMAKE_RC_COMPILER=$llvm/llvm-rc.exe",
+              '-DCMAKE_C_FLAGS=-DWIN32 -D_WINDOWS -DNOMINMAX -gline-tables-only',
+              '-DCMAKE_CXX_FLAGS=-EHsc -DWIN32 -D_WINDOWS -DNOMINMAX -gline-tables-only',
+              '-DCMAKE_EXE_LINKER_FLAGS=/DEBUG',
+              # Each ThinLTO backend job holds several GB; the runner has 16 GB.
+              '-DN2DEN_THINLTO=ON', '-DN2DEN_THINLTO_JOBS=2', '-DN2DEN_PGO=USE',
+              "-DN2DEN_PGO_PROFILE=$PWD/pgo/n2den.profdata"
+            )
+          } else {
+            # No compiler cache for the PGO build (docs/PGO.md, Caveats); the MSVC build uses one.
+            $variant = @('-DCMAKE_C_COMPILER=cl', '-DCMAKE_CXX_COMPILER=cl', '-DEDEN_PROFILE_SYMBOLS=ON',
+                         '-DCMAKE_C_COMPILER_LAUNCHER=sccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache')
+          }
+          cmake -S . -B build -G Ninja @common @variant
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:PATH;C:\Program Files\Git\usr\bin"
+          # eden-cli does not link under clang-cl yet (no wmain), so the PGO package is GUI only.
+          $targets = if ('${{ matrix.variant }}' -eq 'pgo') { @('yuzu') } else { @('yuzu', 'yuzu-cmd') }
+          cmake --build build --target @targets --parallel $env:NUMBER_OF_PROCESSORS
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ('${{ matrix.variant }}' -eq 'msvc') { sccache --show-stats }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $suffix = if ('${{ matrix.variant }}' -eq 'pgo') { '-pgo' } else { '' }
+          $name = "n2Den-${{ github.ref_name }}-windows-x64$suffix"
+          ./tools/windows/package.ps1 -Build build -Name $name -Commit $env:GITHUB_SHA
+          Compress-Archive -Path "artifacts/$name/*" -DestinationPath "artifacts/$name.zip" -CompressionLevel Optimal
+          Compress-Archive -Path "artifacts/$name-symbols/*" -DestinationPath "artifacts/$name-symbols.zip" -CompressionLevel Optimal
+          Get-ChildItem artifacts -Filter *.zip | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.variant }}
+          path: artifacts/*.zip
+          retention-days: 30
+
+  release:
+    name: Draft release
+    needs: windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist-out
+          merge-multiple: true
+
+      - name: Create or update the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la dist-out
+          notes=".github/release-notes/$TAG.md"
+          [ -f "$notes" ] || { echo "n2den $TAG" > /tmp/notes.md; notes=/tmp/notes.md; }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist-out/*.zip --clobber
+          else
+            gh release create "$TAG" dist-out/*.zip --draft --verify-tag --title "n2den $TAG" --notes-file "$notes"
+          fi

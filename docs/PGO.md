@@ -83,6 +83,20 @@ scene's snapshot: back up your own save first.
 The profile used for the numbers above came from four sessions: Ocarina of Time in Kokiri Forest
 and Hyrule Field (camera pans) and Fire Emblem: Fortune's Weave's town square and title screen.
 
+## Release builds
+
+The profile used for releases is committed at `pgo/n2den.profdata`. Pushing a `v*` tag runs the
+Release workflow (`.github/workflows/release.yml`), which builds an MSVC package and a clang-cl +
+ThinLTO + PGO package from the tagged commit with that profile, installing the LLVM version the
+profile was merged with, and attaches both to a draft GitHub release. GitHub's runners have no GPU
+and no games, so training happens on a local machine: retrain, replace `pgo/n2den.profdata`, and
+update `LLVM_VERSION` in the workflow if the LLVM version changed. `eden-cli` does not link under
+clang-cl yet, so the PGO package has only the GUI.
+
+The v1.0.0 profile came from six sessions: Ocarina of Time in Kokiri Forest (cold JIT cache, camera
+pan, and a pan on the emulated GPU) and Hyrule Field, and Fire Emblem: Fortune's Weave's title
+screen and town square.
+
 ## Caveats
 
 - Don't use a compiler cache (sccache, ccache) for the instrumented and PGO builds. A cached object
