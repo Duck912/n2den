@@ -9,7 +9,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -34,6 +36,7 @@
 #include "video_core/nvn_draw_probe.h"
 #include "video_core/nx2.h"
 #include "video_core/renderer_base.h"
+#include "video_core/textures/astc.h"
 #include "video_core/renderer_vulkan/nvn/nvn_viewport.h"
 #include "video_core/renderer_vulkan/nvn/nvn_condition_prefetch.h"
 #include "video_core/renderer_vulkan/nvn/nvn_draw.h"
@@ -936,6 +939,17 @@ private:
     /// sRGB view (Storage::standin_srgb_view) changes to BC1/BC3. False when the new image could
     /// not be created.
     bool RefitStandin(Storage& s, const u8* data, u64 size);
+    /// Diagnostics (EDEN_NX2_MKW_ATLAS_ALPHA_DIAG=1): classifies the ASTC bytes of an MKW atlas
+    /// copy's source once (L / LA / RGB / RGBA) and logs, per destination, how many sources and
+    /// copies of each class it got: whether BC1 atlases (no alpha) would lose anything.
+    void NoteMkwAtlasCopySource(const Storage& src, const Storage& dst);
+    struct MkwAtlasAlphaTally {
+        std::array<u64, 5> sources{}; ///< by Channels, [4]: unreadable or empty
+        std::array<u64, 5> copies{};
+    };
+    std::map<std::pair<u64, u64>, int> mkw_source_class; ///< src pool serial, offset -> class
+    std::map<std::pair<u64, u64>, MkwAtlasAlphaTally> mkw_atlas_alpha; ///< dst pool, offset
+    u64 mkw_atlas_copies_seen = 0;
     /// Keeps smart stand-in `s` at BC3 for good (`op` copies or partially uploads it, which only
     /// works within one format and must not lose texels to a later change of format): recreated
     /// as BC3 when it is another format, its contents then uploaded again from the guest bytes by
@@ -3253,6 +3267,55 @@ bool Recorder::Restandin(Storage& s, AstcStandin standin, bool deferred) {
     return impl.EnsureImage(s);
 }
 
+void Recorder::NoteMkwAtlasCopySource(const Storage& src, const Storage& dst) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("EDEN_NX2_MKW_ATLAS_ALPHA_DIAG");
+        return env != nullptr && std::string_view{env} == "1";
+    }();
+    if (!enabled) {
+        return;
+    }
+    const auto key = std::make_pair(src.pool_serial, src.pool_offset);
+    auto it = mkw_source_class.find(key);
+    const bool first = it == mkw_source_class.end();
+    if (first) {
+        int cls = 4;
+        if (const auto pool_it = impl.pools.find(src.pool_serial); pool_it != impl.pools.end()) {
+            const Pool& pool = *pool_it->second;
+            if (src.pool_offset < pool.size) {
+                const u64 size = (std::min)(src.layout.size, pool.size - src.pool_offset);
+                std::vector<u8> scratch;
+                if (const u8* data = impl.GuestBytes(pool, src.pool_offset, size, scratch)) {
+                    const BlockInfo block = FormatBlockInfo(src.desc.format);
+                    bool empty = false;
+                    const auto channels = Tegra::Texture::ASTC::ClassifyChannels(
+                        std::span<const u8>{data, static_cast<size_t>(size)}, block.width,
+                        block.height, &empty);
+                    cls = empty ? 4 : static_cast<int>(channels);
+                }
+            }
+        }
+        it = mkw_source_class.emplace(key, cls).first;
+    }
+    MkwAtlasAlphaTally& tally = mkw_atlas_alpha[std::make_pair(dst.pool_serial, dst.pool_offset)];
+    tally.copies[static_cast<size_t>(it->second)]++;
+    if (first) {
+        tally.sources[static_cast<size_t>(it->second)]++;
+    }
+    if (++mkw_atlas_copies_seen % 100 != 1) {
+        return; // the first copy, then every 100th
+    }
+    LOG_INFO(Render_Vulkan, "[nvn] MKW atlas alpha: {} atlas copies, {} distinct sources so far",
+             mkw_atlas_copies_seen, mkw_source_class.size());
+    for (const auto& [where, t] : mkw_atlas_alpha) {
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] MKW atlas alpha: destination pool {:#x} +{:#x}: sources L/LA/RGB/RGBA/empty "
+                 "{}/{}/{}/{}/{}, copies {}/{}/{}/{}/{}",
+                 where.first, where.second, t.sources[0], t.sources[1], t.sources[2], t.sources[3],
+                 t.sources[4], t.copies[0], t.copies[1], t.copies[2], t.copies[3], t.copies[4]);
+    }
+}
+
 bool Recorder::RefitStandin(Storage& s, const u8* data, u64 size) {
     if (!s.smart_standin) {
         return true;
@@ -4741,6 +4804,9 @@ void Recorder::CopyTextureToTexture(const VC::CopyTextureToTexturePayload& p) {
                                   ViewsBcStandin(src->host.format, dst->host.format)) ||
                                  SrgbStorageViewFormat(src->host.format) == dst->host.format ||
                                  SrgbStorageViewFormat(dst->host.format) == src->host.format);
+    if (mkw_atlas_copy) {
+        NoteMkwAtlasCopySource(*src, *dst);
+    }
     if (src->host.needs_transcode != dst->host.needs_transcode ||
         (src->host.needs_transcode && src->host.format != dst->host.format && !mkw_atlas_copy)) {
         // Both sides decoded to the same stand-in copy texel for texel; a decoded texture and a
