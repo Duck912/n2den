@@ -468,6 +468,7 @@ void Visitor::Run() {
         TLD();
         break;
     case 0xb6c:
+    case 0xf6c:
         TXD();
         break;
     case 0xb69:

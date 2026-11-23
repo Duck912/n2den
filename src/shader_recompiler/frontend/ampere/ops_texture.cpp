@@ -830,16 +830,25 @@ void Visitor::TXQ() {
     }
 }
 
-// TXD: texture sample with explicit gradients through a bound descriptor. The coordinates and the
+// TXD: texture sample with explicit gradients through a bound descriptor (0xb6c) or a handle in a
+// uniform register (0xf6c, as TEX and TLD have it). The coordinates and the
 // four derivatives are consecutive registers (an array layer follows the coordinates); the selected
 // channels go to the first destination (two channels) and the second one (the rest).
 void Visitor::TXD() {
     const u32 dest = Take(16, 8);
     const u32 coord_reg = Take(24, 8);
     const u32 derivative_reg = Take(32, 8);
-    const u32 cbuf_offset = Take(40, 14) * 4;
-    UseDescriptorBuffer(Take(54, 5));
-    Require(Take(59, 2) == 0, "native gradient texture handle mode");
+    const bool bindless = op == 0xf6c;
+    u32 cbuf_offset = 0;
+    u32 handle_register = 0;
+    if (bindless) {
+        handle_register = Take(40, 6);
+        Require(Take(91, 1) == 1 && handle_register < 63, "native bindless texture handle");
+    } else {
+        cbuf_offset = Take(40, 14) * 4;
+        UseDescriptorBuffer(Take(54, 5));
+        Require(Take(59, 2) == 0, "native gradient texture handle mode");
+    }
     const Dimension dim = DimensionOf(Take(61, 3));
     const u32 dest_b = Take(64, 8);
     const u32 mask = Take(72, 4);
@@ -866,7 +875,8 @@ void Visitor::TXD() {
     info.type.Assign(dim.type);
     info.num_derivatives.Assign(2);
     info.has_lod_clamp.Assign(0);
-    const IR::Value sample{ir.ImageGradient(DescriptorHandle(cbuf_offset), coords, derivatives, {}, {}, info)};
+    const IR::U32 handle = bindless ? UR(handle_register) : DescriptorHandle(cbuf_offset);
+    const IR::Value sample{ir.ImageGradient(handle, coords, derivatives, {}, {}, info)};
     const u32 outputs = static_cast<u32>(std::popcount(mask));
     Require(outputs <= 2 ? dest_b == 255 : dest_b != 255, "native texture result layout");
     u32 stored = 0;
