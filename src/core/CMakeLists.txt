@@ -538,6 +538,7 @@ add_library(core STATIC
     hle/service/audio/final_output_recorder_manager_for_applet.h
     hle/service/audio/final_output_recorder_manager.cpp
     hle/service/audio/final_output_recorder_manager.h
+    hle/service/audio/nx2_hwacod.h
     hle/service/audio/hardware_opus_decoder_manager.cpp
     hle/service/audio/hardware_opus_decoder_manager.h
     hle/service/audio/hardware_opus_decoder.cpp
