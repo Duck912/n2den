@@ -25,6 +25,7 @@
 #include "common/logging.h"
 #include "common/memory_census.h"
 #include "common/tl_ring.h"
+#include "core/arm/debug.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/device_memory.h"
@@ -545,18 +546,23 @@ bool Runtime::EnsureRecorder(Core::System& system) {
                         : default_reason);
     }
     {
-        // Byte cap of the lists recorded at synthetic command memory: off unless set (dropping
-        // one is not provably safe, the game holds its handle).
+        // Byte cap of the lists recorded at synthetic command memory. Dropping one is not
+        // provably safe (the game holds its handle), but a game that takes its command memory
+        // from the callback this path does not invoke records every list there, once each, and
+        // nothing else ever frees them: 2.8 GiB after four minutes of an Unreal Engine title.
+        // The default is high enough that lists a game builds once and keeps never reach it.
+        // EDEN_NX2_NVN_SYNTH_LIST_MIB=<n> sets it, 0 turns it off.
+        constexpr u64 DefaultCapMib = 1024;
         const char* const value = std::getenv("EDEN_NX2_NVN_SYNTH_LIST_MIB");
-        const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
+        const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : DefaultCapMib;
         synth_list_cap_mib.store(mib);
         if (mib != 0) {
             recorder->SetSyntheticListCap(mib << 20);
             LOG_INFO(Core,
-                     "[nvn] synthetic command lists: byte cap {} MiB (EDEN_NX2_NVN_SYNTH_LIST_MIB), "
-                     "least recently used ones idle for {} presents and called by no list are "
-                     "dropped",
-                     mib, VideoCommon::Nvn::DEFAULT_SYNTHETIC_LIST_IDLE_PRESENTS);
+                     "[nvn] synthetic command lists: byte cap {} MiB ({}), least recently used "
+                     "ones idle for {} presents and called by no list are dropped",
+                     mib, value != nullptr ? "EDEN_NX2_NVN_SYNTH_LIST_MIB" : "default",
+                     VideoCommon::Nvn::DEFAULT_SYNTHETIC_LIST_IDLE_PRESENTS);
         }
     }
     // Legacy-mode report timestamps are the GPU emulation path's own (`GPU::GetTicks()`); real
@@ -658,6 +664,7 @@ void Runtime::Release() {
 void Runtime::HeartbeatLoop(std::stop_token token) {
     // A status line every 10 s: what the recorder and the replay have done, and what is waiting.
     u64 last_presents = ~0ull;
+    u32 stalled_beats = 0;
     // EDEN_NX2_NVN_MEMORY_LOG=0 turns the `[nvn] memory:` line off.
     const char* const memory_log_value = std::getenv("EDEN_NX2_NVN_MEMORY_LOG");
     const bool memory_log = memory_log_value == nullptr || std::strcmp(memory_log_value, "0") != 0;
@@ -777,6 +784,31 @@ void Runtime::HeartbeatLoop(std::stop_token token) {
             for (const std::string& line : Common::ProcessMemoryCensus()) {
                 LOG_INFO(Core, "[mem] {}", line);
             }
+        }
+        // Two status lines in a row without a present: say once where every guest thread is, so a
+        // game that hangs while it boots names what it waits for. Read without the scheduler lock
+        // (this is not a guest thread); the threads of a stalled game do not move.
+        if (presents.load() == last_presents && ++stalled_beats == 2 && kernel != nullptr) {
+            if (Kernel::KProcess* const process = kernel->System().ApplicationProcess()) {
+                static constexpr const char* reasons[] = {"running", "sleep", "ipc", "sync",
+                                                          "condvar", "arbitration", "suspended"};
+                for (Kernel::KThread& thread : process->GetThreadList()) {
+                    const u32 reason = static_cast<u32>(thread.GetWaitReasonForDebugging());
+                    std::string where;
+                    size_t frames = 0;
+                    for (const auto& entry : Core::GetBacktrace(&thread)) {
+                        where += fmt::format(" {}+{:#x}", entry.module, entry.offset);
+                        if (++frames == 8) {
+                            break;
+                        }
+                    }
+                    LOG_INFO(Core, "[nvn] stalled: thread {} \"{}\" {}:{}", thread.GetThreadId(),
+                             Core::GetThreadName(&thread).value_or(""),
+                             reason < std::size(reasons) ? reasons[reason] : "?", where);
+                }
+            }
+        } else if (presents.load() != last_presents) {
+            stalled_beats = 0;
         }
         last_presents = presents.load();
     }

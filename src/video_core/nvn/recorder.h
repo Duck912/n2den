@@ -133,8 +133,8 @@ public:
     /// default; set before the first submission.
     void SetUniformSnapshot(UniformSnapshotMode mode);
     [[nodiscard]] bool UniformSnapshotEnabled() const;
-    /// EDEN_NX2_NVN_SYNTH_LIST_MIB: byte cap of the lists recorded at synthetic command memory (0,
-    /// the default: none). Beyond it the least recently used ones that no submission or call used
+    /// EDEN_NX2_NVN_SYNTH_LIST_MIB: byte cap of the lists recorded at synthetic command memory
+    /// (the frontend's default is 1024 MiB; 0: none). Beyond it the least recently used ones that no submission or call used
     /// for `idle_presents` presents and that no other list calls are dropped, with their
     /// references. Not safe by construction: the game holds the handle of such a list and could
     /// submit it again later (DESIGN.md "Synthetic command lists").

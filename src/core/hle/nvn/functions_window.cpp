@@ -19,6 +19,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/hardware_properties.h"
 #include "core/debugger/nx2_debug_tools.h"
 #include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_process.h"
@@ -731,6 +732,15 @@ void nvnQueuePresentTexture(Call& c) {
             state.avail_ns[slot] = OnDisplay;
             state.displayed_slot = slot;
             state.last_display_ns = display;
+            // nn::vi's frame history for this present (see ListFrameHistory below).
+            if (c.system != nullptr) {
+                const u64 guest_now = c.system->CoreTiming().GetClockTicks();
+                Runtime::FrameRecord& record =
+                    c.runtime.frame_history[++c.runtime.frame_count % c.runtime.frame_history.size()];
+                record = {c.runtime.frame_count, guest_now,
+                          guest_now + static_cast<u64>((display - now) *
+                                                       Core::Hardware::CNTFREQ / 1'000'000'000)};
+            }
         }
     }
     const u64 presents = c.runtime.presents.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -781,9 +791,63 @@ void nvnQueuePresentTexture(Call& c) {
     }
 }
 
+// nn::vi::GetLatestFrameNumber(u64*, const Layer*) and nn::vi::ListFrameHistory(FrameInfo*, int,
+// const Layer*). The SDK answers both from one LayerHistory that its NVN driver updates at every
+// present (and reads back through the vi2 timestamp recorders); with the driver replaced nothing
+// fills it, and a game that waits for its frame to reach the display (Unreal Engine's frame flip
+// tracking) waits for ever. Answered here from the presents of this path. The SDK ignores the
+// layer argument too.
+void ViGetLatestFrameNumber(Call& c) {
+    const u64 out = c.args.NextPointer();
+    {
+        std::scoped_lock lock{c.runtime.window_mutex};
+        // The number of the last present (the SDK numbers a present one above what this
+        // answered before it).
+        c.Store<u64>(out, c.runtime.frame_count);
+    }
+    c.ret.SetU32(0);
+}
+
+void ViListFrameHistory(Call& c) {
+    // FrameInfo: state (1 queued, 2 shown), frame number, queue time, display time (twice; zero
+    // until the frame is shown). Times are system ticks, as nn::os::GetSystemTick gives them.
+    struct FrameInfo {
+        u64 state;
+        u64 number;
+        u64 queued_tick;
+        u64 display_tick[2];
+    };
+    static_assert(sizeof(FrameInfo) == 0x28);
+    const u64 out = c.args.NextPointer();
+    const s32 capacity = c.args.NextS32();
+    const size_t size = c.runtime.frame_history.size();
+    if (out == 0 || capacity == 0 || c.system == nullptr) {
+        c.ret.SetU32(static_cast<u32>(size));
+        return;
+    }
+    const u64 guest_now = c.system->CoreTiming().GetClockTicks();
+    u32 count = 0;
+    std::scoped_lock lock{c.runtime.window_mutex};
+    for (u64 back = 0; back < size && static_cast<s32>(count) < capacity; ++back) {
+        if (back >= c.runtime.frame_count) {
+            break;
+        }
+        const Runtime::FrameRecord& record =
+            c.runtime.frame_history[(c.runtime.frame_count - back) % size];
+        const u64 shown = record.display_tick <= guest_now ? record.display_tick : 0;
+        c.Store<FrameInfo>(out + u64{count} * sizeof(FrameInfo),
+                           FrameInfo{shown != 0 ? 2u : 1u, record.number, record.queued_tick,
+                                     {shown, shown}});
+        ++count;
+    }
+    c.ret.SetU32(count);
+}
+
 } // namespace
 
 void RegisterWindowFunctions(Registry& registry) {
+    registry.AddNv<&ViGetLatestFrameNumber>("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE");
+    registry.AddNv<&ViListFrameHistory>("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE");
     NVN_HLE(registry, nvnWindowBuilderSetDefaults);
     NVN_HLE(registry, nvnWindowBuilderSetDevice);
     NVN_HLE(registry, nvnWindowBuilderSetNativeWindow);

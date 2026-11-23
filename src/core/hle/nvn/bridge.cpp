@@ -53,7 +53,7 @@ bool StartsWith(std::string_view text, std::string_view prefix) {
 
 /// The sdk dynsym entries the bridge redirects to thunk slots.
 bool IsHookedSymbol(std::string_view name) {
-    static constexpr std::array<std::string_view, 8> exact{
+    static constexpr std::array<std::string_view, 10> exact{
         "nvnBootstrapLoader",          "nvnDeviceGetProcAddress",
         "_ZN2nv9InitCheckEv",          "_ZN2nv16FinalizeGraphicsEv",
         "_ZN2nv22DumpGraphicsMemoryInfoEv",
@@ -62,6 +62,9 @@ bool IsHookedSymbol(std::string_view name) {
         "_Z24nvnNativeImageInitializeP14NVNnativeImagePK21NVNnativeImageBuilder",
         "_Z22nvnNativeImageFinalizeP14NVNnativeImage",
         "_Z35nvnTextureInitializeFromNativeImageP10NVNtextureP14NVNnativeImage",
+        // nn::vi's frame history, which the SDK's NVN driver fills (functions_window.cpp).
+        "_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE",
+        "_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE",
     };
     static constexpr std::array<std::string_view, 4> prefixes{
         "_ZN2nv18InitializeGraphics",

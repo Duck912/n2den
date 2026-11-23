@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -119,6 +120,16 @@ public:
     DeviceState device;
 
     // ---- Window bookkeeping (functions_window.cpp) ---------------------------------------------
+    /// nn::vi's frame history (LayerHistory), which the SDK's own NVN driver fills at each present
+    /// and this path replaces: the last presents, newest at `frame_history[frame_count % 8]`.
+    /// Times in guest system ticks. Guarded by window_mutex.
+    struct FrameRecord {
+        u64 number{};
+        u64 queued_tick{};
+        u64 display_tick{};
+    };
+    std::array<FrameRecord, 8> frame_history{};
+    u64 frame_count{};
     struct WindowState {
         u32 acquired_mask{};
         u32 count{};

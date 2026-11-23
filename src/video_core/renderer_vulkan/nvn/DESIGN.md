@@ -742,7 +742,7 @@ recording). View objects go with their texture. The report reaches the replay in
 heartbeat's report; the census's fifth line splits the render targets held by live textures by it
 per presents since use.
 
-**Synthetic command lists** (`EDEN_NX2_NVN_SYNTH_LIST_MIB`, default 0: no byte cap). The game's
+**Synthetic command lists** (`EDEN_NX2_NVN_SYNTH_LIST_MIB`, default 1024; 0: no byte cap). The game's
 command memory callback is never invoked (`callbacks_skipped`): a recording that runs out continues
 in synthetic memory (`0x7E00...`), and one that starts there gets a synthetic handle. A list in the
 game's memory dies when the game records over its bytes or finalizes the pool; a synthetic one has
@@ -751,12 +751,14 @@ textures it references alive. With the byte cap, the least recently submitted or
 lists go while they are over it, their references released, but only ones no submission or call
 used for 600 presents and that no other list calls (`List::callees`, counted per entry). A
 submission copies the words it runs and retains its own references, so dropping a list never
-affects work in flight. It is still not safe by construction, hence off by default: the game holds
+affects work in flight. It is still not safe by construction, so the default is high (1 GiB): a
+game that takes all its command memory from the callback records every list here once and reaches
+it within minutes, while lists a game builds once and keeps stay far below it. The game holds
 the handle (an opaque value it may keep anywhere) and can submit or call it again at any time,
 and nothing it does tells the recorder it will not; the real driver would have placed the list
 in memory the callback supplied, whose lifetime only the game knows. A dropped list submitted
-again is skipped (`unknown_call_handle`, logged). Use it as an A/B with the memory line and the
-census showing what the synthetic lists hold.
+again is skipped (`unknown_call_handle`, logged). The memory line and the census show what the
+synthetic lists hold.
 
 **Strict device-local memory** (`EDEN_NX2_TRY_VMA_DEVICE_STRICT=1`, candidate, default off). VMA's
 default for "prefer device, within budget" takes a host memory type once the device heap is at its
