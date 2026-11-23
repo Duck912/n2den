@@ -28,6 +28,7 @@ for n2den's own changes, not as what another machine will reach.
 | Fast Fusion | Playable | Playable | Works |
 | Kirby and the Forgotten Land – Nintendo Switch 2 Edition + Star-Crossed World | Playable | Playable | Works |
 | Nintendo Switch Sports Resort | Not tested | Boots | Not tested |
+| Orbitals Deluxe Edition | Not usable | In-game, slow | Not tested |
 
 "Prepared launch" means the game's CPU code and graphics pipelines are built before play starts, so that
 nothing has to be compiled while playing.
@@ -128,3 +129,22 @@ Tested with update 1.1.0: boot, intro screens, opening movie and title screen.
   empty archive is now returned), a black picture with sound after the intro (the movie decoder refused the
   VP9 movie), and shaders rejected for constant bank 24 reads and a jump table.
 - **Known issues:** one buffer set-up call fails about 20 s in; no visible effect has been tied to it.
+
+## Orbitals Deluxe Edition
+
+Tested with its update (version code 327680): boot, title screen, opening movie and the first minutes of play.
+Unreal Engine 5.
+
+- **NVN-HLE (Vulkan):** boots to the title screen with picture and sound at full speed; the opening movie
+  plays; in-game runs at about 20 frames per second with frame-time spikes.
+- **Emulated GPU:** stops after a few frames (a display timestamp query and a compute dispatch form are not
+  implemented).
+- **Fixed on the way:** a boot panic on the Switch 2 audio codec session, a stall after about 40 frames (the
+  game's frame flip tracking reads a frame history only the system's own NVN driver filled), a pink and
+  then black title screen (texture buffers, texture descriptors that outlive their texture object, texture
+  and sampler handles stored apart, and layered rendering into a 3D colour table), no sound (the game mixes
+  into a Switch 2 sound mixer stream that was not played), memory growing until the system ran out
+  (recorded command lists were never released), and draws skipped for a bindless gradient texture sample.
+- **Known issues:** characters draw in a flat colour and one light shaft is dithered (some texture handles
+  resolve to no texture); the picture is limited by the graphics card in play (many copies of the depth
+  buffer per frame); one freeze while loading a level (the game stopped on "zero-sized buffer").
