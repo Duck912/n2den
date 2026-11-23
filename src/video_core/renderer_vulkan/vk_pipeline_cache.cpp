@@ -1597,11 +1597,12 @@ std::shared_ptr<ReusableShaders> PipelineCache::BuildGraphicsShaders(
 
         if (programs[index].info.untracked_global_accesses != 0) {
             LOG_WARNING(Render_Vulkan,
-                        "stage {} {:#016x}: untracked global accesses {}/{} stores, storage buffers {}",
+                        "stage {} {:#016x}: untracked global accesses {}/{} stores, storage buffers {}: {}",
                         index, key.unique_hashes[index],
                         programs[index].info.untracked_global_accesses,
                         programs[index].info.untracked_global_stores,
-                        programs[index].info.storage_buffers_descriptors.size());
+                        programs[index].info.storage_buffers_descriptors.size(),
+                        fmt::join(programs[index].info.untracked_reports, " | "));
         }
 
         if (Settings::values.dump_guest_shaders) {
