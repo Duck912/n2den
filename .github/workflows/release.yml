@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# n2den releases. Pushing a tag v* builds two Windows packages from that commit and attaches them
-# to a draft GitHub release, which is published by hand after checking it:
+# n2den releases. Manual only: nothing a push does (commits or tags) starts it. Create the tag,
+# then run this workflow from the Actions tab with that tag selected ("Use workflow from").
+# It builds two Windows packages from the tagged commit and attaches them to a draft GitHub
+# release, which is published by hand after checking it:
 #   - MSVC: the same build as the Build workflow.
 #   - PGO: clang-cl + ThinLTO, optimized with the profile committed at pgo/n2den.profdata
 #     (trained on gameplay with an instrumented build, see docs/PGO.md). The profile is read by
 #     the LLVM version it was merged with, so the job installs that version.
 # The release text comes from .github/release-notes/<tag>.md when that file exists.
-# Run it from the Actions tab on a tag to rebuild the packages of an existing draft.
+# Run on a branch it only builds the packages (no release is created or changed).
 
 name: Release
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 
 concurrency:
