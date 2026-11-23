@@ -343,6 +343,17 @@ public:
     bool BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
                                    bool is_written, u32 indirect_offset = ~0U);
 
+    /// A range of a pointer table span (Shader::StorageBufferDescriptor::span_slot): the
+    /// program stores through the pointers at table + entry_offset + i * stride for the draw's
+    /// vertices i in [first, first + count), the table pointer being c[cbuf_index][cbuf_offset].
+    /// Their targets are coalesced into at most max_ranges ranges (each reaching extent bytes
+    /// past its last pointer) and range `slot` is bound. Returns the bound GPU base and size;
+    /// a size of zero binds nothing.
+    std::pair<GPUVAddr, u32> BindGraphicsTableSpan(size_t stage, size_t ssbo_index, u32 cbuf_index,
+                                                   u32 cbuf_offset, u32 stride, u32 entry_offset,
+                                                   u32 slot, u32 max_ranges, u32 extent,
+                                                   bool is_written, u32 first, u32 count);
+
     void UnbindGraphicsTextureBuffers(size_t stage);
 
     void BindGraphicsTextureBuffer(size_t stage, size_t tbo_index, GPUVAddr gpu_addr, u32 size,

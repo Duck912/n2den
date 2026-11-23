@@ -796,6 +796,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         std::memcpy(&word, handle_page_pointer + (addr & page_mask), sizeof(word));
         return word;
     }};
+    bool uses_table_spans{};
+    Shader::Backend::SPIRV::TableSpanLayout table_spans{};
     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         VideoCommon::BackStats::Mark(VideoCommon::BackStats::Handles);
         const Shader::Info& info{stage_infos[stage]};
@@ -804,6 +806,32 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             size_t ssbo_index{};
             for (const auto& desc : info.storage_buffers_descriptors) {
                 ASSERT(desc.count == 1);
+                if (desc.IsTableSpan()) {
+                    // The vertex range reads the table entries of the draw's vertices; an
+                    // indexed draw's vertices are not known here and bind nothing.
+                    const auto& draw_state{maxwell3d->draw_manager.draw_state};
+                    if (is_indexed) {
+                        static bool warned{};
+                        if (!warned) {
+                            warned = true;
+                            LOG_WARNING(Render_Vulkan,
+                                        "Pointer table span in an indexed draw: not bound");
+                        }
+                    }
+                    const auto [base, size] = buffer_cache.BindGraphicsTableSpan(
+                        stage, ssbo_index, desc.cbuf_index, desc.cbuf_offset, desc.span_stride,
+                        desc.span_entry_offset, desc.span_slot, Shader::MAX_TABLE_SPANS,
+                        Shader::TABLE_SPAN_EXTENT, desc.is_written, draw_state.vertex_buffer.first,
+                        is_indexed ? 0U : draw_state.vertex_buffer.count);
+                    uses_table_spans = true;
+                    if (desc.span_slot < table_spans.spans.size()) {
+                        table_spans.spans[desc.span_slot] = {static_cast<u32>(base),
+                                                             static_cast<u32>(base >> 32), size,
+                                                             0U};
+                    }
+                    ++ssbo_index;
+                    continue;
+                }
                 buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
                                                        desc.cbuf_offset, desc.is_written,
                                                        desc.indirect_offset);
@@ -1413,6 +1441,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 
     RescalingPushConstant rescaling;
     RenderAreaPushConstant render_area;
+    render_area.uses_table_spans = uses_table_spans;
+    render_area.table_spans = table_spans;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
     CompactTextureBinding compact_binding{
@@ -1649,7 +1679,9 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                       descriptor_buffer_offset, descriptor_buffer_chunk, bind_descriptor_buffer,
                       rescaling_data = rescaling.Data(), is_rescaling, update_rescaling,
                       uses_render_area = render_area.uses_render_area,
-                      render_area_data = render_area.words](vk::CommandBuffer cmdbuf) {
+                      render_area_data = render_area.words,
+                      uses_table_spans = render_area.uses_table_spans,
+                      table_spans = render_area.table_spans](vk::CommandBuffer cmdbuf) {
         if (bind_descriptor_buffer) {
             const VkDescriptorBufferBindingInfoEXT binding_info{
                 descriptor_buffer_ring.BindingInfo(descriptor_buffer_chunk)};
@@ -1676,6 +1708,11 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS,
                                  RENDERAREA_LAYOUT_OFFSET, sizeof(render_area_data),
                                  &render_area_data);
+        }
+        if (uses_table_spans) {
+            cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS,
+                                 Shader::Backend::SPIRV::TABLE_SPAN_LAYOUT_OFFSET,
+                                 sizeof(table_spans), &table_spans);
         }
         if (!descriptor_set_layout) {
             return;

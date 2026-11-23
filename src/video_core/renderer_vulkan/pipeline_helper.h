@@ -258,13 +258,17 @@ public:
         const u32 set_count{!descriptor_set_layout ? 0U : texture_pool_layout ? 2U : 1U};
         using Shader::Backend::SPIRV::RenderAreaLayout;
         using Shader::Backend::SPIRV::RescalingLayout;
+        using Shader::Backend::SPIRV::TableSpanLayout;
         const u32 size_offset = is_compute ? sizeof(RescalingLayout::down_factor) : 0u;
+        // Graphics layouts also hold the pointer table span ranges (TABLE_SPAN_LAYOUT_OFFSET).
         const VkPushConstantRange range{
             .stageFlags = static_cast<VkShaderStageFlags>(
                 is_compute ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_ALL_GRAPHICS),
             .offset = 0,
-            .size = static_cast<u32>(sizeof(RescalingLayout)) - size_offset +
-                    static_cast<u32>(sizeof(RenderAreaLayout)),
+            .size = is_compute ? static_cast<u32>(sizeof(RescalingLayout)) - size_offset +
+                                     static_cast<u32>(sizeof(RenderAreaLayout))
+                               : Shader::Backend::SPIRV::TABLE_SPAN_LAYOUT_OFFSET +
+                                     static_cast<u32>(sizeof(TableSpanLayout)),
         };
         return device->GetLogical().CreatePipelineLayout({
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -361,6 +365,9 @@ class RenderAreaPushConstant {
 public:
     bool uses_render_area{};
     std::array<f32, 4> words{};
+    /// Pointer table span ranges of the draw (Shader::StorageBufferDescriptor::span_slot).
+    bool uses_table_spans{};
+    Shader::Backend::SPIRV::TableSpanLayout table_spans{};
 };
 
 /// A draw's compact texture tables (see compact_texture_table.h), in binding order.

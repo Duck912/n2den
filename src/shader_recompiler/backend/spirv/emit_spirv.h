@@ -32,6 +32,15 @@ struct RenderAreaLayout {
 constexpr u32 RESCALING_LAYOUT_WORDS_OFFSET = offsetof(RescalingLayout, rescaling_textures);
 constexpr u32 RESCALING_LAYOUT_DOWN_FACTOR_OFFSET = offsetof(RescalingLayout, down_factor);
 constexpr u32 RENDERAREA_LAYOUT_OFFSET = offsetof(RenderAreaLayout, render_area);
+/// Pointer table span ranges (StorageBufferDescriptor::span_slot), pushed for each draw after
+/// the rescaling and render area words: per range the 64-bit GPU base (low, high), the size in
+/// bytes and an unused word. A size of zero matches no address.
+struct TableSpanLayout {
+    std::array<std::array<u32, 4>, MAX_TABLE_SPANS> spans;
+};
+constexpr u32 TABLE_SPAN_LAYOUT_OFFSET =
+    static_cast<u32>(sizeof(RescalingLayout) + sizeof(RenderAreaLayout));
+static_assert(TABLE_SPAN_LAYOUT_OFFSET % 16 == 0);
 
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings);
 [[nodiscard]] inline std::vector<u32> EmitSPIRV(const Profile& profile, IR::Program& program) {

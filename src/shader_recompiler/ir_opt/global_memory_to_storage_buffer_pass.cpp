@@ -38,6 +38,10 @@ struct StorageBufferAddr {
     u32 offset;
     /// Offset of the buffer pointer in the memory the constant buffer pointer points to
     u32 indirect{~0U};
+    /// A range of a pointer table span (StorageBufferDescriptor::span_slot), ~0U otherwise.
+    u32 span_slot{~0U};
+    u32 span_stride{};
+    u32 span_entry_offset{};
 };
 
 /// Block iterator to a global memory instruction and the storage buffer it uses
@@ -1131,6 +1135,16 @@ std::optional<std::pair<u32, u32>> DynamicPointerSlots(const IR::Value& offset) 
     return std::pair{base, *stride};
 }
 
+/// Pointer table spans (StorageBufferDescriptor::span_slot). EDEN_NX2_NO_TABLE_SPAN=1 leaves
+/// stores through table entries untracked, as before.
+bool TableSpansEnabled() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_NO_TABLE_SPAN");
+        return value == nullptr || value[0] == 0 || value[0] == '0';
+    }();
+    return enabled;
+}
+
 /// Slots of a pointer array read at a dynamic offset, following phis and selects of the offset.
 /// A stride of zero is a single slot.
 void CollectPointerSlots(const IR::Value& offset, small_vector<std::pair<u32, u32>, 4>& slots,
@@ -1339,6 +1353,46 @@ small_vector<StorageBufferAddr, 4> NativePointerCandidates(const IR::U32& low_ad
                 case IR::Opcode::GetCbufU32:
                 case IR::Opcode::GetCbufU32x2:
                     break;
+                case IR::Opcode::IAdd32:
+                    // A table indexed by the vertex: holder = c[i][o] + index * stride (Bananza's
+                    // terrain argument scatter stores each point's indirect draw record through
+                    // table[VertexID]). The targets are known only when the draw is bound: the
+                    // host reads the draw's entries and binds their coalesced ranges.
+                    if (holder == holder_root && TableSpansEnabled() && !env.IsNvnHleProgram() &&
+                        env.ShaderStage() == Stage::VertexB) {
+                        for (size_t arg = 0; arg < 2; ++arg) {
+                            const IR::Value table{holder->Arg(arg)};
+                            if (table.IsImmediate()) {
+                                continue;
+                            }
+                            const IR::Inst* const table_inst{table.InstRecursive()};
+                            if (table_inst->GetOpcode() != IR::Opcode::GetCbufU32 ||
+                                !table_inst->Arg(0).IsImmediate() ||
+                                !table_inst->Arg(1).IsImmediate() ||
+                                !Common::IsAligned(table_inst->Arg(1).U32(), 8)) {
+                                continue;
+                            }
+                            const auto slots{DynamicPointerSlots(holder->Arg(arg ^ 1))};
+                            if (!slots) {
+                                continue;
+                            }
+                            for (u32 slot = 0; slot < MAX_TABLE_SPANS; ++slot) {
+                                const StorageBufferAddr span{
+                                    .index = table_inst->Arg(0).U32(),
+                                    .offset = table_inst->Arg(1).U32(),
+                                    .span_slot = slot,
+                                    .span_stride = slots->second,
+                                    .span_entry_offset = indirect + slots->first,
+                                };
+                                if (std::ranges::find(candidates, span) == candidates.end()) {
+                                    candidates.push_back(span);
+                                }
+                            }
+                            dynamic = true;
+                            break;
+                        }
+                    }
+                    continue;
                 default:
                     continue;
                 }
@@ -2228,6 +2282,9 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
             .count = 1,
             .is_written = info.writes.contains(storage_buffer),
             .indirect_offset = storage_buffer.indirect,
+            .span_slot = storage_buffer.span_slot,
+            .span_stride = storage_buffer.span_stride,
+            .span_entry_offset = storage_buffer.span_entry_offset,
         });
     }
     for (const StorageInst& storage_inst : info.to_replace) {
@@ -2260,7 +2317,10 @@ void JoinStorageInfo(Info& base, Info& source, size_t limit) {
         auto it{std::ranges::find_if(descriptors, [&desc](const auto& existing) {
             return desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset && desc.count == existing.count &&
-                   desc.indirect_offset == existing.indirect_offset;
+                   desc.indirect_offset == existing.indirect_offset &&
+                   desc.span_slot == existing.span_slot &&
+                   desc.span_stride == existing.span_stride &&
+                   desc.span_entry_offset == existing.span_entry_offset;
         })};
         if (it != descriptors.end()) {
             it->is_written |= desc.is_written;

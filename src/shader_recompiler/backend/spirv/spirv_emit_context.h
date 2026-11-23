@@ -348,6 +348,13 @@ public:
     Id render_area_push_constant{};
     u32 render_are_member_index{};
 
+    /// Pointer table span ranges (TableSpanLayout): the push constant block that holds them, the
+    /// member index of the array in it, and the array type. Null when the program has none.
+    bool wants_table_spans{};
+    Id table_span_push_constant{};
+    Id table_span_array_type{};
+    u32 table_span_member_index{};
+
     Id local_memory{};
 
     bool uses_explicit_workgroup_layout{};
@@ -502,6 +509,8 @@ private:
     void DefineRescalingInputPushConstant();
     void DefineRescalingInputUniformConstant();
     void DefineRenderArea(const Info& info);
+    void DefineTableSpans(const Info& info);
+    Id TableSpanArrayType();
 
     void DefineInputs(const IR::Program& program);
     void DefineOutputs(const IR::Program& program);

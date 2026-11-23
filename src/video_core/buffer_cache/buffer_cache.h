@@ -564,6 +564,136 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
 }
 
 template <class P>
+std::pair<GPUVAddr, u32> BufferCache<P>::BindGraphicsTableSpan(
+    size_t stage, size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset, u32 stride,
+    u32 entry_offset, u32 slot, u32 max_ranges, u32 extent, bool is_written, u32 first,
+    u32 count) {
+    if (stage >= NUM_STAGES || ssbo_index >= NUM_STORAGE_BUFFERS) {
+        return {};
+    }
+    // Enabled with a null binding even when nothing is read: the program's binding must exist.
+    if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
+        if (runtime.ShouldLimitDynamicStorageBuffers() &&
+            ((channel_state->enabled_storage_buffers[stage] >> ssbo_index) & 1U) == 0) {
+            ++channel_state->total_graphics_storage_buffers;
+        }
+    }
+    channel_state->enabled_storage_buffers[stage] |= 1U << ssbo_index;
+    channel_state->written_storage_buffers[stage] |= (is_written ? 1U : 0U) << ssbo_index;
+    channel_state->storage_buffers[stage][ssbo_index] = NULL_BINDING;
+
+    // The ranges of one draw are computed with its first slot and kept for the others.
+    struct SpanKey {
+        GPUVAddr table;
+        u32 stride;
+        u32 entry_offset;
+        u32 first;
+        u32 count;
+        u32 max_ranges;
+        u32 extent;
+        auto operator<=>(const SpanKey&) const = default;
+    };
+    thread_local SpanKey last_key{};
+    thread_local std::vector<std::pair<GPUVAddr, GPUVAddr>> ranges;
+    thread_local std::vector<GPUVAddr> targets;
+
+    const auto& cbufs = maxwell3d->state.shader_stages[stage];
+    const GPUVAddr table = VideoCommon::FrameSnapshot::ReadGuest<u64>(
+        *gpu_memory, cbufs.const_buffers[cbuf_index].address + cbuf_offset);
+    static constexpr u32 max_entries = 1U << 16;
+    if (table == 0 || count == 0 || stride == 0 || max_ranges == 0) {
+        return {};
+    }
+    if (count > max_entries) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            LOG_WARNING(HW_GPU, "Pointer table span: {} entries, reading the first {}", count,
+                        max_entries);
+        }
+        count = max_entries;
+    }
+    const SpanKey key{table, stride, entry_offset, first, count, max_ranges, extent};
+    if (slot == 0 || key != last_key) {
+        last_key = key;
+        ranges.clear();
+        targets.clear();
+        const GPUVAddr entries = table + entry_offset + u64{first} * stride;
+        for (u32 i = 0; i < count; ++i) {
+            const GPUVAddr target =
+                VideoCommon::FrameSnapshot::ReadGuest<u64>(*gpu_memory, entries + u64{i} * stride);
+            if (target != 0) {
+                targets.push_back(target);
+            }
+        }
+        std::ranges::sort(targets);
+        const auto [unique_end, end] = std::ranges::unique(targets);
+        targets.erase(unique_end, end);
+        if (!targets.empty()) {
+            // Split at the max_ranges - 1 widest gaps between consecutive targets.
+            std::vector<std::pair<u64, size_t>> gaps;
+            gaps.reserve(targets.size());
+            for (size_t i = 1; i < targets.size(); ++i) {
+                gaps.emplace_back(targets[i] - targets[i - 1], i);
+            }
+            const size_t splits = (std::min)(gaps.size(), size_t{max_ranges} - 1);
+            std::ranges::partial_sort(gaps, gaps.begin() + splits, std::greater{});
+            std::vector<size_t> cuts;
+            for (size_t i = 0; i < splits; ++i) {
+                if (gaps[i].first > extent) {
+                    cuts.push_back(gaps[i].second);
+                }
+            }
+            std::ranges::sort(cuts);
+            cuts.push_back(targets.size());
+            size_t begin = 0;
+            for (const size_t cut : cuts) {
+                ranges.emplace_back(targets[begin], targets[cut - 1] + extent);
+                begin = cut;
+            }
+        }
+        static const bool trace = [] {
+            const char* const value = std::getenv("EDEN_NX2_TRACE_TABLE_SPAN");
+            return value != nullptr && value[0] != '0';
+        }();
+        static u32 traced = 0;
+        if (trace && traced < 40) {
+            ++traced;
+            u64 covered = 0;
+            for (const auto& [lo, hi] : ranges) {
+                covered += hi - lo;
+            }
+            const auto device = gpu_memory->GpuToCpuAddress(entries);
+            LOG_INFO(HW_GPU,
+                     "Pointer table span: table {:#x} first {} count {} stride {}: {} targets "
+                     "in {} ranges covering {} KiB, first range {:#x}-{:#x}, table gpu-modified {}",
+                     table, first, count, stride, targets.size(), ranges.size(), covered / 1024,
+                     ranges.empty() ? 0 : ranges[0].first, ranges.empty() ? 0 : ranges[0].second,
+                     device && IsRegionGpuModified(*device, u64{count} * stride));
+        }
+    }
+    if (slot >= ranges.size()) {
+        return {};
+    }
+    const auto [lo, hi] = ranges[slot];
+    const u32 alignment = runtime.GetStorageBufferAlignment();
+    const GPUVAddr aligned_lo = Common::AlignDown(lo, alignment);
+    const u64 mapped_size = gpu_memory->GetMemoryLayoutSize(aligned_lo);
+    const u32 size = static_cast<u32>((std::min)(hi - aligned_lo, mapped_size));
+    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(aligned_lo);
+    if (!device_addr || size == 0) {
+        return {};
+    }
+    channel_state->storage_buffers[stage][ssbo_index] = Binding{
+        .device_addr = *device_addr,
+        .gpu_addr = aligned_lo,
+        .size = size,
+        .buffer_id = BufferId{},
+    };
+    return {aligned_lo, size};
+}
+
+template <class P>
 void BufferCache<P>::UnbindGraphicsTextureBuffers(size_t stage) {
     channel_state->enabled_texture_buffers[stage] = 0;
     channel_state->written_texture_buffers[stage] = 0;

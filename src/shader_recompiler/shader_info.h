@@ -183,6 +183,19 @@ struct StorageBufferDescriptor {
     /// nvn-hle: a global atomic reaches the buffer. Only the nvn-hle storage pass sets it; it is
     /// false in every descriptor of the emulated GPU, so comparisons there are unchanged.
     bool is_atomic_target{};
+    /// Emulated GPU, vertex programs: one of the ranges of a pointer table span. The program
+    /// stores through pointers it loads from a table at c[cbuf_index][cbuf_offset] indexed by the
+    /// vertex (entry i at table + span_entry_offset + i * span_stride). The host reads the draw's
+    /// entries and binds up to MAX_TABLE_SPANS coalesced ranges of their targets; this is range
+    /// number span_slot. Its base and size reach the program as push constants
+    /// (Backend::SPIRV::TableSpanLayout). ~0U for every other descriptor.
+    u32 span_slot{~0U};
+    u32 span_stride{};
+    u32 span_entry_offset{};
+
+    [[nodiscard]] bool IsTableSpan() const noexcept {
+        return span_slot != ~0U;
+    }
 
     auto operator<=>(const StorageBufferDescriptor&) const = default;
 };
@@ -190,6 +203,11 @@ struct StorageBufferDescriptor {
 /// `cbuf_index` of the storage buffer descriptor that carries the raw global memory address table
 /// (HostTranslateInfo::nvn_raw_global_table_ssbo): not a guest storage buffer, bound by the host.
 inline constexpr u32 RAW_GLOBAL_TABLE_CBUF{0xffffffffU};
+
+/// Ranges a table span binds at most (StorageBufferDescriptor::span_slot).
+inline constexpr u32 MAX_TABLE_SPANS{8};
+/// Bytes a table span range reaches past the last pointer it holds.
+inline constexpr u32 TABLE_SPAN_EXTENT{256};
 
 [[nodiscard]] constexpr bool IsRawGlobalTable(const StorageBufferDescriptor& desc) noexcept {
     return desc.cbuf_index == RAW_GLOBAL_TABLE_CBUF;

@@ -681,12 +681,24 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineImages(program.info, image_binding, bindings.image_scaling_index);
     DefineAttributeMemAccess(program.info);
     DefineWriteStorageCasLoopFunction(program.info);
+    wants_table_spans = profile.unified_descriptor_binding &&
+                        std::ranges::any_of(program.info.storage_buffers_descriptors,
+                                            [](const auto& desc) { return desc.IsTableSpan(); });
+    if (wants_table_spans) {
+        // The global memory functions read the span ranges from the push constant block, which
+        // can be the rescaling or render area block: define those first.
+        DefineRescalingInput(program.info);
+        DefineRenderArea(program.info);
+        DefineTableSpans(program.info);
+    }
     DefineGlobalMemoryFunctions(program.info);
     if (program.info.uses_half_matrix_multiply) {
         DefineHalfMatrixMultiplyAddFunction(*this);
     }
-    DefineRescalingInput(program.info);
-    DefineRenderArea(program.info);
+    if (!wants_table_spans) {
+        DefineRescalingInput(program.info);
+        DefineRenderArea(program.info);
+    }
 }
 
 EmitContext::~EmitContext() = default;
@@ -1989,8 +2001,23 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         AddLabel();
         const size_t num_buffers{info.storage_buffers_descriptors.size()};
         const u64 ssbo_align_mask{~(profile.min_ssbo_alignment - 1U)};
+        // A table span range: its base and size from the push constants (TableSpanLayout).
+        const auto span_words{[&](size_t index) {
+            const auto& ssbo{info.storage_buffers_descriptors[index]};
+            const Id pointer{OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[4]),
+                                           table_span_push_constant,
+                                           Const(table_span_member_index), Const(ssbo.span_slot))};
+            return OpLoad(U32[4], pointer);
+        }};
         const auto base_address{[&](size_t index) {
             const auto& ssbo{info.storage_buffers_descriptors[index]};
+            if (ssbo.IsTableSpan()) {
+                if (!Sirit::ValidId(table_span_push_constant)) {
+                    return Constant(U64, ~u64{0});
+                }
+                const Id words{span_words(index)};
+                return OpBitcast(U64, OpVectorShuffle(U32[2], words, words, 0U, 1U));
+            }
             const Id words{EmitGetCbufU32x2(*this, IR::Value{ssbo.cbuf_index},
                                            IR::Value{ssbo.cbuf_offset})};
             if (ssbo.indirect_offset == ~0U) {
@@ -2043,11 +2070,26 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
             Id best_distance{Constant(U64, ~u64{0})};
             for (size_t index = 0; index < num_buffers; ++index) {
                 bases[index] = base_address(index);
+                if (info.storage_buffers_descriptors[index].IsTableSpan()) {
+                    continue;
+                }
                 const Id distance{OpISub(U64, addr, bases[index])};
                 const Id better{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, bases[index]),
                                              OpULessThan(U1, distance, best_distance))};
                 best_distance = OpSelect(U64, better, distance, best_distance);
                 best_index = OpSelect(U32[1], better, Const(static_cast<u32>(index)), best_index);
+            }
+            // Table span ranges are exact: an address inside one belongs to it, whatever buffer
+            // base lies closer below (the table itself can sit between two targets).
+            for (size_t index = 0; index < num_buffers; ++index) {
+                if (!info.storage_buffers_descriptors[index].IsTableSpan() ||
+                    !Sirit::ValidId(table_span_push_constant)) {
+                    continue;
+                }
+                const Id size{OpUConvert(U64, OpCompositeExtract(U32[1], span_words(index), 2U))};
+                const Id inside{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, bases[index]),
+                                             OpULessThan(U1, OpISub(U64, addr, bases[index]), size))};
+                best_index = OpSelect(U32[1], inside, Const(static_cast<u32>(index)), best_index);
             }
             for (size_t index = 0; index < num_buffers; ++index) {
                 access(index, bases[index], OpIEqual(U1, best_index, Const(static_cast<u32>(index))));
@@ -2055,7 +2097,8 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
             return;
         }
         for (size_t index = 0; index < num_buffers; ++index) {
-            if (!info.nvn_buffer_used[index]) {
+            if (!info.nvn_buffer_used[index] ||
+                info.storage_buffers_descriptors[index].IsTableSpan()) {
                 continue;
             }
             const auto& ssbo{info.storage_buffers_descriptors[index]};
@@ -2269,7 +2312,7 @@ void EmitContext::DefineRescalingInput(const Info& info) {
 }
 
 void EmitContext::DefineRescalingInputPushConstant() {
-    boost::container::static_vector<Id, 3> members{};
+    boost::container::static_vector<Id, 4> members{};
     u32 member_index{0};
 
     rescaling_textures_type = TypeArray(U32[1], Const(4u));
@@ -2286,9 +2329,19 @@ void EmitContext::DefineRescalingInputPushConstant() {
         members.push_back(F32[1]);
         rescaling_downfactor_member_index = member_index++;
     }
+    const bool holds_spans{wants_table_spans && !Sirit::ValidId(table_span_push_constant)};
+    if (holds_spans) {
+        members.push_back(TableSpanArrayType());
+        table_span_member_index = member_index++;
+    }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
     Name(push_constant_struct, "ResolutionInfo");
+    if (holds_spans) {
+        MemberDecorate(push_constant_struct, table_span_member_index, spv::Decoration::Offset,
+                       TABLE_SPAN_LAYOUT_OFFSET);
+        MemberName(push_constant_struct, table_span_member_index, "table_spans");
+    }
 
     MemberDecorate(push_constant_struct, rescaling_textures_member_index, spv::Decoration::Offset,
                    static_cast<u32>(offsetof(RescalingLayout, rescaling_textures)));
@@ -2307,6 +2360,9 @@ void EmitContext::DefineRescalingInputPushConstant() {
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
     Name(rescaling_push_constants, "rescaling_push_constants");
+    if (holds_spans) {
+        table_span_push_constant = rescaling_push_constants;
+    }
 
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(rescaling_push_constants);
@@ -2330,11 +2386,16 @@ void EmitContext::DefineRenderArea(const Info& info) {
     }
 
     if (profile.unified_descriptor_binding) {
-        boost::container::static_vector<Id, 1> members{};
+        boost::container::static_vector<Id, 2> members{};
         u32 member_index{0};
 
         members.push_back(F32[4]);
         render_are_member_index = member_index++;
+        const bool holds_spans{wants_table_spans && !Sirit::ValidId(table_span_push_constant)};
+        if (holds_spans) {
+            members.push_back(TableSpanArrayType());
+            table_span_member_index = member_index++;
+        }
 
         const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
         Decorate(push_constant_struct, spv::Decoration::Block);
@@ -2342,15 +2403,50 @@ void EmitContext::DefineRenderArea(const Info& info) {
 
         MemberDecorate(push_constant_struct, render_are_member_index, spv::Decoration::Offset, 0);
         MemberName(push_constant_struct, render_are_member_index, "render_area");
+        if (holds_spans) {
+            MemberDecorate(push_constant_struct, table_span_member_index, spv::Decoration::Offset,
+                           TABLE_SPAN_LAYOUT_OFFSET);
+            MemberName(push_constant_struct, table_span_member_index, "table_spans");
+        }
 
         const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
         render_area_push_constant =
             AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
         Name(render_area_push_constant, "render_area_push_constants");
+        if (holds_spans) {
+            table_span_push_constant = render_area_push_constant;
+        }
 
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(render_area_push_constant);
         }
+    }
+}
+
+Id EmitContext::TableSpanArrayType() {
+    if (!Sirit::ValidId(table_span_array_type)) {
+        table_span_array_type = TypeArray(U32[4], Const(MAX_TABLE_SPANS));
+        Decorate(table_span_array_type, spv::Decoration::ArrayStride, 16U);
+    }
+    return table_span_array_type;
+}
+
+void EmitContext::DefineTableSpans(const Info&) {
+    if (!wants_table_spans || Sirit::ValidId(table_span_push_constant)) {
+        return;
+    }
+    const std::array<Id, 1> members{TableSpanArrayType()};
+    const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
+    Decorate(push_constant_struct, spv::Decoration::Block);
+    Name(push_constant_struct, "TableSpanInfo");
+    MemberDecorate(push_constant_struct, 0, spv::Decoration::Offset, TABLE_SPAN_LAYOUT_OFFSET);
+    MemberName(push_constant_struct, 0, "table_spans");
+    table_span_member_index = 0;
+    const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
+    table_span_push_constant = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
+    Name(table_span_push_constant, "table_span_push_constants");
+    if (profile.supported_spirv >= 0x00010400) {
+        interfaces.push_back(table_span_push_constant);
     }
 }
 
