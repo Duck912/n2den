@@ -27,6 +27,7 @@ for n2den's own changes, not as what another machine will reach.
 | Mario Kart World | Not tested | Unstable | Not usable |
 | Fast Fusion | Playable | Playable | Works |
 | Kirby and the Forgotten Land – Nintendo Switch 2 Edition + Star-Crossed World | Playable | Playable | Works |
+| Nintendo Switch Sports Resort | Not tested | Boots | Not tested |
 
 "Prepared launch" means the game's CPU code and graphics pipelines are built before play starts, so that
 nothing has to be compiled while playing.
@@ -73,11 +74,21 @@ Known issues:
 
 ## Mario Kart World
 
-- **NVN-HLE (Vulkan):** unstable. The game boots to its title screen at 33–50 fps. On some title-screen
-  backdrops one graphics pipeline, compiled during play, is followed within milliseconds by a graphics driver
-  hang. Whether the cause is n2den's shader translation, the data that draw reads, or the driver is not known.
-- Do not run this game for now: after the driver reset the emulator used to wait on the graphics card without
-  a time limit.
+Test scene: the race menu, whose background plays a 3D race without input.
+
+- **NVN-HLE (Vulkan):** unstable. The game boots, reaches the race menu and plays the background race at about
+  40–50 fps, with no rejected shaders. Some graphics are still missing, and many pipelines compile during play
+  (draws are skipped until they are ready).
+- **Fixed:** GPU memory used to grow without limit until the game crashed after about 3 minutes. The game
+  maps more and more texture-atlas tiles onto the same memory, and n2den backed each mapping with its own
+  memory; tiles that map the same bytes now share it, and atlas memory stays flat.
+- **Known issues:** after several minutes in the menu scene the system can still run out of RAM: the game's own
+  memory plus GPU memory close to the driver's budget, which the driver then moves into system RAM. ASTC
+  textures are held as BC3, four times their size on the console. Rare graphics driver hangs have been seen
+  (once on the title screen during a pipeline compile, once in the menu scene with an experimental change);
+  their cause is not known.
+- Not recommended for play yet. Run it only with plenty of free system RAM, and close the emulator if the
+  graphics driver resets.
 
 ## Fast Fusion
 
@@ -106,3 +117,14 @@ opening movie, first level and in-game movies.
   1,183 stages a list needs in the game's files (the add-on is scanned too); the rest are built at run time.
 - **Needed:** the game uses an older SDK (Generic_19_3_7), and its Switch 2 data lives in the add-on, so the
   add-on must be in the container. Packers that wrote its RomFS folders unlinked are handled.
+
+## Nintendo Switch Sports Resort
+
+Tested with update 1.1.0: boot, intro screens, opening movie and title screen.
+
+- **NVN-HLE (Vulkan):** boots. The intro screens, the opening movie (VP9) and the title screen show; nothing
+  past the title screen has been checked.
+- **Fixed on the way:** a crash at boot on Switch 2 system data the game asks for but a PC does not have (an
+  empty archive is now returned), a black picture with sound after the intro (the movie decoder refused the
+  VP9 movie), and shaders rejected for constant bank 24 reads and a jump table.
+- **Known issues:** one buffer set-up call fails about 20 s in; no visible effect has been tied to it.

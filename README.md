@@ -15,8 +15,8 @@
 <h4 align="center">An experimental Nintendo Switch 2 recompulator, built on Eden.<br>
 The focus is on Switch 2 games.</h4>
 
-> **Development build.** n2den is a work in progress: expect missing graphics, crashes and per-game launch
-> settings. For source provenance and test-build caveats, see
+> **Development build.** n2den is a work in progress: expect missing graphics, crashes and games that need
+> per-game settings. For source provenance and test-build caveats, see
 > [provenance, credits and test-build caveats](docs/N2DEN.md).
 
 ## What n2den is
@@ -49,8 +49,8 @@ Encrypted content is not supported.
 | **Prepared launch** | Work that normally causes stutter during play is done before the game starts: the CPU code of the whole game can be compiled into the JIT disk cache at boot ("Precompile CPU code"), and under NVN-HLE the graphics pipelines a game is known to use are built at boot from a per-game state list, with the shaders taken from the game's own files. |
 | **Bindless textures** | A run-time **texture pool** resolves texture handles that shaders load from storage buffers. |
 | **GPU threading** | The GPU command stream is split over two host threads, with per-binding caches to keep the per-draw cost low for games that issue ~100,000 draws a second. |
-| **Video** | Native AV1 / H.264 decoder service for in-game movies. |
-| **Debugging** | A built-in debug server with MCP tools (shader dumps, frame capture, draw lists, profiler, scripted input) to drive and inspect a running game. |
+| **Video** | Native video decoder service for in-game movies: AV1, H.264 and VP9. |
+| **Debugging** | A performance overlay that shows where the frame time goes, and a built-in debug server with MCP tools (shader dumps, frame capture, draw lists, profiler, scripted input) to drive and inspect a running game. |
 
 The shader path matters most. Games such as The Legend of Zelda: Ocarina of Time (Switch 2) draw foliage,
 grass and distant trees with mesh shaders and GPU-built object lists, which only render correctly when the
@@ -63,10 +63,19 @@ Which games boot, how far they get on each graphics backend and what is still wr
 
 ## Running Switch 2 games
 
-Several features are still behind launch switches. The settings a game needs (for Ocarina of Time:
-`EDEN_NATIVE_FRONTEND=auto`, `EDEN_NX2_BARRIER_STUB=1`, `EDEN_NX2_TEXTURE_POOL=fallback`,
-`EDEN_N2DEN_KEEP_ZERO_DRAWS=1`, and Reactive Flushing on) are set by the test launchers; a plain launch of the
-executable has none of them. Making them defaults is planned.
+No launch switches are needed: the native shader front end, the texture pool and the other settings Switch 2
+games rely on are on by default, so a plain launch of the executable runs them.
+
+- **Graphics backend:** set per game in the game's properties. Emulated GPU is the default; NVN-HLE is
+  faster in some games and is the backend most of the listed games have been tested on (see
+  [Game progress](docs/GameProgress.md)).
+- **Precompile CPU code:** compiles a game's CPU code into the JIT disk cache at boot, so play does not stop to
+  translate it. The first boot takes longer; later boots reuse the cache.
+- **Ocarina of Time:** built-in Dynamic FPS and Max Resolution patches are on by default for the build they fit
+  (Dynamic FPS keeps the game at normal speed below 60 fps instead of slowing down; Max Resolution uses the
+  game's fixed-resolution path instead of its dynamic resolution). Each can be turned off in the settings.
+- Debug and test switches (`EDEN_*` environment variables) are documented next to the code that reads them and
+  in [docs/nvn-hle-debugging.md](docs/nvn-hle-debugging.md). They are not needed to play.
 
 
 ## Building
