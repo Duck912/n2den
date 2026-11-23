@@ -205,7 +205,7 @@ struct StorageBufferDescriptor {
 inline constexpr u32 RAW_GLOBAL_TABLE_CBUF{0xffffffffU};
 
 /// Ranges a table span binds at most (StorageBufferDescriptor::span_slot).
-inline constexpr u32 MAX_TABLE_SPANS{8};
+inline constexpr u32 MAX_TABLE_SPANS{12};
 /// Bytes a table span range reaches past the last pointer it holds.
 inline constexpr u32 TABLE_SPAN_EXTENT{256};
 

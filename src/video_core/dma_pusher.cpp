@@ -145,25 +145,56 @@ bool DmaPusher::Step() {
         // GPU-written entries use completed page copies or freshly downloaded guest memory.
         const size_t entry_bytes = size_t{header.size} * sizeof(u32);
         const bool gpu_written = IsGpuWrittenCommands(dma_state.dma_get, entry_bytes);
-        // [DEBUG] EDEN_NX2_TRACE_MACRO_PAYLOADS=1: the first 300 entries that are the parameters
-        // of a macro call begun by an earlier entry (indirect draw arguments), with their words.
+        const bool copied = gpu_written && SyncGpuWrittenCommands(dma_state.dma_get, entry_bytes);
+        // [DEBUG] EDEN_NX2_TRACE_MACRO_PAYLOADS=1: entries that are the parameters of a macro call
+        // begun by an earlier entry (indirect draw arguments), with the words as executed: the
+        // first 300, then every 20000th, and every 20000 entries a tally of how many had a zero
+        // second word (instance count of an indexed indirect draw) and how many came from a copy.
         static const bool trace_payloads = std::getenv("EDEN_NX2_TRACE_MACRO_PAYLOADS") != nullptr;
         if (trace_payloads && dma_state.method_count != 0 &&
             subchannel_type[dma_state.subchannel] == Engines::EngineTypes::Maxwell3D &&
             dma_state.method >= MacroRegistersStart) {
             static std::atomic<u32> logged{};
-            if (logged.fetch_add(1) < 300) {
-                std::array<u32, 8> head{};
-                const size_t n = (std::min<size_t>)(header.size, head.size());
+            static std::atomic<u32> zero_second{};
+            static std::atomic<u32> from_copy{};
+            static std::atomic<u32> written{};
+            std::array<u32, 8> head{};
+            const size_t n = (std::min<size_t>)(header.size, head.size());
+            if (copied) {
+                std::memcpy(head.data(), command_headers.data(), n * sizeof(u32));
+            } else {
                 memory_manager.ReadBlockUnsafe(dma_state.dma_get, head.data(), n * sizeof(u32));
+            }
+            const u32 index = logged.fetch_add(1);
+            if (n >= 2 && head[1] == 0) {
+                zero_second.fetch_add(1);
+                static std::atomic<u32> zero_logged{};
+                if (index >= 250000 && zero_logged.fetch_add(1) < 120) {
+                    LOG_INFO(HW_GPU, "macro payload zero instances at {:#x} copied {} words [{:08x}]",
+                             dma_state.dma_get, copied, fmt::join(std::span{head}.first(n), " "));
+                }
+            }
+            if (copied) {
+                from_copy.fetch_add(1);
+            }
+            if (gpu_written) {
+                written.fetch_add(1);
+            }
+            if (index < 300 || index % 20000 == 0) {
                 LOG_INFO(HW_GPU,
                          "macro payload entry at {:#x} size {} method {:#x} count {} gpu_written {} "
-                         "guest words [{:08x}]",
+                         "copied {} words [{:08x}]",
                          dma_state.dma_get, header.size, dma_state.method, dma_state.method_count,
-                         gpu_written, fmt::join(std::span{head}.first(n), " "));
+                         gpu_written, copied, fmt::join(std::span{head}.first(n), " "));
+            }
+            if (index % 20000 == 19999) {
+                LOG_INFO(HW_GPU,
+                         "macro payload tally: {} entries, {} with a zero second word, {} gpu "
+                         "written, {} from page copies",
+                         index + 1, zero_second.exchange(0), written.exchange(0),
+                         from_copy.exchange(0));
             }
         }
-        const bool copied = gpu_written && SyncGpuWrittenCommands(dma_state.dma_get, entry_bytes);
         // A safe read flushes the caches, which belong to the split's back thread while it runs
         // (the split only starts with unsafe reads; the settings can change mid-game).
         const bool use_safe = !VideoCommon::GpuSplit::Get().Active() &&

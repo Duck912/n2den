@@ -15,6 +15,7 @@
 #include <string_view>
 #include <thread>
 
+#include "common/fs/path_util.h"
 #include "common/range_sets.inc"
 #include "shader_recompiler/exception.h"
 #include "video_core/gpu_written_pages.h"
@@ -630,15 +631,39 @@ std::pair<GPUVAddr, u32> BufferCache<P>::BindGraphicsTableSpan(
         const auto [unique_end, end] = std::ranges::unique(targets);
         targets.erase(unique_end, end);
         if (!targets.empty()) {
-            // Split at the max_ranges - 1 widest gaps between consecutive targets.
+            // A written binding is one buffer over device memory from its first address
+            // (written bindings take no multi-range path), so a range must not cross a break in
+            // device memory: targets whose GPU and device distances differ are always split.
+            // The other cuts go to the widest gaps between consecutive targets.
+            std::vector<size_t> cuts;
             std::vector<std::pair<u64, size_t>> gaps;
             gaps.reserve(targets.size());
+            std::optional<DAddr> previous_device = gpu_memory->GpuToCpuAddress(targets[0]);
             for (size_t i = 1; i < targets.size(); ++i) {
-                gaps.emplace_back(targets[i] - targets[i - 1], i);
+                const std::optional<DAddr> device = gpu_memory->GpuToCpuAddress(targets[i]);
+                const bool contiguous = device && previous_device &&
+                                        *device - *previous_device == targets[i] - targets[i - 1];
+                previous_device = device;
+                if (!contiguous) {
+                    cuts.push_back(i);
+                } else {
+                    gaps.emplace_back(targets[i] - targets[i - 1], i);
+                }
             }
-            const size_t splits = (std::min)(gaps.size(), size_t{max_ranges} - 1);
+            if (cuts.size() + 1 > max_ranges) {
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    LOG_WARNING(HW_GPU,
+                                "Pointer table span: targets lie in {} device memory blocks, "
+                                "binding the first {}",
+                                cuts.size() + 1, max_ranges);
+                }
+            }
+            const size_t splits = cuts.size() + 1 >= max_ranges
+                                      ? 0
+                                      : (std::min)(gaps.size(), max_ranges - 1 - cuts.size());
             std::ranges::partial_sort(gaps, gaps.begin() + splits, std::greater{});
-            std::vector<size_t> cuts;
             for (size_t i = 0; i < splits; ++i) {
                 if (gaps[i].first > extent) {
                     cuts.push_back(gaps[i].second);
@@ -657,8 +682,7 @@ std::pair<GPUVAddr, u32> BufferCache<P>::BindGraphicsTableSpan(
             return value != nullptr && value[0] != '0';
         }();
         static u32 traced = 0;
-        if (trace && traced < 40) {
-            ++traced;
+        if (trace && (traced < 40 || traced % 200 == 0)) {
             u64 covered = 0;
             for (const auto& [lo, hi] : ranges) {
                 covered += hi - lo;
@@ -670,6 +694,28 @@ std::pair<GPUVAddr, u32> BufferCache<P>::BindGraphicsTableSpan(
                      table, first, count, stride, targets.size(), ranges.size(), covered / 1024,
                      ranges.empty() ? 0 : ranges[0].first, ranges.empty() ? 0 : ranges[0].second,
                      device && IsRegionGpuModified(*device, u64{count} * stride));
+            std::string list;
+            for (const auto& [lo, hi] : ranges) {
+                list += fmt::format(" {:#x}-{:#x}", lo, hi);
+            }
+            LOG_INFO(HW_GPU, "Pointer table span ranges:{}", list);
+            if (traced >= 200) {
+                // [DEBUG] the targets, for matching against zero-instance indirect records.
+                std::string dump;
+                for (const GPUVAddr target : targets) {
+                    dump += fmt::format("{:x}", target);
+                    dump += '\n';
+                }
+                const auto path = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) /
+                                  fmt::format("span-targets-{:x}-{}.txt", table, traced);
+                if (std::FILE* const file = std::fopen(path.string().c_str(), "wb")) {
+                    std::fwrite(dump.data(), 1, dump.size(), file);
+                    std::fclose(file);
+                }
+            }
+        }
+        if (trace) {
+            ++traced;
         }
     }
     if (slot >= ranges.size()) {
@@ -679,7 +725,26 @@ std::pair<GPUVAddr, u32> BufferCache<P>::BindGraphicsTableSpan(
     const u32 alignment = runtime.GetStorageBufferAlignment();
     const GPUVAddr aligned_lo = Common::AlignDown(lo, alignment);
     const u64 mapped_size = gpu_memory->GetMemoryLayoutSize(aligned_lo);
-    const u32 size = static_cast<u32>((std::min)(hi - aligned_lo, mapped_size));
+    // The extent past the last target stays inside its device memory block too.
+    const u32 size = static_cast<u32>(gpu_memory->DeviceContiguousSize(
+        aligned_lo, (std::min)(hi - aligned_lo, mapped_size)));
+    static const bool trace_clamp = [] {
+        const char* const value = std::getenv("EDEN_NX2_TRACE_TABLE_SPAN");
+        return value != nullptr && value[0] != '0';
+    }();
+    if (trace_clamp && size < hi - aligned_lo) {
+        static u32 clamp_logged = 0;
+        if (clamp_logged < 60) {
+            ++clamp_logged;
+            const auto lost = std::ranges::count_if(targets, [&](GPUVAddr target) {
+                return target >= lo && target < hi && target + 20 > aligned_lo + size;
+            });
+            LOG_INFO(HW_GPU,
+                     "Pointer table span: range {} {:#x}-{:#x} cut to {:#x} bytes by its mapping "
+                     "({:#x}): {} targets outside",
+                     slot, lo, hi, size, mapped_size, lost);
+        }
+    }
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(aligned_lo);
     if (!device_addr || size == 0) {
         return {};
