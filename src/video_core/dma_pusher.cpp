@@ -145,6 +145,24 @@ bool DmaPusher::Step() {
         // GPU-written entries use completed page copies or freshly downloaded guest memory.
         const size_t entry_bytes = size_t{header.size} * sizeof(u32);
         const bool gpu_written = IsGpuWrittenCommands(dma_state.dma_get, entry_bytes);
+        // [DEBUG] EDEN_NX2_TRACE_MACRO_PAYLOADS=1: the first 300 entries that are the parameters
+        // of a macro call begun by an earlier entry (indirect draw arguments), with their words.
+        static const bool trace_payloads = std::getenv("EDEN_NX2_TRACE_MACRO_PAYLOADS") != nullptr;
+        if (trace_payloads && dma_state.method_count != 0 &&
+            subchannel_type[dma_state.subchannel] == Engines::EngineTypes::Maxwell3D &&
+            dma_state.method >= MacroRegistersStart) {
+            static std::atomic<u32> logged{};
+            if (logged.fetch_add(1) < 300) {
+                std::array<u32, 8> head{};
+                const size_t n = (std::min<size_t>)(header.size, head.size());
+                memory_manager.ReadBlockUnsafe(dma_state.dma_get, head.data(), n * sizeof(u32));
+                LOG_INFO(HW_GPU,
+                         "macro payload entry at {:#x} size {} method {:#x} count {} gpu_written {} "
+                         "guest words [{:08x}]",
+                         dma_state.dma_get, header.size, dma_state.method, dma_state.method_count,
+                         gpu_written, fmt::join(std::span{head}.first(n), " "));
+            }
+        }
         const bool copied = gpu_written && SyncGpuWrittenCommands(dma_state.dma_get, entry_bytes);
         // A safe read flushes the caches, which belong to the split's back thread while it runs
         // (the split only starts with unsafe reads; the settings can change mid-game).

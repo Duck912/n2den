@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <vector>
 #include <string_view>
 
 #include <fmt/format.h>
@@ -15,6 +17,7 @@
 #include "common/boot_counter.h"
 #include "common/diag_request.h"
 #include "common/emu_counters.h"
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "shader_recompiler/stage.h"
 #include "video_core/nvn/prerec_probe.h"
@@ -2281,6 +2284,43 @@ std::shared_ptr<GraphicsPipeline> DrawContext::ResolvePipeline(u32 mode, u32 ele
                      skip_vs);
         }
         return nullptr;
+    }
+    // Diagnostic (EDEN_NX2_DUMP_PTR_TABLE=<hex vertex program hash>): every 300th draw of that
+    // program writes the u64 table its storage buffer 0 holds (a scatter kernel's target pointers)
+    // to log/ptrtable-<n>.txt, one hex value per line, and logs min/max/distinct.
+    static const u64 ptr_table_vs = [] {
+        const char* env = std::getenv("EDEN_NX2_DUMP_PTR_TABLE");
+        return env ? std::strtoull(env, nullptr, 16) : u64{0};
+    }();
+    if (ptr_table_vs != 0 && request.stages[0].hash == ptr_table_vs) {
+        static std::atomic<u64> calls{0};
+        const u64 n = calls.fetch_add(1, std::memory_order_relaxed);
+        VC::GuestMemory* memory = impl.guest.load(std::memory_order_acquire);
+        const BufferBinding& table = stages[0].storage[0];
+        if (n % 300 == 0 && memory != nullptr && table.address != 0) {
+            const u64 entries = (std::min<u64>)(table.size / 8, 8192);
+            std::vector<u64> values(entries);
+            const bool ok = entries != 0 && memory->Read(table.address, values.data(), entries * 8);
+            u64 lo = ~u64{0}, hi = 0, nonzero = 0;
+            if (ok) {
+                const auto path = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) /
+                                  fmt::format("ptrtable-{}.txt", n);
+                std::ofstream out{path, std::ios::trunc};
+                out << fmt::format("table {:#x} size {:#x}\n", table.address, table.size);
+                for (const u64 v : values) {
+                    out << fmt::format("{:#x}\n", v);
+                    if (v != 0) {
+                        ++nonzero;
+                        lo = (std::min)(lo, v);
+                        hi = (std::max)(hi, v);
+                    }
+                }
+            }
+            LOG_INFO(Render_Vulkan,
+                     "[nvn] ptr table draw {} of {:016x}: table {:#x} size {:#x} read {} entries {} "
+                     "nonzero {} min {:#x} max {:#x}",
+                     n, ptr_table_vs, table.address, table.size, ok, entries, nonzero, lo, hi);
+        }
     }
     request.state = input;
     const bool has_geometry = request.stages[2].hash != 0;

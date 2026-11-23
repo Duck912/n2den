@@ -1455,8 +1455,20 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
         std::array<u32, 16> fast_words{};
         const bool fast = fast_mode != 0 && !wait_queries && words.size() <= fast_words.size() &&
                           FrontReadReportSlot(split, address, std::span{fast_words}.first(words.size()));
+        // [DEBUG] EDEN_N2DEN_TRACE_MACRO_READS=1 also logs the first 300 reads of macros other
+        // than 0x143 (query reads), on the fast path as well.
+        static const bool trace_other = std::getenv("EDEN_N2DEN_TRACE_MACRO_READS") != nullptr;
+        static std::atomic<u32> other_logged{};
+        const auto trace_other_read = [&](std::span<const u32> got, const char* path) {
+            if (trace_other && start != 0x143 && other_logged.fetch_add(1) < 300) {
+                LOG_INFO(HW_GPU, "Macro DMA read ({}) macro={:#x} at {:#x} words={} [{:08x}]", path,
+                         start, address, got.size(),
+                         fmt::join(got.first(std::min<size_t>(got.size(), 8)), " "));
+            }
+        };
         if (fast && fast_mode == 1) {
             std::ranges::copy(std::span{fast_words}.first(words.size()), words.begin());
+            trace_other_read(words, "fast");
             return true;
         }
         split.Drain(VideoCommon::BackStats::DrainMacroMemory);
@@ -1472,6 +1484,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
         }
         // [DEBUG] EDEN_N2DEN_TRACE_MACRO_READS=1: log macro DMA reads (predicate records, ...).
         static const bool trace_reads = std::getenv("EDEN_N2DEN_TRACE_MACRO_READS") != nullptr;
+        if (ok) {
+            trace_other_read(words, "drained");
+        }
         if (trace_reads && ok) {
             static std::atomic<u64> reads{};
             const u64 n = ++reads;
