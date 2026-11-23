@@ -5,6 +5,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <unordered_set>
 #include <algorithm>
 #include <array>
 #include <vector>
@@ -12,7 +17,8 @@
 
 #include "common/assert.h"
 #include "common/cityhash.h"
-#include "common/cityhash.h"
+#include "common/fs/path_util.h"
+#include "common/logging.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/object_pool.h"
@@ -157,7 +163,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                 shader_info = MakeShaderInfo(env, *cpu_shader_addr);
             } catch (const Shader::Exception& error) {
                 if (native) {
-                    RememberRejection(*cpu_shader_addr, shader_addr, error.what());
+                    RememberRejection(*cpu_shader_addr, shader_addr, error.what(), static_cast<int>(index));
                 }
                 throw;
             }
@@ -210,7 +216,7 @@ const ShaderInfo* ShaderCache::ComputeShader() {
         return MakeShaderInfo(env, *cpu_shader_addr);
     } catch (const Shader::Exception& error) {
         if (kepler_compute->IsNativeMode()) {
-            RememberRejection(*cpu_shader_addr, shader_addr, error.what());
+            RememberRejection(*cpu_shader_addr, shader_addr, error.what(), 6);
         }
         throw;
     }
@@ -257,6 +263,47 @@ u64 PrefixHash(const Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, size_t
     gpu_memory.ReadBlockUnsafe(gpu_addr, bytes.data(), size);
     return Common::CityHash64(reinterpret_cast<const char*>(bytes.data()), size);
 }
+
+// EDEN_NX2_DUMP_REJECTED=1: write each rejected native shader's code (up to 256 KiB, as far as it
+// is mapped) to log/rejected-shaders/<stage>-<gpu address>-<prefix hash>.bin with the reason in a
+// .txt beside it, once per prefix hash. Stage: the Maxwell3D program index (0 VertexA, 1 VertexB,
+// 2 TessellationInit, 3 Tessellation, 4 Geometry, 5 Pixel) or 6 for compute.
+void DumpRejected(const Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, u64 hash, int stage,
+                  const char* error) {
+    static const bool enabled = [] {
+        const char* text = std::getenv("EDEN_NX2_DUMP_REJECTED");
+        return text != nullptr && std::atoi(text) != 0;
+    }();
+    if (!enabled) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::unordered_set<u64> written;
+    std::scoped_lock lock{mutex};
+    if (!written.insert(hash).second) {
+        return;
+    }
+    size_t size = 256 * 1024;
+    while (size >= 16 && !gpu_memory.IsFullyMappedRange(gpu_addr, size)) {
+        size /= 2;
+    }
+    if (size < 16) {
+        return;
+    }
+    std::vector<u8> bytes(size);
+    gpu_memory.ReadBlockUnsafe(gpu_addr, bytes.data(), size);
+    const auto dir = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "rejected-shaders";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const std::string base = fmt::format("{}-{:010x}-{:016x}", stage, gpu_addr, hash);
+    if (std::ofstream out{dir / (base + ".bin"), std::ios::binary | std::ios::trunc}) {
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(size));
+    }
+    if (std::ofstream out{dir / (base + ".txt"), std::ios::trunc}) {
+        out << error << std::endl;
+    }
+    LOG_ERROR(HW_GPU, "Rejected native shader dumped: {} ({} bytes)", base, size);
+}
 } // Anonymous namespace
 
 void ShaderCache::ThrowIfRejected(VAddr cpu_addr, GPUVAddr gpu_addr) {
@@ -294,13 +341,14 @@ void ShaderCache::DropRejections(VAddr addr, size_t size) {
     }
 }
 
-void ShaderCache::RememberRejection(VAddr cpu_addr, GPUVAddr gpu_addr, const char* error) {
+void ShaderCache::RememberRejection(VAddr cpu_addr, GPUVAddr gpu_addr, const char* error, int stage) {
     VideoCore::NativeCensus::NoteBuildFailure(gpu_addr, error);
     const size_t size = MappedPrefix(*gpu_memory, gpu_addr);
     if (size == 0) {
         return;
     }
     const u64 hash = PrefixHash(*gpu_memory, gpu_addr, size);
+    DumpRejected(*gpu_memory, gpu_addr, hash, stage, error);
     std::scoped_lock lock{lookup_mutex};
     max_rejected_prefix = (std::max)(max_rejected_prefix, size);
     rejected_shaders.insert_or_assign(cpu_addr, RejectedShader{hash, size, error});

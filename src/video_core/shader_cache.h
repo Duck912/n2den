@@ -125,7 +125,7 @@ private:
     void ThrowIfRejected(VAddr cpu_addr, GPUVAddr gpu_addr);
 
     /// @brief Remembers that the shader at a given address was rejected by the compiler
-    void RememberRejection(VAddr cpu_addr, GPUVAddr gpu_addr, const char* error);
+    void RememberRejection(VAddr cpu_addr, GPUVAddr gpu_addr, const char* error, int stage = -1);
 
     /// @brief Forgets remembered rejections overlapping a written region
     /// @pre invalidation_mutex is locked
