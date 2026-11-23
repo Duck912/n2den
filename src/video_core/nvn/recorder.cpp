@@ -36,6 +36,9 @@ void DescriptorTable::Release(u32 base) {
             range.used = false;
             const size_t first = std::min<size_t>(base, entries.size());
             const size_t last = std::min<size_t>(static_cast<size_t>(base) + range.span, entries.size());
+            for (size_t i = first; i < last; ++i) {
+                Count(entries[i], -1);
+            }
             std::fill(entries.begin() + first, entries.begin() + last, u64{0});
             dirty = true;
             return;
@@ -52,14 +55,40 @@ void DescriptorTable::Set(u32 base, u32 id, u64 serial) {
     if (entries[index] == serial) {
         return;
     }
+    Count(entries[index], -1);
+    Count(serial, 1);
     entries[index] = serial;
     dirty = true;
+}
+
+void DescriptorTable::Count(u64 serial, s32 change) {
+    if (serial == 0) {
+        return;
+    }
+    if (change > 0) {
+        ++named[serial];
+    } else if (const auto it = named.find(serial); it != named.end() && --it->second == 0) {
+        named.erase(it);
+        dropped.push_back(serial);
+    }
+}
+
+std::vector<u64> DescriptorTable::TakeDropped() {
+    std::lock_guard lock{mutex};
+    return std::exchange(dropped, {});
+}
+
+bool DescriptorTable::Names(u64 serial) {
+    std::lock_guard lock{mutex};
+    return named.contains(serial);
 }
 
 void DescriptorTable::ReplaceSerial(u64 old_serial, u64 new_serial) {
     std::lock_guard lock{mutex};
     for (u64& serial : entries) {
         if (serial == old_serial) {
+            Count(old_serial, -1);
+            Count(new_serial, 1);
             serial = new_serial;
             dirty = true;
         }
@@ -235,10 +264,37 @@ void Recorder::Impl::ReleaseRefs(const std::vector<u64>& refs) {
     }
 }
 
+bool Recorder::Impl::NamedByTexturePool(u64 serial) {
+    if (SerialKind(serial) != ObjectKind::Texture) {
+        return false;
+    }
+    if (texture_table.Names(serial)) {
+        return true;
+    }
+    if (const TextureObject* texture = textures.Get(serial)) {
+        for (const auto& view : texture->views) {
+            if (texture_table.Names(view.second)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void Recorder::Impl::RunRetire() {
     std::vector<u64> ready;
     {
         std::lock_guard lock{retire_mutex};
+        // Held textures whose entry (or a view's entry) went away are candidates again.
+        for (const u64 dropped : texture_table.TakeDropped()) {
+            const TextureObject* const texture = textures.Get(dropped);
+            const u64 base = texture != nullptr && texture->desc.view_of != 0
+                                 ? texture->desc.view_of
+                                 : dropped;
+            if (held_named.erase(base) != 0) {
+                retire_list.push_back(base);
+            }
+        }
         const u64 completed = completed_seq.load();
         for (size_t i = 0; i < retire_list.size();) {
             const u64 serial = retire_list[i];
@@ -249,7 +305,12 @@ void Recorder::Impl::RunRetire() {
                 continue;
             }
             if (completed >= state->destroy_after && state->list_refs.load() == 0) {
-                ready.push_back(serial);
+                if (NamedByTexturePool(serial)) {
+                    // Kept for the entry that names it; looked at again when that entry goes.
+                    held_named.insert(serial);
+                } else {
+                    ready.push_back(serial);
+                }
                 retire_list[i] = retire_list.back();
                 retire_list.pop_back();
                 continue;

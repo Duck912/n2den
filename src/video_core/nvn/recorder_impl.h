@@ -17,6 +17,7 @@
 #include <mutex>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/boot_counter.h"
@@ -356,6 +357,13 @@ public:
     void ReplaceSerial(u64 old_serial, u64 new_serial);
     /// Entries up to the last non-empty one.
     [[nodiscard]] IdSnapshot Snapshot();
+    /// Whether an entry names the serial. An entry is the descriptor the game wrote: it stays
+    /// valid after the object it was written from is finalized (games register a texture and
+    /// finalize the NVNtexture at once, reusing the object for the next registration), so a
+    /// named texture is kept until its last entry is overwritten or its pool is finalized.
+    [[nodiscard]] bool Names(u64 serial);
+    /// The serials whose last entry went away since the last call.
+    [[nodiscard]] std::vector<u64> TakeDropped();
 
 private:
     struct Range {
@@ -364,7 +372,10 @@ private:
         bool used;
     };
     std::mutex mutex;
+    void Count(u64 serial, s32 change);
     std::vector<u64> entries;
+    std::unordered_map<u64, u32> named; ///< entries per serial
+    std::vector<u64> dropped;           ///< serials that lost their last entry
     std::vector<Range> ranges;
     std::shared_ptr<const std::vector<u64>> snapshot;
     bool dirty = true;
@@ -478,6 +489,10 @@ struct Recorder::Impl {
     // Object retirement
     std::mutex retire_mutex;
     std::vector<u64> retire_list;
+    /// Finalized textures a texture pool entry still names (NamedByTexturePool), out of
+    /// retire_list so a retire pass does not look at them again; they return to it when the
+    /// table drops the last entry of the texture or of one of its views. Under retire_mutex.
+    std::unordered_set<u64> held_named;
     /// Textures whose guest object was initialized again while they were alive (under
     /// retire_mutex). Nothing finalizes them, so they are never destroyed; the ones finalized
     /// through a copy of the object, or gone, are pruned.
@@ -536,6 +551,8 @@ struct Recorder::Impl {
     void MarkFinalized(u64 serial);
     void ReleaseRefs(const std::vector<u64>& refs);
     void RunRetire();
+    /// A finalized texture some texture pool entry (of it or of a view of it) still names.
+    bool NamedByTexturePool(u64 serial);
     void FlushDestroysLocked();
 
     // ---- sink-facing creation (take sink_mutex) ----------------------------------------------
