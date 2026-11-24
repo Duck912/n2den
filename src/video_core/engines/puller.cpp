@@ -4,6 +4,13 @@
 // SPDX-FileCopyrightText: 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
+#include <string>
+#include <algorithm>
+#include <vector>
+#include <mutex>
+#include <map>
+#include <chrono>
 #include <cstdlib>
 
 #include "common/assert.h"
@@ -199,6 +206,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         });
         if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
             split.NoteReportWrite(sequence_address);
+            split.NoteQueuedRelease(sequence_address, payload);
         }
     } else {
         // Acquires read what the back may still have to write: let it finish first. From here
@@ -211,10 +219,93 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                 regs.semaphore_sequence) {
             return;
         }
+        // Ordered acquires: when the last release sent to the address satisfies the acquire, the
+        // back writes it before anything sent after the acquire, which is all the acquire orders
+        // on the split (Bananza's channel 1 waits ~25 times a frame for a 3D report semaphore
+        // its graphics channel already released; each drain cost ~2 ms). EDEN_NX2_ORDERED_ACQUIRES
+        // =1 turns it on (off by default for now).
+        static const bool ordered_acquires = [] {
+            const char* const value = std::getenv("EDEN_NX2_ORDERED_ACQUIRES");
+            return value && value[0] == '1';
+        }();
+        if (ordered_acquires && dma_pusher.channel_state.native_abi &&
+            (op == GpuSemaphoreOperation::AcquireGequal ||
+             op == GpuSemaphoreOperation::AcquireEqual)) {
+            if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
+                const std::optional<u32> queued =
+                    split.QueuedReleaseValue(regs.semaphore_address.SemaphoreAddress());
+                static const bool trace_ordered = std::getenv("EDEN_NX2_TRACE_ACQUIRES") != nullptr;
+                if (trace_ordered) {
+                    static std::atomic<u32> logged{};
+                    if (logged.fetch_add(1) < 40) {
+                        const auto why = split.DebugQueuedRelease(regs.semaphore_address.SemaphoreAddress());
+                        LOG_INFO(HW_GPU, "Ordered acquire check at {:#x} value {:#x}: {}",
+                                 regs.semaphore_address.SemaphoreAddress(),
+                                 regs.semaphore_sequence, why);
+                    }
+                }
+                if (queued && (op == GpuSemaphoreOperation::AcquireGequal
+                                   ? *queued >= regs.semaphore_sequence
+                                   : *queued == regs.semaphore_sequence)) {
+                    static std::atomic<u64> skipped{};
+                    if (const u64 n = skipped.fetch_add(1) + 1; n == 1 || n % 20000 == 0) {
+                        LOG_INFO(HW_GPU, "Ordered semaphore acquires (no drain): {}", n);
+                    }
+                    return;
+                }
+            }
+        }
         const bool probe = VideoCommon::BackStats::Enabled() && dma_pusher.channel_state.native_abi;
         const u32 word_before =
             probe ? dma_pusher.memory_manager.Read<u32>(regs.semaphore_address.SemaphoreAddress()) : 0;
+        // [DEBUG] EDEN_NX2_TRACE_ACQUIRES=1: semaphore acquires that drain the split: the first 60
+        // (address, op, value, word before and after the drain, after the native read), then
+        // every 2000 a tally by address.
+        static const bool trace_acquires = std::getenv("EDEN_NX2_TRACE_ACQUIRES") != nullptr;
+        const GPUVAddr trace_address = regs.semaphore_address.SemaphoreAddress();
+        const u32 trace_before = trace_acquires ? dma_pusher.memory_manager.Read<u32>(trace_address) : 0;
+        const auto trace_start = std::chrono::steady_clock::now();
         DrainBack(VideoCommon::BackStats::DrainSemaphoreAcquire);
+        if (trace_acquires) {
+            const u32 after = dma_pusher.memory_manager.Read<u32>(trace_address);
+            const u32 native_word = dma_pusher.channel_state.native_abi
+                                        ? ReadNativeSemaphoreWord(dma_pusher, trace_address)
+                                        : after;
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - trace_start)
+                                .count();
+            static std::mutex trace_mutex;
+            static std::map<std::pair<GPUVAddr, u32>, std::array<u64, 3>> tally;
+            static u64 traced = 0;
+            std::scoped_lock trace_lock{trace_mutex};
+            auto& entry = tally[{trace_address, static_cast<u32>(op)}];
+            entry[0] += 1;
+            entry[1] += static_cast<u64>(us);
+            entry[2] += trace_before != after ? 1 : 0;
+            if (traced < 60) {
+                LOG_INFO(HW_GPU,
+                         "Acquire drain ch{} at {:#x} op {} value {:#x}: word {:#x} -> {:#x} "
+                         "(native {:#x}), {} us",
+                         dma_pusher.channel_state.bind_id, trace_address, static_cast<u32>(op),
+                         regs.semaphore_sequence, trace_before, after, native_word, us);
+            }
+            if (++traced % 2000 == 0) {
+                std::vector<std::pair<u64, std::pair<GPUVAddr, u32>>> top;
+                for (const auto& [k, v] : tally) {
+                    top.emplace_back(v[1], k);
+                }
+                std::ranges::sort(top, std::greater{});
+                std::string text;
+                for (size_t i = 0; i < top.size() && i < 8; ++i) {
+                    const auto& v = tally[top[i].second];
+                    text += fmt::format(" | {:#x} op {}: {} drains, {} us, {} changed",
+                                        top[i].second.first, top[i].second.second, v[0], v[1],
+                                        v[2]);
+                }
+                LOG_INFO(HW_GPU, "Acquire drains (last 2000) by address:{}", text);
+                tally.clear();
+            }
+        }
         do {
             u32 word = dma_pusher.memory_manager.Read<u32>(regs.semaphore_address.SemaphoreAddress());
             if (dma_pusher.channel_state.native_abi) {

@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -138,6 +139,16 @@ public:
     /// Waits until the back executed everything sent up to `target`; true when it had to wait.
     bool WaitForPosition(u64 target);
 
+    /// Front only: a semaphore release of `value` at `address` was just sent (after
+    /// NoteReportWrite). Ordered acquires (OrderedAcquiresEnabled) read it back.
+    void NoteQueuedRelease(u64 address, u32 value);
+    /// Front only: the value the back will have written at `address` before it runs anything
+    /// sent from now on: the last release sent there, when nothing that could write the address
+    /// was sent after it (ReportTarget is that release's position). Nothing when not known.
+    [[nodiscard]] std::optional<u32> QueuedReleaseValue(u64 address) const;
+    /// [DEBUG] Why QueuedReleaseValue answers as it does.
+    [[nodiscard]] std::string DebugQueuedRelease(u64 address) const;
+
 private:
     enum class Kind : u64 {
         Wrap,   ///< The rest of the ring is unused: continue at its start
@@ -213,6 +224,14 @@ private:
     std::unique_ptr<std::array<ReportSlot, ReportSlots>> report_slots{
         std::make_unique<std::array<ReportSlot, ReportSlots>>()};
     u64 evicted_report_position{}; ///< Latest position of an entry another granule replaced
+    struct QueuedRelease {
+        u64 address;
+        u64 position;
+        u32 value;
+    };
+    static constexpr size_t QueuedReleases = 1024;
+    std::unique_ptr<std::array<QueuedRelease, QueuedReleases>> queued_releases{
+        std::make_unique<std::array<QueuedRelease, QueuedReleases>>()};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.

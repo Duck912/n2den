@@ -982,6 +982,22 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    // [DEBUG] EDEN_NX2_TRACE_RELEASE_ADDR=<GPU address>: the first 30 reports to that address,
+    // with their callers (RVA + 0x140000000, for llvm-symbolizer --obj=eden.exe).
+    static const u64 trace_address = [] {
+        const char* const value = std::getenv("EDEN_NX2_TRACE_RELEASE_ADDR");
+        return value ? std::strtoull(value, nullptr, 0) : 0ULL;
+    }();
+    if (trace_address != 0 && gpu_addr == trace_address) {
+        static std::atomic<u32> traced{};
+        if (traced.fetch_add(1) < 30) {
+            std::array<u64, 6> callers{};
+            VideoCommon::DebugCaptureCallers(callers.data(), 6);
+            LOG_INFO(Render_Vulkan, "Report to {:#x}: type {} flags {:#x} payload {:#x} callers {:#x}",
+                     gpu_addr, static_cast<u32>(type), static_cast<u32>(flags), payload,
+                     fmt::join(callers, " "));
+        }
+    }
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
 }
 

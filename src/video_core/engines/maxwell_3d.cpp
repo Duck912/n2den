@@ -1248,6 +1248,14 @@ void Maxwell3D::FrontNoteReport(VideoCommon::GpuSplit& split, FrontState& fs) {
     const u64 high = fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_high)];
     const u64 low = fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_low)];
     split.NoteReportWrite((high << 32) | low);
+    // A payload release writes a value the front knows (ordered acquires, puller.cpp).
+    decltype(regs.report_semaphore.query) query{};
+    query.raw = fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.query)];
+    if (query.operation == Regs::ReportSemaphore::Operation::Release &&
+        query.report == Regs::ReportSemaphore::Report::Payload) {
+        split.NoteQueuedRelease((high << 32) | low,
+                                fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.payload)]);
+    }
 }
 
 void Maxwell3D::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,

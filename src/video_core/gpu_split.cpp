@@ -358,6 +358,40 @@ void GpuSplit::NoteReportWrite(u64 address) {
     }
 }
 
+static size_t QueuedReleaseIndex(u64 address, size_t count) {
+    return static_cast<size_t>(((address >> 2) * 0x9E3779B97F4A7C15ULL) >> 54) & (count - 1);
+}
+
+void GpuSplit::NoteQueuedRelease(u64 address, u32 value) {
+    if (address == 0) {
+        return;
+    }
+    (*queued_releases)[QueuedReleaseIndex(address, QueuedReleases)] = {address, write_position,
+                                                                       value};
+}
+
+std::optional<u32> GpuSplit::QueuedReleaseValue(u64 address) const {
+    const QueuedRelease& release = (*queued_releases)[QueuedReleaseIndex(address, QueuedReleases)];
+    if (release.address != address || release.position == 0) {
+        return std::nullopt;
+    }
+    const std::optional<u64> target = ReportTarget(address, sizeof(u32));
+    if (!target || *target != release.position) {
+        return std::nullopt;
+    }
+    return release.value;
+}
+
+std::string GpuSplit::DebugQueuedRelease(u64 address) const {
+    const QueuedRelease& release = (*queued_releases)[QueuedReleaseIndex(address, QueuedReleases)];
+    const std::optional<u64> target = ReportTarget(address, sizeof(u32));
+    return fmt::format("entry address {:#x} value {:#x} position {}; target {}; last writer {}, "
+                       "write position {}, evicted {}",
+                       release.address, release.value, release.position,
+                       target ? fmt::format("{}", *target) : std::string{"none"},
+                       last_writer_position, write_position, evicted_report_position);
+}
+
 std::optional<u64> GpuSplit::ReportTarget(u64 address, u64 size) const {
     u64 target = (std::min)(last_writer_position, write_position);
     bool report_slot = false;
