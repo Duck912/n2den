@@ -4,7 +4,13 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <map>
+#include <vector>
+#include <algorithm>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <cstdlib>
 #include <chrono>
 #include <memory>
@@ -17,6 +23,7 @@
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 
 #include "common/settings.h"
+#include "video_core/gpu_written_pages.h"
 #include "common/thread.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/renderer_vulkan/vk_command_pool.h"
@@ -27,6 +34,22 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+
+namespace VideoCommon {
+void DebugCaptureCallers(u64* out, u32 count) {
+    for (u32 i = 0; i < count; ++i) {
+        out[i] = 0;
+    }
+#ifdef _WIN32
+    void* frames[16]{};
+    const USHORT n = RtlCaptureStackBackTrace(2, (std::min)(count, 16U), frames, nullptr);
+    const u64 base = reinterpret_cast<u64>(GetModuleHandleW(nullptr));
+    for (USHORT i = 0; i < n; ++i) {
+        out[i] = reinterpret_cast<u64>(frames[i]) - base + 0x140000000ULL;
+    }
+#endif
+}
+} // namespace VideoCommon
 
 namespace Vulkan {
 
@@ -67,6 +90,41 @@ u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
 void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
     const VideoCommon::BackStats::WaitTimer wait_timer{VideoCommon::BackStats::shared.finish,
                                                        StatsQueued(), StatsRetained()};
+#ifdef _WIN32
+    // [DEBUG] EDEN_NX2_FINISH_CALLERS=1: every 4000 Finish calls, the most frequent callers as
+    // return addresses (RVA + 0x140000000, for llvm-symbolizer --obj=eden.exe), 3 frames each.
+    static const bool tally_callers = std::getenv("EDEN_NX2_FINISH_CALLERS") != nullptr;
+    if (tally_callers) {
+        static std::mutex tally_mutex;
+        static std::map<std::array<u64, 7>, u32> tally;
+        static u32 calls = 0;
+        void* frames[8]{};
+        const USHORT n = RtlCaptureStackBackTrace(1, 8, frames, nullptr);
+        const u64 base = reinterpret_cast<u64>(GetModuleHandleW(nullptr));
+        std::array<u64, 7> key{};
+        for (USHORT i = 0; i < n && i < 7; ++i) {
+            key[i] = reinterpret_cast<u64>(frames[i]) - base + 0x140000000ULL;
+        }
+        std::scoped_lock lock{tally_mutex};
+        ++tally[key];
+        if (++calls % 4000 == 0) {
+            std::vector<std::pair<u32, std::array<u64, 7>>> top;
+            for (const auto& [k, v] : tally) {
+                top.emplace_back(v, k);
+            }
+            std::ranges::sort(top, std::greater{});
+            std::string text;
+            for (size_t i = 0; i < top.size() && i < 8; ++i) {
+                text += fmt::format(" | {} x", top[i].first);
+                for (const u64 frame : top[i].second) {
+                    text += fmt::format(" {:#x}", frame);
+                }
+            }
+            LOG_INFO(Render_Vulkan, "Finish callers (last 4000):{}", text);
+            tally.clear();
+        }
+    }
+#endif
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
     SubmitExecution(signal_semaphore, wait_semaphore);

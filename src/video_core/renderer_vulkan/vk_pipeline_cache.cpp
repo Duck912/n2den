@@ -1595,6 +1595,17 @@ std::shared_ptr<ReusableShaders> PipelineCache::BuildGraphicsShaders(
             debug_dump_ir[index] = DebugIrSummary(programs[index]);
         }
 
+        // [DEBUG] EDEN_NX2_TRACE_WRITE_EXTENT=1: each written storage buffer and its write extent.
+        static const bool trace_extent = std::getenv("EDEN_NX2_TRACE_WRITE_EXTENT") != nullptr;
+        if (trace_extent) {
+            for (const auto& desc : programs[index].info.storage_buffers_descriptors) {
+                if (desc.is_written && !desc.IsTableSpan()) {
+                    LOG_INFO(Render_Vulkan, "stage {} {:#016x}: written c{}[{:#x}] indirect {:#x} extent {:#x} stride {:#x}",
+                             index, key.unique_hashes[index], desc.cbuf_index, desc.cbuf_offset,
+                             desc.indirect_offset, desc.write_extent, desc.write_stride);
+                }
+            }
+        }
         if (programs[index].info.untracked_global_accesses != 0) {
             LOG_WARNING(Render_Vulkan,
                         "stage {} {:#016x}: untracked global accesses {}/{} stores, storage buffers {}: {}",

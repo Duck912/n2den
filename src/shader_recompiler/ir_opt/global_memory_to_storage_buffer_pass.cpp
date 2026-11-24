@@ -42,6 +42,10 @@ struct StorageBufferAddr {
     u32 span_slot{~0U};
     u32 span_stride{};
     u32 span_entry_offset{};
+
+    [[nodiscard]] bool IsSpan() const noexcept {
+        return span_slot != ~0U;
+    }
 };
 
 /// Block iterator to a global memory instruction and the storage buffer it uses
@@ -105,6 +109,9 @@ struct StorageInfo {
     /// from table_budget, which already left them out.
     StorageBufferSet counted;
     small_vector<StorageBufferAddr, 8> table_candidates;
+    /// Written buffers some write reaches other than through the buffer pointer plus a constant
+    /// (kept global, a select of pointers, ...): their write extent is unknown.
+    StorageBufferSet unknown_write_extent;
 };
 
 /// Returns true when the instruction is a global memory instruction
@@ -1135,6 +1142,25 @@ std::optional<std::pair<u32, u32>> DynamicPointerSlots(const IR::Value& offset) 
     return std::pair{base, *stride};
 }
 
+/// Bytes a global write or atomic stores at its address.
+u32 GlobalWriteBytes(const IR::Inst& inst) {
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::WriteGlobalS8:
+    case IR::Opcode::WriteGlobalU8:
+        return 1;
+    case IR::Opcode::WriteGlobalS16:
+    case IR::Opcode::WriteGlobalU16:
+        return 2;
+    case IR::Opcode::WriteGlobal32:
+        return 4;
+    case IR::Opcode::WriteGlobal64:
+        return 8;
+    default:
+        // 128-bit stores, and atomics of any width (at most 8 bytes).
+        return 16;
+    }
+}
+
 /// Pointer table spans (StorageBufferDescriptor::span_slot). EDEN_NX2_NO_TABLE_SPAN=1 leaves
 /// stores through table entries untracked, as before.
 bool TableSpansEnabled() {
@@ -1498,6 +1524,7 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
                 info.set.insert(*storage_buffer);
                 if (IsGlobalMemoryWrite(inst)) {
                     info.writes.insert(*storage_buffer);
+                    info.unknown_write_extent.insert(*storage_buffer);
                 }
             }
             for (const StorageBufferAddr& candidate : candidates) {
@@ -1521,6 +1548,7 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
                 info.set.insert(candidate);
                 if (IsGlobalMemoryWrite(inst)) {
                     info.writes.insert(candidate);
+                    info.unknown_write_extent.insert(candidate);
                 }
                 if (candidate.indirect != ~0U) {
                     // The backend reads the pointer through the buffer that holds it.
@@ -2275,7 +2303,145 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     program.info.untracked_global_stores += info.untracked_stores;
     program.info.untracked_reports.insert(program.info.untracked_reports.end(),
                                           info.reports.begin(), info.reports.end());
+    // Write extents: the largest constant offset past the buffer pointer a write reaches.
+    static const bool extents_enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_NO_WRITE_EXTENT");
+        return value == nullptr || value[0] == 0 || value[0] == '0';
+    }();
+    // A write's extent: constant bytes from the aligned binding start, plus `stride` bytes per
+    // vertex when the address steps with the vertex index (Bananza's vertex programs store a
+    // record per vertex: pointer + VertexId * 12). ~0U constant: unknown.
+    struct WriteExtent {
+        u32 constant{~0U};
+        u32 stride{};
+    };
+    std::map<StorageBufferAddr, WriteExtent> write_extents;
+    for (const StorageInst& storage_inst : info.to_replace) {
+        if (!IsGlobalMemoryWrite(*storage_inst.inst)) {
+            continue;
+        }
+        const StorageBufferAddr buffer{storage_inst.storage_buffer};
+        WriteExtent write{};
+        u32 extent{~0U};
+        const std::optional<LowAddrInfo> low_addr{TrackLowAddress(storage_inst.inst)};
+        if (extents_enabled && buffer.indirect == ~0U && !buffer.IsSpan() && low_addr &&
+            low_addr->imm_offset >= 0) {
+            const auto is_pointer = [&](const IR::Value& value) {
+                if (value.IsImmediate()) {
+                    return false;
+                }
+                const IR::Inst* root{value.InstRecursive()};
+                // The pointer's low word read alone, or extracted from the pointer read whole.
+                if (root->GetOpcode() == IR::Opcode::CompositeExtractU32x2 &&
+                    root->Arg(1).IsImmediate() && root->Arg(1).U32() == 0 &&
+                    !root->Arg(0).IsImmediate() &&
+                    root->Arg(0).InstRecursive()->GetOpcode() == IR::Opcode::GetCbufU32x2) {
+                    root = root->Arg(0).InstRecursive();
+                }
+                return (root->GetOpcode() == IR::Opcode::GetCbufU32 ||
+                        root->GetOpcode() == IR::Opcode::GetCbufU32x2) &&
+                       root->Arg(0).IsImmediate() && root->Arg(1).IsImmediate() &&
+                       root->Arg(0).U32() == buffer.index && root->Arg(1).U32() == buffer.offset;
+            };
+            const auto is_vertex_id = [](const IR::Value& value) {
+                if (value.IsImmediate()) {
+                    return false;
+                }
+                const IR::Inst* const inst{value.InstRecursive()};
+                return inst->GetOpcode() == IR::Opcode::GetAttributeU32 &&
+                       inst->Arg(0).IsImmediate() &&
+                       inst->Arg(0).Attribute() == IR::Attribute::VertexId;
+            };
+            u32 pointers{};
+            u32 stride{};
+            u64 constant{};
+            bool ok{true};
+            const auto terms = [&](auto&& self, const IR::Value& value, u32 depth) -> void {
+                if (!ok) {
+                    return;
+                }
+                if (depth > 8) {
+                    ok = false;
+                    return;
+                }
+                if (value.IsImmediate()) {
+                    constant += value.U32();
+                    return;
+                }
+                if (is_pointer(value)) {
+                    ++pointers;
+                    return;
+                }
+                const IR::Inst* const inst{value.InstRecursive()};
+                switch (inst->GetOpcode()) {
+                case IR::Opcode::IAdd32:
+                    self(self, inst->Arg(0), depth + 1);
+                    self(self, inst->Arg(1), depth + 1);
+                    return;
+                case IR::Opcode::IMul32:
+                    for (size_t arg = 0; arg < 2; ++arg) {
+                        if (inst->Arg(arg ^ 1).IsImmediate() && is_vertex_id(inst->Arg(arg)) &&
+                            stride == 0) {
+                            stride = inst->Arg(arg ^ 1).U32();
+                            return;
+                        }
+                    }
+                    break;
+                case IR::Opcode::ShiftLeftLogical32:
+                    if (inst->Arg(1).IsImmediate() && inst->Arg(1).U32() < 16 &&
+                        is_vertex_id(inst->Arg(0)) && stride == 0) {
+                        stride = 1U << inst->Arg(1).U32();
+                        return;
+                    }
+                    break;
+                default:
+                    break;
+                }
+                ok = false;
+            };
+            terms(terms, low_addr->value, 0);
+            if (ok && pointers == 1 && constant < 0x10000000 && stride < 0x10000) {
+                write.constant = static_cast<u32>(host_info.min_ssbo_alignment) +
+                                 static_cast<u32>(low_addr->imm_offset) +
+                                 static_cast<u32>(constant) + GlobalWriteBytes(*storage_inst.inst);
+                write.stride = stride;
+                extent = write.constant;
+            }
+        }
+        // [DEBUG] EDEN_NX2_TRACE_WRITE_EXTENT=1: why a write's extent is unknown.
+        static const bool trace_extent = std::getenv("EDEN_NX2_TRACE_WRITE_EXTENT") != nullptr;
+        if (trace_extent && extent == ~0U) {
+            static std::atomic<u32> logged{};
+            if (logged.fetch_add(1) < 600) {
+                LOG_INFO(Shader, "write extent unknown: stage {} c{}[{:#x}] {} imm {:#x} low {}",
+                         static_cast<int>(env.ShaderStage()), buffer.index,
+                         buffer.offset, storage_inst.inst->GetOpcode(),
+                         low_addr ? low_addr->imm_offset : 0,
+                         low_addr ? DescribeIR(low_addr->value, 6) : std::string{"untracked"});
+            }
+        }
+        auto [it, inserted] = write_extents.try_emplace(buffer, write);
+        if (!inserted) {
+            WriteExtent& merged{it->second};
+            if (merged.constant == ~0U || write.constant == ~0U ||
+                (merged.stride != 0 && write.stride != 0 && merged.stride != write.stride)) {
+                merged = WriteExtent{};
+            } else {
+                merged.constant = (std::max)(merged.constant, write.constant);
+                merged.stride = (std::max)(merged.stride, write.stride);
+            }
+        }
+    }
     for (const StorageBufferAddr& storage_buffer : info.set) {
+        u32 write_extent{~0U};
+        u32 write_stride{};
+        if (info.writes.contains(storage_buffer) &&
+            !info.unknown_write_extent.contains(storage_buffer)) {
+            if (const auto it = write_extents.find(storage_buffer); it != write_extents.end()) {
+                write_extent = it->second.constant;
+                write_stride = write_extent == ~0U ? 0U : it->second.stride;
+            }
+        }
         program.info.storage_buffers_descriptors.push_back({
             .cbuf_index = storage_buffer.index,
             .cbuf_offset = storage_buffer.offset,
@@ -2285,6 +2451,8 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
             .span_slot = storage_buffer.span_slot,
             .span_stride = storage_buffer.span_stride,
             .span_entry_offset = storage_buffer.span_entry_offset,
+            .write_extent = write_extent,
+            .write_stride = write_stride,
         });
     }
     for (const StorageInst& storage_inst : info.to_replace) {
@@ -2323,6 +2491,20 @@ void JoinStorageInfo(Info& base, Info& source, size_t limit) {
                    desc.span_entry_offset == existing.span_entry_offset;
         })};
         if (it != descriptors.end()) {
+            if (desc.is_written) {
+                if (!it->is_written) {
+                    it->write_extent = desc.write_extent;
+                    it->write_stride = desc.write_stride;
+                } else if (it->write_extent == ~0U || desc.write_extent == ~0U ||
+                           (it->write_stride != 0 && desc.write_stride != 0 &&
+                            it->write_stride != desc.write_stride)) {
+                    it->write_extent = ~0U;
+                    it->write_stride = 0;
+                } else {
+                    it->write_extent = (std::max)(it->write_extent, desc.write_extent);
+                    it->write_stride = (std::max)(it->write_stride, desc.write_stride);
+                }
+            }
             it->is_written |= desc.is_written;
             continue;
         }

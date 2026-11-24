@@ -145,7 +145,60 @@ bool DmaPusher::Step() {
         // GPU-written entries use completed page copies or freshly downloaded guest memory.
         const size_t entry_bytes = size_t{header.size} * sizeof(u32);
         const bool gpu_written = IsGpuWrittenCommands(dma_state.dma_get, entry_bytes);
-        const bool copied = gpu_written && SyncGpuWrittenCommands(dma_state.dma_get, entry_bytes);
+        const bool macro_payload = dma_state.method_count != 0 &&
+                                   subchannel_type[dma_state.subchannel] ==
+                                       Engines::EngineTypes::Maxwell3D &&
+                                   dma_state.method >= MacroRegistersStart;
+        // A synced list run (VideoCommon::ListRun): the entry's pages are current in guest memory.
+        bool served = false;
+        std::vector<u32> run_words;
+        if (gpu_written && macro_payload && VideoCommon::ListRunMode() != 0 &&
+            VideoCommon::GpuSplit::Get().Active()) {
+            bool covered = true;
+            for (GPUVAddr page = dma_state.dma_get & ~GPUVAddr{0xfff};
+                 page < dma_state.dma_get + entry_bytes && covered; page += 0x1000) {
+                const auto device = memory_manager.GpuToCpuAddress(page);
+                covered = device && VideoCommon::ListRunCovers(*device);
+            }
+            if (covered) {
+                run_words.resize(header.size);
+                memory_manager.ReadBlockUnsafe(dma_state.dma_get, run_words.data(), entry_bytes);
+                if (VideoCommon::ListRunMode() == 1) {
+                    command_headers.resize_destructive(header.size);
+                    std::memcpy(command_headers.data(), run_words.data(), entry_bytes);
+                    served = true;
+                }
+            }
+        }
+        const bool copied =
+            served || (gpu_written && SyncGpuWrittenCommands(dma_state.dma_get, entry_bytes));
+        if (!run_words.empty() && !served) {
+            // Verify: the words as the drain has them.
+            std::vector<u32> drained(header.size);
+            if (copied) {
+                std::memcpy(drained.data(), command_headers.data(), entry_bytes);
+            } else {
+                memory_manager.ReadBlockUnsafe(dma_state.dma_get, drained.data(), entry_bytes);
+            }
+            static std::atomic<u64> verified{};
+            static std::atomic<u64> mismatched{};
+            const u64 n = verified.fetch_add(1) + 1;
+            if (drained != run_words) {
+                const u64 m = mismatched.fetch_add(1) + 1;
+                if (m <= 32) {
+                    LOG_ERROR(HW_GPU, "Synced list run read differs at {:#x}: [{:08x}] drained [{:08x}]",
+                              dma_state.dma_get, fmt::join(run_words, " "), fmt::join(drained, " "));
+                }
+            }
+            if (n % 20000 == 0) {
+                LOG_INFO(HW_GPU, "Synced list run verify: {} entries, {} differ", n,
+                         mismatched.load());
+            }
+        }
+        VideoCommon::g_list_run.serving = gpu_written && macro_payload;
+        SCOPE_EXIT {
+            VideoCommon::g_list_run.serving = false;
+        };
         // [DEBUG] EDEN_NX2_TRACE_MACRO_PAYLOADS=1: entries that are the parameters of a macro call
         // begun by an earlier entry (indirect draw arguments), with the words as executed: the
         // first 300, then every 20000th, and every 20000 entries a tally of how many had a zero
@@ -514,6 +567,14 @@ bool DmaPusher::SyncGpuWrittenCommands(GPUVAddr address, size_t size) {
     if (split.Active()) {
         split.Defer(flush);
         split.Drain(VideoCommon::BackStats::DrainOther);
+        if (!drain_only) {
+            // The back executed everything sent and flushed the pages: a synced list run.
+            for (GPUVAddr page = first; page < end; page += 0x1000) {
+                if (const auto device = memory_manager.GpuToCpuAddress(page)) {
+                    VideoCommon::ListRunOpen(*device, *device + 0x1000);
+                }
+            }
+        }
     } else {
         flush();
     }

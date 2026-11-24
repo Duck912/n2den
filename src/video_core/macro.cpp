@@ -1350,7 +1350,27 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         const auto read = [&](u32 address) {
             return address < Maxwell3D::Regs::NUM_REGS ? maxwell3d.GetRegisterValue(address) : 0U;
         };
+        // [DEBUG] EDEN_NX2_TRACE_MACRO_EMIT=<parameter count>: for the first 40 native macro
+        // calls with that many parameters, the parameters and every register the macro writes.
+        static const u32 trace_params = [] {
+            const char* const value = std::getenv("EDEN_NX2_TRACE_MACRO_EMIT");
+            return value ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : 0U;
+        }();
+        static std::atomic<u32> traced_calls{};
+        const bool trace_call = trace_params != 0 &&
+                                (trace_params == 0xff || parameters.size() == trace_params) &&
+                                traced_calls.fetch_add(1) < (trace_params == 0xff ? 3000U : 40U);
+        std::string trace_text;
+        SCOPE_EXIT {
+            if (trace_call) {
+                LOG_INFO(HW_GPU, "Native MME trace start={:#x} params [{:08x}] writes{}", method,
+                         fmt::join(parameters, " "), trace_text);
+            }
+        };
         const auto emit = [&](u32 address, u32 value) {
+            if (trace_call) {
+                trace_text += fmt::format(" {:x}={:x}", address, value);
+            }
             if (address >= 0xe00) return false;
             maxwell3d.CallMethod(system, address,
                                  Common::N2denOcclusion::MarkCondition(

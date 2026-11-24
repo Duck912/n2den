@@ -102,6 +102,9 @@ struct Binding {
     u32 segment_offset{};
     u32 segment_size{};
     bool segment_written{};
+    /// Storage bindings: bytes from device_addr the program can write (see
+    /// Shader::StorageBufferDescriptor::write_extent); the rest is bound for reads only.
+    u32 write_size{~0U};
 };
 
 struct MultiRangeSegment {
@@ -341,7 +344,8 @@ public:
     void UnbindGraphicsStorageBuffers(size_t stage);
 
     bool BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                   bool is_written, u32 indirect_offset = ~0U);
+                                   bool is_written, u32 indirect_offset = ~0U,
+                                   u32 write_extent = ~0U);
 
     /// A range of a pointer table span (Shader::StorageBufferDescriptor::span_slot): the
     /// program stores through the pointers at table + entry_offset + i * stride for the draw's
@@ -362,7 +366,8 @@ public:
     void UnbindComputeStorageBuffers();
 
     void BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                  bool is_written, u32 indirect_offset = ~0U);
+                                  bool is_written, u32 indirect_offset = ~0U,
+                                  u32 write_extent = ~0U);
 
     void UnbindComputeTextureBuffers();
 

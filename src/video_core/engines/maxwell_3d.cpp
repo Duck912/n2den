@@ -1220,8 +1220,15 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
         default:
             if (method >= cb_data && method < cb_data + 16) {
                 fs.regs[MAXWELL3D_REG_INDEX(const_buffer.offset)] += sizeof(u32);
-            } else if (!FrontHandledOutsideDrawManager(method)) {
-                fs.draw_pending = true;
+            } else {
+                if (!FrontHandledOutsideDrawManager(method)) {
+                    fs.draw_pending = true;
+                }
+                // A draw, clear or report the macro of a synced list entry did not emit may
+                // write the run's pages (VideoCommon::ListRun).
+                if (!(from_macro && VideoCommon::g_list_run.serving)) {
+                    VideoCommon::ListRunClose();
+                }
             }
             break;
         }
@@ -1414,7 +1421,34 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     const auto read = [&fs](u32 address) {
         return address < Regs::NUM_REGS ? fs.regs[address] : 0U;
     };
+    // [DEBUG] EDEN_NX2_TRACE_MACRO_EMIT=<parameter count, 0xff any>: the parameters and the
+    // register writes of the first native macro calls on the split front (3000 with 0xff).
+    static const u32 trace_params = [] {
+        const char* const value = std::getenv("EDEN_NX2_TRACE_MACRO_EMIT");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : 0U;
+    }();
+    static std::atomic<u32> traced_calls{};
+    const bool trace_call = [&] {
+        if (trace_params == 0 ||
+            (trace_params != 0xff && fs.parameters.size() != trace_params)) {
+            return false;
+        }
+        const u32 index = traced_calls.fetch_add(1);
+        return index < 1000 || index % 4000 == 0;
+    }();
+    std::string trace_text;
+    const std::vector<u32> trace_parameters =
+        trace_call ? std::vector<u32>(fs.parameters.begin(), fs.parameters.end()) : std::vector<u32>{};
+    SCOPE_EXIT {
+        if (trace_call) {
+            LOG_INFO(HW_GPU, "Native MME front trace method={:#x} start={:#x} params [{:08x}] writes{}",
+                     method, start, fmt::join(trace_parameters, " "), trace_text);
+        }
+    };
     const auto emit = [&](u32 address, u32 value) {
+        if (trace_call) {
+            trace_text += fmt::format(" {:x}={:x}", address, value);
+        }
         if (address >= MacroRegistersStart) {
             return false;
         }

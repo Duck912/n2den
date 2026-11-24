@@ -16,6 +16,7 @@
 #include <thread>
 
 #include "common/fs/path_util.h"
+#include <map>
 #include "common/range_sets.inc"
 #include "shader_recompiler/exception.h"
 #include "video_core/gpu_written_pages.h"
@@ -519,7 +520,7 @@ void BufferCache<P>::UnbindGraphicsStorageBuffers(size_t stage) {
 template <class P>
 bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index,
                                                u32 cbuf_offset, bool is_written,
-                                               u32 indirect_offset) {
+                                               u32 indirect_offset, u32 write_extent) {
     if (stage >= NUM_STAGES || ssbo_index >= NUM_STORAGE_BUFFERS) {
         LOG_ERROR(HW_GPU, "Invalid graphics storage buffer binding: stage {}, index {}",
                   stage, ssbo_index);
@@ -561,6 +562,7 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
         StorageBufferBinding(ssbo_addr, cbuf_index, is_written,
                              maxwell3d->GetNativeMacroEngine().native_turing,
                              indirect_offset != ~0U);
+    channel_state->storage_buffers[stage][ssbo_index].write_size = write_extent;
     return (channel_state->storage_buffers[stage][ssbo_index].buffer_id != NULL_BUFFER_ID);
 }
 
@@ -793,7 +795,8 @@ void BufferCache<P>::UnbindComputeStorageBuffers() {
 
 template <class P>
 void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                              bool is_written, u32 indirect_offset) {
+                                              bool is_written, u32 indirect_offset,
+                                              u32 write_extent) {
     if (ssbo_index >= channel_state->compute_storage_buffers.size()) [[unlikely]] {
         LOG_ERROR(HW_GPU, "Storage buffer index {} exceeds maximum storage buffer count",
                   ssbo_index);
@@ -840,6 +843,7 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
     channel_state->compute_storage_buffers[ssbo_index] =
         StorageBufferBinding(ssbo_addr, cbuf_index, is_written, kepler_compute->IsNativeMode(),
                              indirect_offset != ~0U);
+    channel_state->compute_storage_buffers[ssbo_index].write_size = write_extent;
 }
 
 template <class P>
@@ -1601,7 +1605,7 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, (std::min)(size, binding.write_size));
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -1766,7 +1770,8 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, true);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr,
+                              (std::min)(size, binding.write_size), true);
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -2128,6 +2133,43 @@ void BufferCache<P>::Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64
             }
             if (word & 1) {
                 const DAddr page_addr = page << page_bits;
+#ifdef _WIN32
+                // [DEBUG] EDEN_NX2_LISTWRITE_CALLERS=1: every 2000 writes noted to command list
+                // pages, the most frequent (written range size, callers) as return addresses
+                // (RVA + 0x140000000, for llvm-symbolizer --obj=eden.exe).
+                static const bool tally_writes = std::getenv("EDEN_NX2_LISTWRITE_CALLERS") != nullptr;
+                if (tally_writes) {
+                    static std::mutex tally_mutex;
+                    static std::map<std::array<u64, 7>, u32> tally;
+                    static u32 noted = 0;
+                    std::array<u64, 7> key{size};
+                    VideoCommon::DebugCaptureCallers(key.data() + 1, 6);
+                    std::scoped_lock tally_lock{tally_mutex};
+                    ++tally[key];
+                    if (++noted % 2000 == 0) {
+                        std::vector<std::pair<u32, std::array<u64, 7>>> top;
+                        for (const auto& [k, v] : tally) {
+                            top.emplace_back(v, k);
+                        }
+                        std::ranges::sort(top, std::greater{});
+                        std::string text;
+                        for (size_t i = 0; i < top.size() && i < 6; ++i) {
+                            text += fmt::format(" | {} x size {:#x}:", top[i].first, top[i].second[0]);
+                            for (size_t f = 1; f < 7; ++f) {
+                                text += fmt::format(" {:#x}", top[i].second[f]);
+                            }
+                        }
+                        LOG_INFO(HW_GPU, "List page writes (last 2000):{}", text);
+                        tally.clear();
+                    }
+                }
+#endif
+                if (VideoCommon::ListRunNoteWrite(page_addr)) {
+                    LOG_WARNING(HW_GPU,
+                                "Command list page {:#x} was written by a draw inside a synced "
+                                "list run: runs are off from here (EDEN_NX2_LIST_RUN)",
+                                page_addr);
+                }
                 {
                     std::scoped_lock lock{nx2_list_mutex};
                     Nx2ListPage& entry = nx2_list_pages[page_addr];

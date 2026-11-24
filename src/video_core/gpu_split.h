@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/gpu_written_pages.h"
 
 namespace Core {
 class System;
@@ -118,6 +119,7 @@ public:
     /// The front just sent compute, copy or inline upload methods that can write command pages.
     void NoteWriter() {
         last_writer_position = write_position;
+        ListRunClose();
     }
     /// Waits for the back through the last writer, leaving later work queued.
     void WaitForWriters();

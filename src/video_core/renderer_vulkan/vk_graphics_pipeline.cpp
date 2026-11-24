@@ -832,9 +832,19 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     ++ssbo_index;
                     continue;
                 }
+                // Writes indexed by the vertex reach (first + count) records; an indexed draw's
+                // vertices are not known here: the whole binding.
+                u32 write_extent{desc.write_extent};
+                if (desc.write_stride != 0 && write_extent != ~0U) {
+                    const auto& draw_state{maxwell3d->draw_manager.draw_state};
+                    const u64 vertices{u64{draw_state.vertex_buffer.first} +
+                                       draw_state.vertex_buffer.count};
+                    const u64 extent{write_extent + vertices * desc.write_stride};
+                    write_extent = is_indexed || extent >= ~0U ? ~0U : static_cast<u32>(extent);
+                }
                 buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
                                                        desc.cbuf_offset, desc.is_written,
-                                                       desc.indirect_offset);
+                                                       desc.indirect_offset, write_extent);
                 ++ssbo_index;
             }
         }

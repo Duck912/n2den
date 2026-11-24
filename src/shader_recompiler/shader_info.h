@@ -192,6 +192,13 @@ struct StorageBufferDescriptor {
     u32 span_slot{~0U};
     u32 span_stride{};
     u32 span_entry_offset{};
+    /// Written descriptors: bytes from the (host-aligned) binding start that every store and
+    /// atomic stays within, when all of them address the buffer pointer plus a constant; ~0U when
+    /// unknown. The binding marks only these bytes GPU-written (it still binds the full range).
+    u32 write_extent{~0U};
+    /// With write_extent: bytes added per vertex of the draw (the program stores at the pointer
+    /// plus VertexId * write_stride); 0 when the extent is constant.
+    u32 write_stride{};
 
     [[nodiscard]] bool IsTableSpan() const noexcept {
         return span_slot != ~0U;
