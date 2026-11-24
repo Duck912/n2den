@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
@@ -16,13 +17,22 @@
 
 namespace VideoCommon {
 
+/// EDEN_USAGE_TRACKER_FAST=0 turns off UsageTracker's covered-interval fast path.
+[[nodiscard]] inline bool UsageTrackerFastEnabled() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_USAGE_TRACKER_FAST");
+        return !(value != nullptr && value[0] == '0');
+    }();
+    return enabled;
+}
+
 class UsageTracker {
     // PAGE_SHIFT is a macro on FreeBSD
     static constexpr size_t BUFFER_BYTES_PER_BITSHIFT = 6;
     static constexpr size_t BUFFER_PAGE_SHIFT = 6 + BUFFER_BYTES_PER_BITSHIFT;
     static constexpr size_t BUFFER_PAGE_BYTES = 1 << BUFFER_PAGE_SHIFT;
 public:
-    explicit UsageTracker(size_t size) {
+    explicit UsageTracker(size_t size) : size_bytes{size} {
         const size_t num_pages = (size >> BUFFER_PAGE_SHIFT) + 1;
         pages.resize(num_pages, 0ULL);
         groups.resize(num_pages / PAGES_PER_GROUP + 1, 0);
@@ -30,6 +40,8 @@ public:
 
     void Reset() noexcept {
         recent.fill(NO_RANGE);
+        covered.fill(Interval{});
+        whole = false;
         // Only the pages tracked since the last reset can be set.
         if (dirty_begin < dirty_end) {
             std::fill(pages.begin() + dirty_begin, pages.begin() + dirty_end, 0ULL);
@@ -43,6 +55,19 @@ public:
     void Track(u64 offset, u64 size) noexcept {
         if (size == 0) {
             return;
+        }
+        // Fast path: ranges inside an interval already tracked whole since the reset (merged from
+        // overlapping or touching ranges) change nothing. Exact: only tracked bytes are covered.
+        const bool fast = UsageTrackerFastEnabled();
+        if (fast) {
+            if (whole) {
+                return;
+            }
+            for (const Interval& interval : covered) {
+                if (offset >= interval.begin && offset + size <= interval.end) {
+                    return;
+                }
+            }
         }
         // Consecutive draws keep binding the same ranges (a vertex buffer can span tens of MiB);
         // tracking a range again changes nothing until the next reset.
@@ -59,6 +84,9 @@ public:
         }
         dirty_begin = (std::min)(dirty_begin, page);
         dirty_end = (std::max)(dirty_end, page_end + 1);
+        if (fast) {
+            Cover(offset, offset + size);
+        }
         TrackPage(page, offset, size);
         if (page == page_end) {
             return;
@@ -109,6 +137,42 @@ public:
     }
 
 private:
+    struct Interval {
+        u64 begin{};
+        u64 end{};
+    };
+
+    /// Records [begin, end) as tracked: joined to an interval it overlaps or touches, else in
+    /// the next slot. `whole` once an interval spans the buffer.
+    void Cover(u64 begin, u64 end) noexcept {
+        Interval* target = nullptr;
+        for (Interval& interval : covered) {
+            if (interval.end > interval.begin && begin <= interval.end && end >= interval.begin) {
+                interval.begin = (std::min)(interval.begin, begin);
+                interval.end = (std::max)(interval.end, end);
+                target = &interval;
+                break;
+            }
+        }
+        if (target == nullptr) {
+            target = &covered[covered_next++ % covered.size()];
+            *target = Interval{begin, end};
+        } else {
+            // The grown interval may now reach another one: join those too.
+            for (Interval& other : covered) {
+                if (&other != target && other.end > other.begin && other.begin <= target->end &&
+                    other.end >= target->begin) {
+                    target->begin = (std::min)(target->begin, other.begin);
+                    target->end = (std::max)(target->end, other.end);
+                    other = Interval{};
+                }
+            }
+        }
+        if (target->begin == 0 && target->end >= size_bytes) {
+            whole = true;
+        }
+    }
+
     /// Bits of a page's 64-byte chunks that [offset, offset + size) touches. Partial chunks
     /// count, and a size of zero is no bits (the old shift by 64 was undefined).
     /// From Eglantine c4573fabb1.
@@ -156,6 +220,11 @@ private:
         return ranges;
     }();
     size_t recent_next{};
+    /// Byte intervals tracked whole since the reset (the fast path's memory).
+    std::array<Interval, 4> covered{};
+    size_t covered_next{};
+    u64 size_bytes{};
+    bool whole{};
     size_t dirty_begin{(std::numeric_limits<size_t>::max)()};
     size_t dirty_end{};
 };
