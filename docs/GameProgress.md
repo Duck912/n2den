@@ -1,6 +1,6 @@
 # Game progress
 
-Last updated: 2026-11-22.
+Last updated: 2026-11-24.
 
 This page tracks how far each tested Switch 2 game gets in n2den, per graphics backend, and what is known to
 be wrong. It only lists what has actually been run; a game that is not here has not been tested.
@@ -29,6 +29,8 @@ for n2den's own changes, not as what another machine will reach.
 | Kirby and the Forgotten Land – Nintendo Switch 2 Edition + Star-Crossed World | Playable | Playable | Works |
 | Nintendo Switch Sports Resort | Not tested | Boots | Not tested |
 | Orbitals Deluxe Edition | Not usable | In-game, slow | Not tested |
+| Donkey Kong Bananza | In-game | In-game | Not tested |
+| Xenoblade Chronicles 2 – Nintendo Switch 2 Edition | Not tested | Boots | Not tested |
 
 "Prepared launch" means the game's CPU code and graphics pipelines are built before play starts, so that
 nothing has to be compiled while playing.
@@ -148,3 +150,30 @@ Unreal Engine 5.
 - **Known issues:** characters draw in a flat colour and one light shaft is dithered (some texture handles
   resolve to no texture); the picture is limited by the graphics card in play (many copies of the depth
   buffer per frame); one freeze while loading a level (the game stopped on "zero-sized buffer").
+
+## Donkey Kong Bananza
+
+Tested to the first level.
+
+- **Emulated GPU:** in-game. Reaches the first level and renders it correctly.
+- **NVN-HLE (Vulkan):** in-game. Reaches the first level and renders it correctly.
+- **Fixed on the way:** a graphics device loss while the level loads (a one-texel placeholder copied in the
+  wrong format), a black floor on the emulated GPU (stores made through pointer tables the game builds on the
+  GPU), and a long list of per-draw costs on both backends.
+- **Speed:** below full speed on both backends. The NVN-HLE backend went from a slideshow to more than six
+  times its earlier frame rate, and the emulated GPU gained about half again; there is still headroom to find.
+- **Option:** the built-in add-on "Single-interval vsync for Donkey Kong Bananza" in the game's settings.
+
+## Xenoblade Chronicles 2 – Nintendo Switch 2 Edition
+
+Tested from a `.nup` container with the base game, update and add-ons: boot, intro and title screen.
+
+- **NVN-HLE (Vulkan):** boots. Loads (about 30 s, most of it unpacking the game data from the container),
+  then runs the intro and the title screen at full speed. The intro scene renders with correct colours, but
+  it does not reach the screen yet: only the title text and menus show, over black.
+- **Emulated GPU:** not tested past the loading screen.
+- **Fixed on the way:** a crash at boot (the game reserves two very large address ranges for its memory
+  allocator, which did not fit), a crash about 40 s in (the game reads its data through the base program's
+  storage, which the container does not hold separately), and wrong colours in the intro (the game's
+  colour-grading tables are stored in a different memory layout from the one n2den assumed).
+- **Known issues:** the final upscale of the 3D scene to the screen is missing (black background).
