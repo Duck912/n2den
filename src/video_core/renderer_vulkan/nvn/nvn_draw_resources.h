@@ -13,6 +13,7 @@
 #include <mutex>
 #include <chrono>
 #include <map>
+#include <span>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -467,6 +468,37 @@ struct DrawResources {
     /// Detaches the views of every texture over `storage`, whose image is being replaced, so they
     /// can be released after its last use (the textures make new ones on the new image).
     std::vector<vk::ImageView> TakeStorageViews(const Storage& storage);
+
+    // --- framebuffers (EDEN_NVN_FB_CACHE, default on) ---
+    /// Keyed by the views' creation numbers (ViewRef::id), not their handles: a handle can be
+    /// reused once its view is destroyed (a storage's shared views go with its last holder), a
+    /// number never is, so an entry over destroyed views is never found again (it ages out; a
+    /// framebuffer may outlive its attachments as long as it is not used).
+    struct FramebufferKey {
+        VkRenderPass render_pass{};
+        u32 count{};
+        std::array<u64, MAX_COLOR_TARGETS + 1> ids{};
+        u32 width{};
+        u32 height{};
+        u32 layers{};
+        bool operator==(const FramebufferKey&) const = default;
+    };
+    struct FramebufferKeyHash {
+        size_t operator()(const FramebufferKey& key) const noexcept;
+    };
+    struct FramebufferEntry {
+        std::shared_ptr<vk::Framebuffer> framebuffer;
+        u64 last_use{};
+    };
+    std::unordered_map<FramebufferKey, FramebufferEntry, FramebufferKeyHash> framebuffers;
+    u64 framebuffer_tick{};
+    u64 framebuffer_hits{};
+    u64 framebuffer_creates{};
+    /// The framebuffer of `key`, from the cache or created (and cached unless EDEN_NVN_FB_CACHE=0).
+    /// The caller keeps the returned reference alive for the submission (its keepalive).
+    /// Throws vk::Exception when creation fails.
+    std::shared_ptr<vk::Framebuffer> GetFramebuffer(const FramebufferKey& key,
+                                                    std::span<const VkImageView> views);
 
     // --- feedback copies (a texture sampled while it is a render target of the draw) ---
     struct Scratch {

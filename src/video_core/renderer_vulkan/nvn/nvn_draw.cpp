@@ -1273,9 +1273,11 @@ bool DrawContext::BeginPass() {
     const ReplayPhases::Scope framebuffer_phase{ReplayPhases::Phase::PassFramebuffer};
 
     // The views need the images, which exist now.
+    std::array<u64, MAX_COLOR_TARGETS + 1> attachment_view_ids{};
     for (u32 i = 0; i < attachment_count; ++i) {
         Attachment& attachment = attachments[i];
-        attachment.view = resources.GetView(*attachment.texture, attachment.shape.key);
+        attachment.view =
+            resources.GetView(*attachment.texture, attachment.shape.key, &attachment_view_ids[i]);
         if (!attachment.view) {
             host->HostFailed("SetRenderTargets",
                              fmt::format("no image view for {:#x}", attachment.texture->serial));
@@ -1292,23 +1294,25 @@ bool DrawContext::BeginPass() {
         host->HostFailed("SetRenderTargets", "render pass creation failed");
         return false;
     }
+    DrawResources::FramebufferKey fb_key{};
+    fb_key.render_pass = render_pass;
+    fb_key.count = attachment_count;
     std::array<VkImageView, MAX_COLOR_TARGETS + 1> views{};
     for (u32 i = 0; i < attachment_count; ++i) {
         views[i] = attachments[i].view;
+        fb_key.ids[i] = attachment_view_ids[i];
     }
+    fb_key.width = extent.width;
+    fb_key.height = extent.height;
+    fb_key.layers = layers;
     try {
-        ReplayPhases::Count(ReplayPhases::Counter::Framebuffers);
-        auto framebuffer = std::make_shared<vk::Framebuffer>(device.GetLogical().CreateFramebuffer({
-            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .renderPass = render_pass,
-            .attachmentCount = attachment_count,
-            .pAttachments = views.data(),
-            .width = extent.width,
-            .height = extent.height,
-            .layers = layers,
-        }));
+        // (The counter counts framebuffers created: a cached one is not.)
+        const u64 creates_before = resources.framebuffer_creates;
+        auto framebuffer =
+            resources.GetFramebuffer(fb_key, std::span<const VkImageView>(views.data(), attachment_count));
+        if (resources.framebuffer_creates != creates_before) {
+            ReplayPhases::Count(ReplayPhases::Counter::Framebuffers);
+        }
         const VkRenderPassBeginInfo begin{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .pNext = nullptr,

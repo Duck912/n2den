@@ -654,6 +654,71 @@ std::vector<vk::ImageView> DrawResources::TakeStorageViews(const Storage& storag
     return taken;
 }
 
+size_t DrawResources::FramebufferKeyHash::operator()(const FramebufferKey& key) const noexcept {
+    u64 h = reinterpret_cast<u64>(key.render_pass) * 0x9E3779B97F4A7C15ULL;
+    const auto mix = [&h](u64 v) { h = (h ^ v) * 0x100000001B3ULL + (h >> 29); };
+    for (u32 i = 0; i < key.count; ++i) {
+        mix(key.ids[i]);
+    }
+    mix(static_cast<u64>(key.width) << 32 | key.height);
+    mix(static_cast<u64>(key.layers) << 8 | key.count);
+    return static_cast<size_t>(h);
+}
+
+std::shared_ptr<vk::Framebuffer> DrawResources::GetFramebuffer(const FramebufferKey& key,
+                                                               std::span<const VkImageView> views) {
+    static const bool fb_cache = [] {
+        const char* env = std::getenv("EDEN_NVN_FB_CACHE");
+        const bool on = env == nullptr || env[0] != '0';
+        if (!on) {
+            LOG_INFO(Render_Vulkan, "[nvn] EDEN_NVN_FB_CACHE=0: a framebuffer per render pass");
+        }
+        return on;
+    }();
+    const u64 tick = ++framebuffer_tick;
+    if ((tick & 0x7FFF) == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] framebuffer cache: {} entries, {} hits, {} created; image views: {} "
+                 "shared hits, {} created",
+                 framebuffers.size(), framebuffer_hits, framebuffer_creates, view_cache_hits,
+                 view_cache_creates);
+    }
+    if (fb_cache) {
+        if (const auto it = framebuffers.find(key); it != framebuffers.end()) {
+            ++framebuffer_hits;
+            it->second.last_use = tick;
+            return it->second.framebuffer;
+        }
+    }
+    ++framebuffer_creates;
+    auto framebuffer = std::make_shared<vk::Framebuffer>(impl.device.GetLogical().CreateFramebuffer({
+        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .renderPass = key.render_pass,
+        .attachmentCount = static_cast<u32>(views.size()),
+        .pAttachments = views.data(),
+        .width = key.width,
+        .height = key.height,
+        .layers = key.layers,
+    }));
+    if (fb_cache) {
+        // Bounded: once the cache is large, entries unused for the last 64k pass begins go (the
+        // submissions that used them hold references of their own).
+        constexpr size_t MAX_FRAMEBUFFERS = 2048;
+        if (framebuffers.size() >= MAX_FRAMEBUFFERS) {
+            std::erase_if(framebuffers, [tick](const auto& entry) {
+                return entry.second.last_use + 65536 < tick;
+            });
+            if (framebuffers.size() >= MAX_FRAMEBUFFERS) {
+                framebuffers.clear();
+            }
+        }
+        framebuffers.emplace(key, FramebufferEntry{framebuffer, tick});
+    }
+    return framebuffer;
+}
+
 std::shared_ptr<TextureViews> DrawResources::TakeViews(u64 serial) {
     // Called for every destroyed texture: the pool set drops what names it.
     NoteViewsReleased(serial);
