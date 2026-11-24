@@ -37,6 +37,7 @@ add_executable(tests
     video_core/pending_download.cpp
     video_core/memory_tracker.cpp
     video_core/astc_classify.cpp
+    video_core/shader_attributes.cpp
     nvn/record_ahead.cpp
     input_common/calibration_configuration_job.cpp
 )
