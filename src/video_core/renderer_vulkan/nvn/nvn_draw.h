@@ -757,6 +757,9 @@ private:
     bool PushPlan(PipelineBase& pipeline, DrawPlan& plan, VkPipelineBindPoint bind_point);
     /// PushPlan's set 0 (pushed or allocated) and push constants.
     bool PushSetZero(PipelineBase& pipeline, DrawPlan& plan, VkPipelineBindPoint bind_point);
+    /// EDEN_NVN_DESC_WHY=1: counts why a graphics draw's set 0 is pushed again (replay phases).
+    static bool DescWhyEnabled();
+    void DescWhyNote(const PipelineBase& pipeline, bool comparable);
     VkDescriptorSet AllocateSet(VkDescriptorSetLayout layout);
     /// Texture pool lookups (DescriptorLayout::UsesTexturePool, nvn_texture_pool.h). Phase A:
     /// resolves the marked elements again when the pool set's generation moved (new marks once

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 
@@ -2432,6 +2433,127 @@ bool DrawContext::PushPlan(PipelineBase& pipe, DrawPlan& plan, VkPipelineBindPoi
     return true;
 }
 
+bool DrawContext::DescWhyEnabled() {
+    // EDEN_NVN_DESC_WHY=1 (with EDEN_NVN_REPLAY_PHASES=1): per frame, why graphics draws push
+    // their set 0 again (the why-* counters of the replay phases line).
+    static const bool enabled = [] {
+        const char* env = std::getenv("EDEN_NVN_DESC_WHY");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled && ReplayPhases::Enabled();
+}
+
+void DrawContext::DescWhyNote(const PipelineBase& pipe, bool comparable) {
+    using C = ReplayPhases::Counter;
+    // What each buffer element of the writes is (BuildDescriptors' order), and what fed it.
+    struct Last {
+        std::vector<PassBoundState::WriteSig> writes;
+        std::vector<VkDescriptorBufferInfo> buffers;
+        std::vector<PassBoundState::ImageSig> images;
+        std::vector<u64> inputs;
+        std::vector<u8> roles;
+    };
+    static Last last;          // the last push
+    static VkPipelineLayout last_layout = VK_NULL_HANDLE;
+    static std::unordered_map<VkPipelineLayout, Last> by_layout;
+    enum Role : u8 { Uniform, Storage, Driver, Handle, Other };
+    Last now;
+    now.writes = scratch_write_sigs;
+    now.buffers = scratch_buffers;
+    now.images = scratch_image_sigs;
+    for (const VC::DescriptorBinding& binding : pipe.descriptors.bindings) {
+        const u32 stage = static_cast<u32>(binding.stage);
+        if (binding.kind == VC::DescriptorKind::UniformBuffer) {
+            for (u32 i = 0; i < binding.count; ++i) {
+                switch (binding.role) {
+                case VC::DescriptorRole::DriverBank:
+                    now.roles.push_back(Driver);
+                    now.inputs.push_back(storage_gen[stage] * 31 + push_gen[0]);
+                    break;
+                case VC::DescriptorRole::HandleTable:
+                    now.roles.push_back(Handle);
+                    now.inputs.push_back(handle_gen[stage]);
+                    break;
+                case VC::DescriptorRole::ProgramConstants:
+                    now.roles.push_back(Other);
+                    now.inputs.push_back(0);
+                    break;
+                default: {
+                    const u32 slot = binding.slot + i;
+                    const BufferBinding b = slot < stages[stage].uniform.size()
+                                                ? stages[stage].uniform[slot]
+                                                : BufferBinding{};
+                    now.roles.push_back(slot == VC::PushConstantSlot && (b.address == 0 || b.size == 0)
+                                            ? Other
+                                            : Uniform);
+                    now.inputs.push_back(b.address ^ (b.size << 48));
+                    break;
+                }
+                }
+            }
+        } else if (binding.kind == VC::DescriptorKind::StorageBuffer) {
+            for (u32 i = 0; i < binding.count; ++i) {
+                now.roles.push_back(Storage);
+                now.inputs.push_back(0);
+            }
+        }
+    }
+    const auto same_buffers = [](const std::vector<VkDescriptorBufferInfo>& a,
+                                 const std::vector<VkDescriptorBufferInfo>& b) {
+        return a.size() == b.size() &&
+               (a.empty() ||
+                std::memcmp(a.data(), b.data(), a.size() * sizeof(VkDescriptorBufferInfo)) == 0);
+    };
+    const VkPipelineLayout layout = *pipe.layout;
+    if (const auto it = by_layout.find(layout); it != by_layout.end()) {
+        if (it->second.writes == now.writes && same_buffers(it->second.buffers, now.buffers) &&
+            it->second.images == now.images) {
+            ReplayPhases::Count(C::SameLayoutLast);
+        }
+    }
+    const bool same_all = comparable && last_layout == layout && last.writes == now.writes &&
+                          same_buffers(last.buffers, now.buffers) && last.images == now.images;
+    if (!comparable) {
+        ReplayPhases::Count(C::WhyTexel);
+    } else if (same_all) {
+        if (!bound_state.HasDescriptors()) {
+            ReplayPhases::Count(C::WhyFirst); // (else: elided)
+        }
+    } else if (last_layout != layout) {
+        ReplayPhases::Count(C::WhyLayout);
+    } else if (last.writes != now.writes) {
+        ReplayPhases::Count(C::WhyWrites);
+    } else if (!same_buffers(last.buffers, now.buffers)) {
+        // The first differing element's role decides.
+        C reason = C::WhyOtherBuf;
+        const size_t n = (std::min)(now.buffers.size(), last.buffers.size());
+        for (size_t i = 0; i < n; ++i) {
+            if (std::memcmp(&now.buffers[i], &last.buffers[i], sizeof(VkDescriptorBufferInfo)) ==
+                0) {
+                continue;
+            }
+            const u8 role = i < now.roles.size() ? now.roles[i] : Other;
+            const bool input_same = i < now.inputs.size() && i < last.inputs.size() &&
+                                    now.inputs[i] == last.inputs[i];
+            reason = role == Uniform  ? (input_same ? C::WhyUniformCopy : C::WhyUniformAddr)
+                     : role == Storage ? C::WhyStorage
+                     : role == Driver  ? C::WhyDriverBank
+                     : role == Handle  ? C::WhyHandleBank
+                                       : C::WhyOtherBuf;
+            break;
+        }
+        ReplayPhases::Count(reason);
+    } else {
+        ReplayPhases::Count(C::WhyImages);
+    }
+    if (by_layout.size() > 4096) {
+        by_layout.clear();
+    }
+    by_layout[layout] = now;
+    last = std::move(now);
+    last_layout = layout;
+}
+
 bool DrawContext::PushSetZero(PipelineBase& pipe, DrawPlan& plan, VkPipelineBindPoint bind_point) {
     vk::CommandBuffer cmd = host->HostCmd();
     if (cs_mode == CostSplit::Mode::NoBind && bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS &&
@@ -2477,6 +2599,9 @@ bool DrawContext::PushSetZero(PipelineBase& pipe, DrawPlan& plan, VkPipelineBind
     if (scratch_writes.empty() || !pipe.set_layout) {
         return true;
     }
+    if (!track && bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS && DescWhyEnabled()) [[unlikely]] {
+        ReplayPhases::Count(ReplayPhases::Counter::WhyUntracked);
+    }
     if (track) {
         bool comparable = true;
         scratch_write_sigs.clear();
@@ -2488,6 +2613,9 @@ bool DrawContext::PushSetZero(PipelineBase& pipe, DrawPlan& plan, VkPipelineBind
         scratch_image_sigs.clear();
         for (const VkDescriptorImageInfo& info : scratch_images) {
             scratch_image_sigs.push_back({info.sampler, info.imageView, info.imageLayout});
+        }
+        if (DescWhyEnabled()) [[unlikely]] {
+            DescWhyNote(pipe, comparable);
         }
         if (!comparable) {
             bound_state.ForgetDescriptors();

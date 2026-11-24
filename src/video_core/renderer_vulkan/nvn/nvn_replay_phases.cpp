@@ -36,7 +36,9 @@ constexpr std::array<const char*, static_cast<size_t>(Counter::Count)> COUNTER_N
     "draws",        "conditional",  "passes",        "framebuffers", "pipeline-reuses",
     "driver-banks", "handle-banks", "push-desc",     "desc-elided",  "pool-set-binds",
     "mirror-pages", "mirror-calls", "pipeline-memo-hits", "pipeline-lookups",
-    "mirror-walked",
+    "mirror-walked", "why-untracked", "why-texel", "why-first", "why-layout", "why-writes",
+    "why-images", "why-ubo-addr", "why-ubo-copy", "why-storage", "why-driver-bank",
+    "why-handle-bank", "why-other-buf", "same-layout-last",
 };
 
 constexpr auto LOG_INTERVAL = std::chrono::seconds{9}; // the heartbeat asks every 10 s

@@ -180,6 +180,10 @@ public:
         descriptors_ = layout == layout_;
         return false;
     }
+    /// Descriptors of the bound layout are known (EDEN_NVN_DESC_WHY diagnostics).
+    [[nodiscard]] bool HasDescriptors() const noexcept {
+        return descriptors_;
+    }
     /// The next descriptor push is not comparable (a write carries texel buffer views).
     void ForgetDescriptors() noexcept {
         descriptors_ = false;

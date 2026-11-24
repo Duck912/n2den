@@ -106,6 +106,21 @@ enum class Counter : u8 {
     PipelineMemoHits,///< ResolvePipeline found the pipeline in its memo
     PipelineLookups, ///< ResolvePipeline asked the pipeline cache
     MirrorWalked,    ///< of MirrorPages, those walked (outside the clean-range memo)
+    // EDEN_NVN_DESC_WHY=1: why a graphics draw's set 0 was not elided (one reason per draw), and
+    // how many draws push exactly what the last draw of the same pipeline layout pushed.
+    WhyUntracked,    ///< no state tracking (no open pass, or EDEN_NX2_NVN_NO_STATE_ELIDE)
+    WhyTexel,        ///< a write carries texel buffer views (not comparable)
+    WhyFirst,        ///< nothing comparable bound (pass begin / forgotten), same layout as last
+    WhyLayout,       ///< the last push was for another pipeline layout
+    WhyWrites,       ///< same layout, other write signatures
+    WhyImages,       ///< same layout and buffers, other image views / samplers / layouts
+    WhyUniformAddr,  ///< a game uniform buffer binding moved (address or size)
+    WhyUniformCopy,  ///< same game uniform binding, other host range (arena / snapshot copy)
+    WhyStorage,      ///< a storage buffer range differs
+    WhyDriverBank,   ///< the driver bank (c0) copy differs
+    WhyHandleBank,   ///< the handle bank (c2) copy differs
+    WhyOtherBuf,     ///< program constants / push constant bank differ
+    SameLayoutLast,  ///< exactly what the last push of this pipeline layout had
     Count,
 };
 
