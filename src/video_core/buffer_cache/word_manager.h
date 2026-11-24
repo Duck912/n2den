@@ -115,10 +115,14 @@ struct WordManager {
     /// @param enable        If enabling or disabling
     /// @param dirty_addr    Base address to mark or unmark as modified
     /// @param size          Size in bytes to mark or unmark as modified
+    /// @param newly_set     When not null, set to true if a CPU or untracked bit went from 0 to 1
+    ///                      (what can make a range need an upload or a tracker update again)
     /// @return Whether a bit of `type` changed (statistics)
-    bool ChangeRegionState(Type type, bool enable, u64 dirty_addr, u64 size) noexcept {
+    bool ChangeRegionState(Type type, bool enable, u64 dirty_addr, u64 size,
+                           bool* newly_set = nullptr) noexcept {
         std::span<u64> state_words = Span(type);
         bool changed = false;
+        bool set_bits = false;
         [[maybe_unused]] std::span<u64> untracked_words = Span(Type::Untracked);
         [[maybe_unused]] std::span<u64> cached_words = Span(Type::CachedCPU);
         std::vector<std::pair<VAddr, u64>> ranges;
@@ -129,6 +133,11 @@ struct WordManager {
             changed |= enable ? (state_words[index] & mask) != mask
                               : (state_words[index] & mask) != 0;
             if (enable) {
+                if (type == Type::CPU) {
+                    set_bits |= ((~state_words[index] | ~untracked_words[index]) & mask) != 0;
+                } else if (type == Type::CachedCPU) {
+                    set_bits |= (~untracked_words[index] & mask) != 0;
+                }
                 state_words[index] |= mask;
                 if (type == Type::CPU || type == Type::CachedCPU)
                     untracked_words[index] |= mask;
@@ -144,6 +153,9 @@ struct WordManager {
         });
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, (!enable) ? 1 : -1);
+        }
+        if (newly_set) {
+            *newly_set = set_bits;
         }
         return changed;
     }
@@ -256,13 +268,16 @@ struct WordManager {
             : std::make_pair<u64, u64>(0, 0);
     }
 
-    void FlushCachedWrites() noexcept {
+    /// @return Whether a CPU or untracked bit went from 0 to 1
+    bool FlushCachedWrites() noexcept {
         auto const cached_words = Span(Type::CachedCPU);
         auto const untracked_words = Span(Type::Untracked);
         auto const cpu_words = Span(Type::CPU);
         std::vector<std::pair<VAddr, u64>> ranges;
+        bool set_bits = false;
         for (u64 word_index = 0; word_index < num_words; ++word_index) {
             const u64 cached_bits = cached_words[word_index];
+            set_bits |= (cached_bits & ~(cpu_words[word_index] & untracked_words[word_index])) != 0;
             CollectChangedRanges(false, word_index, untracked_words[word_index], cached_bits, ranges);
             untracked_words[word_index] |= cached_bits;
             cpu_words[word_index] |= cached_bits;
@@ -271,6 +286,7 @@ struct WordManager {
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, -1);
         }
+        return set_bits;
     }
 
     /// @brief Notify tracker about changes in the CPU tracking state of a word in the buffer
@@ -335,7 +351,7 @@ struct WordManager {
     std::array<u64, size_t(Type::Max) * num_words> heap = {};
     DeviceTracker* tracker = nullptr;
     VAddr cpu_addr = 0;
-    u64 cpu_epoch = 0; ///< MemoryTrackerBase::CpuEpoch() when a bit may last have been set here
+    u64 cpu_epoch = 0; ///< MemoryTrackerBase::CpuEpoch() when a CPU or untracked bit was last set here
 };
 
 } // namespace VideoCommon

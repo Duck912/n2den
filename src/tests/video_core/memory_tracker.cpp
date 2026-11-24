@@ -600,6 +600,38 @@ TEST_CASE("MemoryTracker: CPU epoch tells whether a synchronized range can have 
     REQUIRE(!memory_track->IsRegionCpuUnchangedSince(c, WORD, resynced));
 }
 
+TEST_CASE("MemoryTracker: CPU epoch is raised only when a bit becomes set", "[video_core]") {
+    RasterizerInterface rasterizer;
+    std::optional<MemoryTracker> memory_track(rasterizer);
+    // A new region starts with every page CPU modified; synchronize all of it.
+    memory_track->ForEachUploadRange(c, HIGH_PAGE_SIZE, [](u64, u64) {});
+    memory_track->MarkRegionAsCpuModified(c + WORD * 2, PAGE);
+    memory_track->ForEachUploadRange(c, WORD, [](u64, u64) {});
+    const u64 synced = memory_track->CpuEpoch();
+    REQUIRE(memory_track->IsRegionCpuUnchangedSince(c, WORD, synced));
+    // Writes and cached writes to a page already marked set nothing new.
+    memory_track->MarkRegionAsCpuModified(c + WORD * 2, PAGE);
+    memory_track->CachedCpuWrite(c + WORD * 2, PAGE);
+    memory_track->FlushCachedWrites();
+    REQUIRE(memory_track->IsRegionCpuUnchangedSince(c, WORD, synced));
+    // The memo's promise still holds: nothing to upload in the synchronized range.
+    bool uploads = false;
+    memory_track->ForEachCpuModifiedRange(c, WORD, [&uploads](u64, u64) { uploads = true; });
+    REQUIRE(!uploads);
+    // A write to a clean page raises it.
+    memory_track->MarkRegionAsCpuModified(c + PAGE, PAGE);
+    REQUIRE(!memory_track->IsRegionCpuUnchangedSince(c, WORD, synced));
+    // A cached write to a clean page raises it (its page becomes untracked)...
+    memory_track->ForEachUploadRange(c, WORD, [](u64, u64) {});
+    const u64 resynced = memory_track->CpuEpoch();
+    memory_track->CachedCpuWrite(c + PAGE, PAGE);
+    REQUIRE(!memory_track->IsRegionCpuUnchangedSince(c, WORD, resynced));
+    // ...and so does flushing it, since its CPU bit becomes set.
+    const u64 cached = memory_track->CpuEpoch();
+    memory_track->FlushCachedWrites();
+    REQUIRE(!memory_track->IsRegionCpuUnchangedSince(c, WORD, cached));
+}
+
 TEST_CASE("DeviceMemoryManager: UpdatePagesCachedBatch basic") {
     Core::DeviceMemory device_memory;
     Tegra::MaxwellDeviceMemoryManager manager(device_memory);

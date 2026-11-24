@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <type_traits>
@@ -36,8 +37,10 @@ public:
     MemoryTrackerBase(DeviceTracker& device_tracker_) : device_tracker{&device_tracker_} {}
     ~MemoryTrackerBase() = default;
 
-    /// Counter raised whenever a CPU, cached CPU or untracked bit may become set in a region
-    /// (each region keeps the value of its last raise). Lowering bits never raises it.
+    /// Counter raised whenever a CPU or untracked bit goes from 0 to 1 in a region (each region
+    /// keeps the value of its last raise). Lowering bits never raises it, and neither does a write
+    /// to pages already marked (most inline constant buffer writes). EDEN_SYNC_MEMO_EXACT=0 raises
+    /// it on every mark instead, set or not.
     [[nodiscard]] u64 CpuEpoch() const noexcept {
         return cpu_epoch;
     }
@@ -101,8 +104,12 @@ public:
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
         bool changed = false;
         IteratePages<true>(dirty_cpu_addr, query_size, [this, &changed](Manager* manager, u64 offset, size_t size) {
-            manager->cpu_epoch = ++cpu_epoch;
-            changed |= manager->ChangeRegionState(Type::CPU, true, manager->cpu_addr + offset, size);
+            bool newly_set = true;
+            changed |= manager->ChangeRegionState(Type::CPU, true, manager->cpu_addr + offset, size,
+                                                  exact_epoch ? &newly_set : nullptr);
+            if (newly_set) {
+                manager->cpu_epoch = ++cpu_epoch;
+            }
         });
         if (VideoCommon::SyncCounters::Enabled()) {
             VideoCommon::SyncCounters::Add(changed ? VideoCommon::SyncCounters::CpuMarkChanged
@@ -150,8 +157,12 @@ public:
     void CachedCpuWrite(VAddr dirty_cpu_addr, u64 query_size) {
         IteratePages<true>(dirty_cpu_addr, query_size, [this](Manager* manager, u64 offset, size_t size) {
             const VAddr cpu_address = manager->cpu_addr + offset;
-            manager->cpu_epoch = ++cpu_epoch;
-            manager->ChangeRegionState(Type::CachedCPU, true, cpu_address, size);
+            bool newly_set = true;
+            manager->ChangeRegionState(Type::CachedCPU, true, cpu_address, size,
+                                       exact_epoch ? &newly_set : nullptr);
+            if (newly_set) {
+                manager->cpu_epoch = ++cpu_epoch;
+            }
             cached_pages.insert(u32(cpu_address >> HIGHER_PAGE_BITS));
         });
     }
@@ -159,15 +170,17 @@ public:
     /// Flushes cached CPU writes, and notify the device_tracker about the deltas
     void FlushCachedWrites(VAddr query_cpu_addr, u64 query_size) noexcept {
         IteratePages<false>(query_cpu_addr, query_size, [this](Manager* manager, [[maybe_unused]] u64 offset, [[maybe_unused]] size_t size) {
-            manager->cpu_epoch = ++cpu_epoch;
-            manager->FlushCachedWrites();
+            if (manager->FlushCachedWrites() || !exact_epoch) {
+                manager->cpu_epoch = ++cpu_epoch;
+            }
         });
     }
 
     void FlushCachedWrites() noexcept {
         for (auto id : cached_pages) {
-            top_tier[id]->cpu_epoch = ++cpu_epoch;
-            top_tier[id]->FlushCachedWrites();
+            if (top_tier[id]->FlushCachedWrites() || !exact_epoch) {
+                top_tier[id]->cpu_epoch = ++cpu_epoch;
+            }
         }
         cached_pages.clear();
     }
@@ -305,6 +318,11 @@ private:
     ::Common::unordered_set<u32> cached_pages;
     DeviceTracker* device_tracker = nullptr;
     u64 cpu_epoch = 1;
+    /// Raise a region's epoch only when a bit is really set (EDEN_SYNC_MEMO_EXACT, default on)
+    const bool exact_epoch = [] {
+        const char* const value = std::getenv("EDEN_SYNC_MEMO_EXACT");
+        return !(value && value[0] == '0');
+    }();
 };
 
 } // namespace VideoCommon
