@@ -12,6 +12,9 @@
 #include <optional>
 #include <bit>
 #include <chrono>
+#include <string>
+#include <unordered_map>
+#include <algorithm>
 #include <cstdlib>
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
@@ -27,6 +30,7 @@
 #include "video_core/late_write_trace.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/texture_cache/big_image_trace.h"
+#include "video_core/texture_cache/formatter.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/compact_texture_table.h"
 #include "video_core/texture_cache/lookup_memo.h"
@@ -44,6 +48,51 @@ using VideoCore::Surface::GetFormatType;
 using VideoCore::Surface::PixelFormat;
 using VideoCore::Surface::SurfaceType;
 using namespace Common::Literals;
+
+// [DEBUG] EDEN_NX2_TRACE_ALIAS_COPIES=1: tallies SynchronizeAliases copies per (destination,
+// source) image pair and logs the top 20 pairs about every 2 s with both images' description and
+// the role each was last prepared in (render target / sampled).
+namespace AliasCopyTrace {
+inline const bool enabled = std::getenv("EDEN_NX2_TRACE_ALIAS_COPIES") != nullptr;
+struct Entry {
+    u64 count = 0;
+    u64 copies = 0;
+    u64 rt_ctx = 0;   ///< destination synced while being prepared as a render target
+    u64 tex_ctx = 0;  ///< ... while being prepared for reading
+    std::string desc;
+};
+inline std::unordered_map<u64, Entry> pairs;
+inline std::unordered_map<u32, u32> roles; ///< image index -> bit0 RT, bit1 read
+inline bool current_is_modification = false;
+inline u64 total = 0;
+inline u64 unmarked_targets = 0; ///< bound targets a draw left unmarked (EDEN_NX2_ALIAS_FIX)
+inline std::chrono::steady_clock::time_point last_dump = std::chrono::steady_clock::now();
+inline void Dump() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_dump < std::chrono::seconds(2)) {
+        return;
+    }
+    const double secs = std::chrono::duration<double>(now - last_dump).count();
+    last_dump = now;
+    std::vector<std::pair<u64, Entry*>> sorted;
+    for (auto& [key, entry] : pairs) {
+        sorted.emplace_back(key, &entry);
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto& a, const auto& b) { return a.second->count > b.second->count; });
+    LOG_INFO(HW_GPU, "AliasCopyTrace: {} syncs in {:.1f}s ({} pairs), {} bound targets left unmarked",
+             total, secs, sorted.size(), unmarked_targets);
+    unmarked_targets = 0;
+    for (size_t i = 0; i < sorted.size() && i < 20; ++i) {
+        const Entry& e = *sorted[i].second;
+        LOG_INFO(HW_GPU, "AliasCopyTrace #{} n={} regions={} dstctx(rt={},read={}) dst={:#x} src={:#x} {}",
+                 i, e.count, e.copies, e.rt_ctx, e.tex_ctx, static_cast<u32>(sorted[i].first >> 32),
+                 static_cast<u32>(sorted[i].first), e.desc);
+    }
+    pairs.clear();
+    total = 0;
+}
+} // namespace AliasCopyTrace
 
 template <class P>
 TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManager& device_memory_)
@@ -793,13 +842,51 @@ template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
     auto& flags = maxwell3d->dirty.flags;
+    // A draw marks only the render targets it can write as modified. Marking every bound target
+    // made each draw that samples another (aliased) image of a bound target's memory copy it back
+    // in: Bananza samples a 2095-wide R16_FLOAT target and its depth buffer while they are bound
+    // (as 2112- and 2096-wide images) without being written, ~100 + ~70 copies a frame, each
+    // ending the render pass.
+    // Opt-in (EDEN_NX2_ALIAS_FIX=1): pass ends drop from ~350 to ~200 a frame, fps unchanged.
+    static const bool alias_fix = [] {
+        const char* const value = std::getenv("EDEN_NX2_ALIAS_FIX");
+        return value && value[0] == '1';
+    }();
+    const bool use_hint = alias_fix && rt_write_hint_valid && !is_clear;
+    rt_write_hint_valid = false;
+    u32 written_mask = (1U << (NUM_RT + 1)) - 1;
+    if (use_hint) {
+        const auto& wregs = maxwell3d->regs;
+        written_mask = 0;
+        for (size_t index = 0; index < NUM_RT; ++index) {
+            const auto& mask = wregs.color_mask[wregs.color_mask_common ? 0 : index];
+            if (((rt_write_hint >> index) & 1) != 0 && (mask.R || mask.G || mask.B || mask.A)) {
+                written_mask |= 1U << index;
+            }
+        }
+        const bool depth_writes = wregs.depth_test_enable != 0 && wregs.depth_write_enabled != 0;
+        const bool stencil_writes =
+            wregs.stencil_enable != 0 &&
+            (wregs.stencil_front_mask != 0 ||
+             (wregs.stencil_two_side_enable != 0 && wregs.stencil_back_mask != 0));
+        if (depth_writes || stencil_writes) {
+            written_mask |= 1U << NUM_RT;
+        }
+        if (AliasCopyTrace::enabled) {
+            AliasCopyTrace::unmarked_targets +=
+                std::popcount(static_cast<u32>(~written_mask & rt_active_mask));
+        }
+    }
+    const auto is_written = [written_mask](size_t index) { return ((written_mask >> index) & 1) != 0; };
     if (!flags[Dirty::RenderTargets]) {
         for (size_t index = 0; index < NUM_RT; ++index) {
             ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
-            PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
+            PrepareImageView(color_buffer_id, is_written(index),
+                             is_clear && IsFullClear(color_buffer_id));
         }
         const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
-        PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+        PrepareImageView(depth_buffer_id, is_written(NUM_RT),
+                         is_clear && IsFullClear(depth_buffer_id));
         return;
     }
 
@@ -833,7 +920,7 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
                          clear_regs.clear_surface.G && clear_regs.clear_surface.B &&
                          clear_regs.clear_surface.A;
         }
-        PrepareImageView(color_buffer_id, true, invalidate);
+        PrepareImageView(color_buffer_id, is_written(index), invalidate);
     }
     const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
 
@@ -843,7 +930,7 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
         const bool has_stencil = GetFormatType(depth_image.info.format) == SurfaceType::DepthStencil;
         depth_invalidate = clear_regs.clear_surface.Z && (!has_stencil || clear_regs.clear_surface.S);
     }
-    PrepareImageView(depth_buffer_id, true, depth_invalidate);
+    PrepareImageView(depth_buffer_id, is_written(NUM_RT), depth_invalidate);
     deferred_rt_images.clear();
 
     rt_active_mask = 0;
@@ -3246,6 +3333,34 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
         const ImageBase& rhs_image = slot_images[rhs->id];
         return lhs_image.modification_tick < rhs_image.modification_tick;
     });
+    if (AliasCopyTrace::enabled) {
+        const auto describe = [this](ImageId id) {
+            const ImageBase& im = slot_images[id];
+            const auto& c = im.info;
+            return fmt::format("[{:#x} {} {} {}x{}x{} L{} M{} S{} bpb{} role{} size{:#x} tick{}]", im.gpu_addr,
+                               c.format, c.type, c.size.width, c.size.height, c.size.depth,
+                               c.resources.layers, c.resources.levels, c.num_samples,
+                               VideoCore::Surface::BytesPerBlock(c.format),
+                               AliasCopyTrace::roles[id.index], im.guest_size_bytes,
+                               im.modification_tick);
+        };
+        for (const AliasedImage* const aliased : aliased_images) {
+            const u64 key = (u64{image_id.index} << 32) | aliased->id.index;
+            auto& e = AliasCopyTrace::pairs[key];
+            if (e.count == 0) {
+                const auto& cp = aliased->copies.front();
+                e.desc = fmt::format("dst{} <- src{} first[{}x{}x{} dl{} sl{} nl{}]", describe(image_id),
+                                     describe(aliased->id), cp.extent.width, cp.extent.height,
+                                     cp.extent.depth, cp.dst_subresource.base_level,
+                                     cp.src_subresource.base_level, cp.src_subresource.num_layers);
+            }
+            ++e.count;
+            e.copies += aliased->copies.size();
+            ++(AliasCopyTrace::current_is_modification ? e.rt_ctx : e.tex_ctx);
+            ++AliasCopyTrace::total;
+        }
+        AliasCopyTrace::Dump();
+    }
     const auto& resolution = Settings::values.resolution_info;
     for (const AliasedImage* const aliased : aliased_images) {
         if (!resolution.active || !any_rescaled) {
@@ -3266,6 +3381,10 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
 template <class P>
 void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool invalidate) {
     Image& image = slot_images[image_id];
+    if (AliasCopyTrace::enabled) {
+        AliasCopyTrace::current_is_modification = is_modification;
+        AliasCopyTrace::roles[image_id.index] |= is_modification ? 1U : 2U;
+    }
     if (invalidate) {
         image.flags &= ~(ImageFlagBits::CpuModified | ImageFlagBits::GpuModified);
         if (False(image.flags & ImageFlagBits::Tracked)) {

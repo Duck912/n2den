@@ -1589,6 +1589,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             texture_pool->Update(texture_cache, regs.tex_header.limit, regs.tex_sampler.limit);
         VideoCommon::BackStats::Mark(VideoCommon::BackStats::TexturePool);
     }
+    texture_cache.SetRenderTargetWriteHint(WrittenColorTargets());
     texture_cache.UpdateRenderTargets(false);
     VideoCommon::BackStats::Mark(VideoCommon::BackStats::RenderTargets);
     if (blocks_expanded) {

@@ -219,6 +219,14 @@ public:
     /// @param is_clear True when the render targets are being used for clears
     void UpdateRenderTargets(bool is_clear);
 
+    /// The next UpdateRenderTargets is for a draw whose pipeline outputs these color targets
+    /// (bit per attachment): targets the draw cannot write (no output, zero color mask, depth or
+    /// stencil writes off) are prepared without being marked modified (EDEN_NX2_ALIAS_FIX).
+    void SetRenderTargetWriteHint(u32 written_color_targets) noexcept {
+        rt_write_hint = written_color_targets;
+        rt_write_hint_valid = true;
+    }
+
     /// Find a framebuffer with the currently bound render targets
     /// UpdateRenderTargets should be called before this
     Framebuffer* GetFramebuffer();
@@ -530,6 +538,8 @@ private:
     RenderTargets render_targets;
     u64 render_targets_serial = 0;
     u32 rt_active_mask = 0;
+    u32 rt_write_hint = 0;
+    bool rt_write_hint_valid = false;
     std::array<ImageId, 8> rt_image_id{};
     ImageId rt_depth_image_id{};
     u64 texture_bindings_serial = 0;
