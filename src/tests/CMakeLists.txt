@@ -39,6 +39,7 @@ add_executable(tests
     video_core/memory_tracker.cpp
     video_core/astc_classify.cpp
     video_core/shader_attributes.cpp
+    video_core/syncpoint_actions.cpp
     nvn/record_ahead.cpp
     input_common/calibration_configuration_job.cpp
 )
