@@ -27,6 +27,8 @@ namespace VideoCommon {
 
 namespace {
 
+/// Front (statistics): when the last WaitForPosition that waited ended, until the next publish.
+u64 position_waited_stamp{};
 
 void Pause() {
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
@@ -229,7 +231,9 @@ void GpuSplit::WaitForSpace(size_t words) {
     }
     Publish();
     const VideoCommon::BackStats::ScopedSharedTime space_time{VideoCommon::BackStats::shared.space_ticks};
+    VideoCommon::BackStats::SetFrontState(VideoCommon::BackStats::FrontSpace);
     WaitForBack(4096, [&] { return write_position + words - consumed_cache <= RingWords; });
+    VideoCommon::BackStats::SetFrontState(VideoCommon::BackStats::FrontRunning);
 }
 
 template <typename Done>
@@ -289,6 +293,13 @@ void GpuSplit::Publish() {
         BackStats::Add(BackStats::shared.drain_to_publish_count, 1);
         drained_stamp = 0;
     }
+    if (position_waited_stamp != 0) {
+        namespace BackStats = VideoCommon::BackStats;
+        BackStats::Add(BackStats::shared.position_to_publish,
+                       BackStats::Stamp() - position_waited_stamp);
+        BackStats::Add(BackStats::shared.position_to_publish_count, 1);
+        position_waited_stamp = 0;
+    }
     published.store(write_position, std::memory_order_seq_cst);
     if (back_waiting.load(std::memory_order_seq_cst)) {
         if (VideoCommon::BackStats::Enabled()) {
@@ -311,7 +322,9 @@ void GpuSplit::Drain(u32 site) {
     namespace BackStats = VideoCommon::BackStats;
     const u64 drain_start = BackStats::Enabled() ? BackStats::Stamp() : 0;
     const u64 sleeps_before = front_sleeps;
+    BackStats::SetFrontState(BackStats::FrontDrain);
     WaitForBack(16384, [&] { return consumed_cache == write_position; });
+    BackStats::SetFrontState(BackStats::FrontRunning);
     if (drain_start != 0) {
         // Only the drain's own sleeps (WaitForSpace sleeps in WaitForBack too).
         BackStats::Add(BackStats::shared.front_slept, front_sleeps - sleeps_before);
@@ -338,7 +351,9 @@ void GpuSplit::WaitForWriters() {
     }
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();
+    VideoCommon::BackStats::SetFrontState(VideoCommon::BackStats::FrontWriters);
     WaitForBack(16384, [&] { return consumed_cache >= target; });
+    VideoCommon::BackStats::SetFrontState(VideoCommon::BackStats::FrontRunning);
     wait_target.store(~u64{0}, std::memory_order_relaxed);
 }
 
@@ -419,10 +434,27 @@ bool GpuSplit::WaitForPosition(u64 target) {
     if (consumed_cache >= target) {
         return false;
     }
+    namespace BackStats = VideoCommon::BackStats;
+    const u64 wait_start = BackStats::Enabled() ? BackStats::Stamp() : 0;
+    if (wait_start != 0) {
+        BackStats::Add(BackStats::shared.position_wait_lag, target - consumed_cache);
+        BackStats::Add(BackStats::shared.position_wait_ahead, write_position - target);
+        if (target == LastWriterTarget()) {
+            BackStats::Add(BackStats::shared.position_wait_writer, 1);
+        }
+        BackStats::SetFrontState(BackStats::FrontPosition);
+    }
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();
     WaitForBack(16384, [&] { return consumed_cache >= target; });
     wait_target.store(~u64{0}, std::memory_order_relaxed);
+    if (wait_start != 0) {
+        BackStats::SetFrontState(BackStats::FrontRunning);
+        const u64 now = BackStats::Stamp();
+        BackStats::Add(BackStats::shared.position_waits, 1);
+        BackStats::Add(BackStats::shared.position_wait_ticks, now - wait_start);
+        position_waited_stamp = now;
+    }
     return true;
 }
 
@@ -527,11 +559,13 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     namespace BackStats = VideoCommon::BackStats;
     u64 read_position = 0;
     u64 idle_start = BackStats::Enabled() ? BackStats::Stamp() : 0;
+    u32 idle_front = BackStats::FrontRunning; // The front's state when the ring ran dry
     while (!stop_token.stop_requested()) {
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             if (idle_start != 0) {
                 ++BackStats::draw_thread.back_idle_episodes;
+                ++BackStats::draw_thread.back_idle_count_by_front[idle_front];
             }
             // The front usually sends more within microseconds: spin briefly before sleeping.
             for (u32 spins = 0; spins < 8192 && available == read_position; ++spins) {
@@ -563,6 +597,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (idle_start != 0) {
             busy_start = BackStats::Stamp();
             BackStats::draw_thread.back_idle += busy_start - idle_start;
+            BackStats::draw_thread.back_idle_by_front[idle_front] += busy_start - idle_start;
             BackStats::draw_thread.back_loop = true;
         }
         u64 last_store = read_position;
@@ -596,6 +631,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (busy_start != 0) {
             idle_start = BackStats::Stamp();
             BackStats::draw_thread.back_busy += idle_start - busy_start;
+            idle_front = (std::min)(BackStats::shared.front_state.load(std::memory_order_relaxed), 6U);
         }
     }
 }

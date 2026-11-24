@@ -109,6 +109,12 @@ struct DrawThread {
     u64 back_slept{};         ///< ... and went to sleep after spinning
     u64 back_wake{};          ///< From the front's wake-up call to the back running again
     u64 back_wake_count{};
+    /// Back idle time and episodes by what the front was doing when the ring ran dry (FrontState).
+    std::array<u64, 7> back_idle_by_front{};
+    std::array<u64, 7> back_idle_count_by_front{};
+    /// Graphics uniform buffer binds: native root tables, streamed, cached (and of those, synced).
+    std::array<u64, 4> uniform_binds{};
+    std::array<u64, 3> uniform_bytes{};
     // Descriptors of graphics draws.
     std::array<u64, 4> paths{}; ///< Descriptor buffer, push descriptor, descriptor set, none
     u64 buffer_reused{};
@@ -262,6 +268,31 @@ struct Shared {
     /// Report slot reads that drained after all: no report noted, mapping, pending value, newer
     /// words in a cache.
     std::array<std::atomic<u64>, 4> macro_read_declined{};
+    /// What the front is doing (FrontState), for the back's idle attribution.
+    std::atomic<u32> front_state{};
+    // GpuSplit::WaitForPosition calls that waited (report slot reads of front macros): count,
+    // ticks, ring words the back still had to run to the target, words sent after the target,
+    // waits whose target was the last writer's position (compute, copy, inline) rather than a
+    // report's, and from the wait's end to the front's next publish.
+    std::atomic<u64> position_waits{};
+    std::atomic<u64> position_wait_ticks{};
+    std::atomic<u64> position_wait_lag{};
+    std::atomic<u64> position_wait_ahead{};
+    std::atomic<u64> position_wait_writer{};
+    std::atomic<u64> position_to_publish{};
+    std::atomic<u64> position_to_publish_count{};
+    /// Front macro memory reads by macro start address (key start + 1; the last slot takes the rest).
+    struct MacroReadTally {
+        std::atomic<u64> key{};
+        std::atomic<u64> reads{};
+        std::atomic<u64> fast{};
+        std::atomic<u64> waits{};
+        std::atomic<u64> wait_ticks{};
+        std::atomic<u64> writer_waits{};
+        std::atomic<u64> address{}; ///< The last address read
+        std::atomic<u64> words{};
+    };
+    std::array<MacroReadTally, 16> macro_read_tally{};
     // Handle program memo (shader_handle_program.h): results reused, programs run, and in
     // EDEN_N2DEN_HANDLE_MEMO=verify, reused results that differed from a fresh run.
     std::atomic<u64> handle_memo_hits{};
@@ -276,6 +307,17 @@ struct Shared {
     std::atomic<u64> space_ticks{};
 };
 extern Shared shared;
+
+/// What the split's front is doing (Shared::front_state).
+enum FrontState : u32 {
+    FrontRunning,   ///< Parsing, running macros, sending
+    FrontPosition,  ///< GpuSplit::WaitForPosition (a macro's report slot read)
+    FrontDrain,     ///< GpuSplit::Drain
+    FrontSpace,     ///< Waiting for ring space
+    FrontGuest,     ///< Waiting for guest submissions
+    FrontSuspended, ///< Sleeping with a native channel suspended
+    FrontWriters,   ///< GpuSplit::WaitForWriters
+};
 
 /// Callers of GpuSplit::Drain (the front waits for the back and the back then runs dry).
 enum DrainSite : u32 {
@@ -326,6 +368,39 @@ inline thread_local bool in_draw_lock{};
 
 inline void Add(std::atomic<u64>& counter, u64 value) {
     counter.fetch_add(value, std::memory_order_relaxed);
+}
+
+inline void SetFrontState(u32 state) {
+    if (Enabled()) {
+        shared.front_state.store(state, std::memory_order_relaxed);
+    }
+}
+
+/// Front only: a macro memory read by the macro at `start`.
+inline void TallyMacroRead(u32 start, u64 address, u64 words, bool fast, bool waited,
+                           u64 wait_ticks, bool writer) {
+    auto& table = shared.macro_read_tally;
+    const u64 key = u64{start} + 1;
+    Shared::MacroReadTally* entry = &table.back();
+    for (auto& slot : table) {
+        const u64 current = slot.key.load(std::memory_order_relaxed);
+        if (current == key) {
+            entry = &slot;
+            break;
+        }
+        if (current == 0) {
+            slot.key.store(key, std::memory_order_relaxed);
+            entry = &slot;
+            break;
+        }
+    }
+    Add(entry->reads, 1);
+    Add(entry->fast, fast ? 1 : 0);
+    Add(entry->waits, waited ? 1 : 0);
+    Add(entry->wait_ticks, wait_ticks);
+    Add(entry->writer_waits, writer ? 1 : 0);
+    Add(entry->words, words);
+    entry->address.store(address, std::memory_order_relaxed);
 }
 
 inline void Max(std::atomic<u64>& counter, u64 value) {

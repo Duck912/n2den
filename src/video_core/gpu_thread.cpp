@@ -44,12 +44,14 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto& split = VideoCommon::GpuSplit::Get();
         while (!stop_token.stop_requested()) {
             split.MaybeStart(system);
+            VideoCommon::BackStats::SetFrontState(VideoCommon::BackStats::FrontRunning);
             if (scheduler.HasPendingNativeChannels()) {
                 scheduler.ResumePending(system.GPU());
                 if (!state.queue.TryPop(next)) {
                     split.Publish();
                     const VideoCommon::BackStats::ScopedSharedTime sleep_time{
                         VideoCommon::BackStats::shared.front_pending_sleep};
+                    VideoCommon::BackStats::SetFrontState(VideoCommon::BackStats::FrontSuspended);
                     // Wait up to 1 ms for the next command instead of sleeping the whole 1 ms:
                     // nearly every pending sleep in Ocarina of Time was ended by a push, which
                     // then waited out the rest of the sleep (Eglantine 94424afdbd, pending_wake,
@@ -79,7 +81,9 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 if (BackStats::Enabled()) {
                     BackStats::Add(BackStats::shared.front_guest_waits, 1);
                 }
+                BackStats::SetFrontState(BackStats::FrontGuest);
                 state.queue.PopWait(next, stop_token);
+                BackStats::SetFrontState(BackStats::FrontRunning);
             }
             if (stop_token.stop_requested()) {
                 break;

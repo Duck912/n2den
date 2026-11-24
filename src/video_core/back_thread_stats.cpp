@@ -333,6 +333,62 @@ void Report() {
                                        : 0.0,
              avg_us(d.back_wake, d.back_wake_count), per_s(front_guest_waits),
              us_per_s(front_guest_wait), us_per_s(front_pending_sleep), front_busy);
+    static constexpr std::array<const char*, 7> FRONT_NAMES{
+        "running", "position wait", "drain", "ring space", "guest wait", "suspended", "writers"};
+    std::string idle_by_front;
+    for (size_t state = 0; state < FRONT_NAMES.size(); ++state) {
+        idle_by_front += fmt::format("{}{} {:.1f}% {:.0f}/s ({:.1f} us each)",
+                                     state != 0 ? ", " : "", FRONT_NAMES[state],
+                                     pct(d.back_idle_by_front[state]),
+                                     per_s(d.back_idle_count_by_front[state]),
+                                     avg_us(d.back_idle_by_front[state],
+                                            d.back_idle_count_by_front[state]));
+    }
+    LOG_INFO(Render_Vulkan, "Back idle by the front's state when the ring ran dry (% of wall time, "
+             "episodes/s): {}", idle_by_front);
+    const u64 position_waits = Take(shared.position_waits);
+    const u64 position_wait_ticks = Take(shared.position_wait_ticks);
+    const u64 position_wait_writer = Take(shared.position_wait_writer);
+    LOG_INFO(Render_Vulkan,
+             "Position waits (macro report reads): {:.0f}/s, {:.0f} us/s, {:.1f} us each; back "
+             "behind the target {:.0f} words, sent after it {:.0f} words; target was the last "
+             "writer's {:.0f}%; wait end to next publish {:.1f} us",
+             per_s(position_waits), us_per_s(position_wait_ticks),
+             avg_us(position_wait_ticks, position_waits),
+             avg(Take(shared.position_wait_lag), position_waits),
+             avg(Take(shared.position_wait_ahead), position_waits),
+             avg(position_wait_writer * 100, position_waits),
+             avg_us(Take(shared.position_to_publish), Take(shared.position_to_publish_count)));
+    struct TallyRow {
+        u64 key, reads, fast, waits, ticks, writer, address, words;
+    };
+    std::vector<TallyRow> tally_rows;
+    for (auto& entry : shared.macro_read_tally) {
+        TallyRow row{entry.key.load(std::memory_order_relaxed), Take(entry.reads), Take(entry.fast),
+                     Take(entry.waits), Take(entry.wait_ticks), Take(entry.writer_waits),
+                     entry.address.load(std::memory_order_relaxed), Take(entry.words)};
+        if (row.reads != 0) {
+            tally_rows.push_back(row);
+        }
+    }
+    std::ranges::sort(tally_rows, [](const TallyRow& a, const TallyRow& b) { return a.ticks > b.ticks; });
+    std::string tally_text;
+    for (const TallyRow& row : tally_rows) {
+        tally_text += fmt::format("{}macro {:#x}: {:.0f} reads/s ({:.0f}/s fast), waited {:.0f}/s "
+                                  "{:.0f} us/s ({:.0f}/s for a writer), {:.1f} words, last at {:#x}",
+                                  tally_text.empty() ? "" : "; ", row.key - 1, per_s(row.reads),
+                                  per_s(row.fast), per_s(row.waits), us_per_s(row.ticks),
+                                  per_s(row.writer), avg(row.words, row.reads), row.address);
+    }
+    LOG_INFO(Render_Vulkan, "Macro reads by macro (by wait time): {}",
+             tally_text.empty() ? std::string{"none"} : tally_text);
+    LOG_INFO(Render_Vulkan,
+             "Uniform binds: root tables {:.0f}/s {:.0f} KB/s, streamed {:.0f}/s {:.0f} KB/s, cached "
+             "{:.0f}/s {:.0f} KB/s (SynchronizeBuffer true {:.0f}/s)",
+             per_s(d.uniform_binds[0]), per_s(d.uniform_bytes[0]) / 1024.0,
+             per_s(d.uniform_binds[1]), per_s(d.uniform_bytes[1]) / 1024.0,
+             per_s(d.uniform_binds[2]), per_s(d.uniform_bytes[2]) / 1024.0,
+             per_s(d.uniform_binds[3]));
     const auto invalidation_text = [&](const char* name, InvalidationCounters& counters) {
         const u64 batches = Take(counters.batches);
         const u64 ranges = Take(counters.ranges);

@@ -1374,6 +1374,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     }
 }
 
+/// Statistics: the start address of the macro the front runs (macro read tally).
+static u32 front_macro_start{};
+
 bool Maxwell3D::FrontReadReportSlot(VideoCommon::GpuSplit& split, GPUVAddr address,
                                     std::span<u32> words) {
     namespace BackStats = VideoCommon::BackStats;
@@ -1411,6 +1414,8 @@ bool Maxwell3D::FrontReadReportSlot(VideoCommon::GpuSplit& split, GPUVAddr addre
     }
     memory_manager.ReadBlockUnsafe(address, words.data(), size);
     if (start != 0) {
+        BackStats::TallyMacroRead(front_macro_start, address, words.size(), true, waited,
+                                  BackStats::Stamp() - start, *target == split.LastWriterTarget());
         BackStats::Add(BackStats::shared.macro_reads_fast, 1);
         BackStats::Add(BackStats::shared.macro_read_fast_waits, waited ? 1 : 0);
         BackStats::Add(BackStats::shared.macro_read_fast_ticks, BackStats::Stamp() - start);
@@ -1468,6 +1473,7 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     auto& engine = GetNativeMacroEngine();
     const auto positions = GetNativeMacroPositions();
     const u32 start = positions[((method - MacroRegistersStart) >> 1) % positions.size()];
+    front_macro_start = start;
     const auto read = [&fs](u32 address) {
         return address < Regs::NUM_REGS ? fs.regs[address] : 0U;
     };
@@ -1555,7 +1561,14 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             trace_other_read(words, "fast");
             return true;
         }
+        const u64 drain_start =
+            VideoCommon::BackStats::Enabled() ? VideoCommon::BackStats::Stamp() : 0;
         split.Drain(VideoCommon::BackStats::DrainMacroMemory);
+        if (drain_start != 0) {
+            VideoCommon::BackStats::TallyMacroRead(start, address, words.size(), false, true,
+                                                   VideoCommon::BackStats::Stamp() - drain_start,
+                                                   false);
+        }
         const bool ok = ReadMacroMemory(address, words);
         if (fast && ok && !std::ranges::equal(std::span{fast_words}.first(words.size()), words)) {
             static std::atomic<u32> mismatches_logged{};

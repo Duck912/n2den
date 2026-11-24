@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <functional>
@@ -138,6 +139,10 @@ public:
     [[nodiscard]] std::optional<u64> ReportTarget(u64 address, u64 size) const;
     /// Waits until the back executed everything sent up to `target`; true when it had to wait.
     bool WaitForPosition(u64 target);
+    /// Front only: the position of the last compute, copy or inline writer sent (statistics).
+    [[nodiscard]] u64 LastWriterTarget() const {
+        return (std::min)(last_writer_position, write_position);
+    }
 
     /// Front only: a semaphore release of `value` at `address` was just sent (after
     /// NoteReportWrite). Ordered acquires (OrderedAcquiresEnabled) read it back.

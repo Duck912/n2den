@@ -1464,6 +1464,10 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         }
         channel_state->fast_bound_uniform_buffers[stage] |= 1u << binding_index;
         channel_state->uniform_buffer_binding_sizes[stage][binding_index] = static_cast<u32>(data.size());
+        if (VideoCommon::BackStats::Enabled()) {
+            ++VideoCommon::BackStats::draw_thread.uniform_binds[0];
+            VideoCommon::BackStats::draw_thread.uniform_bytes[0] += data.size();
+        }
         return;
     }
 
@@ -1511,11 +1515,21 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         // Stream buffer path to avoid stalling on non-Nvidia drivers or Vulkan
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
         device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+        if (VideoCommon::BackStats::Enabled()) {
+            ++VideoCommon::BackStats::draw_thread.uniform_binds[1];
+            VideoCommon::BackStats::draw_thread.uniform_bytes[1] += size;
+        }
         return;
     }
     // Classic cached path
-    if (SynchronizeBuffer(buffer, device_addr, size)) {
+    const bool synced = SynchronizeBuffer(buffer, device_addr, size);
+    if (synced) {
         ++channel_state->uniform_cache_hits[0];
+    }
+    if (VideoCommon::BackStats::Enabled()) {
+        ++VideoCommon::BackStats::draw_thread.uniform_binds[2];
+        VideoCommon::BackStats::draw_thread.uniform_binds[3] += synced ? 1 : 0;
+        VideoCommon::BackStats::draw_thread.uniform_bytes[2] += size;
     }
     // Skip binding if it's not needed and if the bound buffer is not the fast version
     // This exists to avoid instances where the fast buffer is bound and a GPU write happens
