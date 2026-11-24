@@ -18,6 +18,7 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/errors.h"
 #include "core/file_sys/fs_directory.h"
@@ -561,6 +562,18 @@ Result FSP_SRV::OpenDataStorageWithProgramIndex(OutInterface<IStorage> out_inter
 
     auto patched_romfs = romfs_controller->OpenPatchedRomFSWithProgramIndex(
         program_id, program_index, FileSys::ContentRecordType::Program);
+
+    if (!patched_romfs &&
+        FileSys::GetBaseTitleID(FileSys::GetBaseTitleIDWithProgramIndex(program_id, program_index)) ==
+            FileSys::GetBaseTitleID(program_id)) {
+        // A container holding one program of a multi-program title (a Switch 2 Edition .nup
+        // packs only the Switch 2 program, index 1) has no entry for its sibling. The game asks
+        // for program 0's RomFS to read the shared game data, which the packed RomFS carries.
+        LOG_WARNING(Service_FS,
+                    "No program {} of {:016X}: serving the current process' RomFS instead",
+                    program_index, program_id);
+        patched_romfs = romfs_controller->OpenRomFSCurrentProcess();
+    }
 
     if (!patched_romfs) {
         // TODO: Find the right error code to use here
