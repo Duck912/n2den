@@ -515,6 +515,11 @@ struct Values {
     SwitchableSetting<bool> oot_dynamic_fps{linkage, true, "oot_dynamic_fps", Category::Renderer};
     SwitchableSetting<bool> oot_max_resolution{linkage, true, "oot_max_resolution",
                                                Category::Renderer};
+    // Built-in add-on for Donkey Kong Bananza: every frame presented at swap interval 1. The game
+    // picks interval 1 or 2 by its measured frame cost, and with its double-buffered vsync a
+    // frame that misses 33 ms waits until 50 ms. Off by default; any other game is left alone.
+    SwitchableSetting<bool> dk_single_interval{linkage, false, "dk_single_interval",
+                                               Category::Renderer};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -1187,6 +1192,10 @@ bool IsNceEnabled();
 
 void SetCurrentProgramID(u64 program_id);
 u64 GetCurrentProgramID();
+
+/// The swap interval to present at instead of the game's: 1 for Donkey Kong Bananza with
+/// dk_single_interval on (or N from EDEN_NX2_SWAP_INTERVAL, any game), else 0 (the game's).
+u32 ForcedSwapInterval();
 
 bool IsOpenGL();
 

@@ -225,6 +225,22 @@ void SetCurrentProgramID(u64 program_id) {
     current_program_id = program_id;
 }
 
+u32 ForcedSwapInterval() {
+    static const u32 from_env = [] {
+        const char* const value = std::getenv("EDEN_NX2_SWAP_INTERVAL");
+        return value ? (std::min)(static_cast<u32>(std::strtoul(value, nullptr, 0)), 4U) : 0U;
+    }();
+    if (from_env != 0) {
+        return from_env;
+    }
+    constexpr u64 DonkeyKongBananza = 0x040074A01BF12000ULL;
+    if (values.dk_single_interval.GetValue() &&
+        (GetCurrentProgramID() & ~u64{0xFFF}) == DonkeyKongBananza) {
+        return 1;
+    }
+    return 0;
+}
+
 u64 GetCurrentProgramID() {
     return current_program_id;
 }

@@ -221,6 +221,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "size (2560x1440 docked) instead of as low as 854x480. Keep the resolution at 1x "
               "with this on.\nOnly for the Ocarina of Time (Switch 2) release it was made for. "
               "Takes effect at game start."));
+    INSERT(Settings, dk_single_interval, tr("Single-interval vsync for Donkey Kong Bananza"),
+           tr("Presents every frame at the next 60 Hz vsync instead of the game's double-buffered "
+              "30/20 fps steps, so a frame that takes 40 ms shows at 40 ms rather than 50 ms.\n"
+              "Only for Donkey Kong Bananza. The game's speed may follow the frame rate."));
     INSERT(Settings, hdr_output, tr("HDR output (HDR10)"),
            tr("Shows the game in HDR on an HDR display. Turn on HDR in Windows first (Settings > "
               "Display > Use HDR).\nFire Emblem: Fortune's Weave then makes its own HDR picture: "

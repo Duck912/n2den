@@ -600,6 +600,9 @@ PresentPaceInputs PaceInputsFor(Call& c, s32 present_interval) {
     // (n2den) Eglantine's Mario Kart World dynamic frame-rate patch (loader/nso.cpp) is not in
     // n2den yet, so the adaptive interval stays off; revisit at the Mario Kart World stage.
     const bool mkw_adaptive = false;
+    if (const u32 forced = Settings::ForcedSwapInterval(); forced != 0 && !video) {
+        present_interval = static_cast<s32>(forced);
+    }
     return {
         .present_interval = AdaptivePresentInterval(present_interval, mkw_adaptive, video),
         .frame_rate_cap = Settings::FrameRateCap(),
