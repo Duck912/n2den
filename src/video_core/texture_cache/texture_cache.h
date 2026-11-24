@@ -53,7 +53,7 @@ using namespace Common::Literals;
 // source) image pair and logs the top 20 pairs about every 2 s with both images' description and
 // the role each was last prepared in (render target / sampled).
 /// EDEN_NX2_PADDED_TARGETS when unset (see UsePaddedTargetWidths).
-inline constexpr int PADDED_TARGETS_DEFAULT = 0;
+inline constexpr int PADDED_TARGETS_DEFAULT = 1;
 
 namespace AliasCopyTrace {
 inline const bool enabled = std::getenv("EDEN_NX2_TRACE_ALIAS_COPIES") != nullptr;
