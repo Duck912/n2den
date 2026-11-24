@@ -2162,6 +2162,22 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         return;
     }
     const auto& array = maxwell3d->regs.vertex_streams[index];
+    if (array.enable == 0) {
+        channel_state->vertex_buffers[index] = NULL_BINDING;
+        UpdateVertexBufferSlot(index, NULL_BINDING);
+        // Nothing binds a disabled stream (BindHostVertexBuffers takes the enabled ones), so its
+        // flag stayed set and every later change of another stream resolved it again: Donkey
+        // Kong Bananza enables 10 of 32 streams. Enabling it writes its registers, which set the
+        // flag again; so does a deletion of a buffer it held. The Android path that binds every
+        // stream still needs the flag to unbind it.
+#ifdef __ANDROID__
+        if (Settings::values.use_optimized_vertex_buffers.GetValue())
+#endif
+        {
+            maxwell3d->dirty.flags[Dirty::VertexBuffer0 + index] = false;
+        }
+        return;
+    }
     const auto& limit = maxwell3d->regs.vertex_stream_limits[index];
     const GPUVAddr gpu_addr_begin = array.Address();
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
