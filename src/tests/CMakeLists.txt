@@ -13,6 +13,7 @@ add_executable(tests
     common/host_memory.cpp
     common/param_package.cpp
     common/range_map.cpp
+    common/range_sets.cpp
     common/ring_buffer.cpp
     common/scratch_buffer.cpp
     common/undefined_fix.cpp
