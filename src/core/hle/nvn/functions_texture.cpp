@@ -1947,8 +1947,11 @@ void TexelAccess(Call& c, bool write, u64 texture, u64 view_va, u64 region_va, u
         }
         const u64 level_row_bytes = u64{cols} * block.bytes;
         std::vector<u8> volume_bytes(static_cast<size_t>(level_row_bytes * level_rows * depth));
+        // A 3D texture without a packaged layout keeps the classic GOB order (no Switch 2 bit 5/6
+        // adjustment), as the replay reads it (UsesNativeGobOrder).
+        const bool native_order = layout_desc.pkg_block_h != 0;
         Tegra::Texture::UnswizzleTexture(volume_bytes, bytes, block.bytes, cols, level_rows, depth,
-                                         tile_h, tile_d, 0, true);
+                                         tile_h, tile_d, 0, native_order);
         for (u32 slice = 0; slice < slice_count; ++slice) {
             for (u64 y = 0; y < rows; ++y) {
                 u8* const texel_row =
@@ -1969,7 +1972,7 @@ void TexelAccess(Call& c, bool write, u64 texture, u64 view_va, u64 region_va, u
         }
         if (write) {
             Tegra::Texture::SwizzleTexture(bytes, volume_bytes, block.bytes, cols, level_rows,
-                                           depth, tile_h, tile_d, 0, true);
+                                           depth, tile_h, tile_d, 0, native_order);
             writes.Storage(binding->address + begin, end - begin);
             if (!c.mem.Write(binding->address + begin, bytes.data(),
                              static_cast<size_t>(end - begin))) {

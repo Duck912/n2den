@@ -54,6 +54,9 @@ uint BlockLinearOffset(uint xb, uint y, uint z) {
     const uint swizzled_x = (xb & 15u) | ((xb & 16u) << 1) | ((xb & 32u) << 3);
     const uint swizzled_y = ((y & 1u) << 4) | ((y & 2u) << 5) | ((y & 4u) << 5);
     uint offset = offset_z + offset_y + offset_x + (swizzled_x | swizzled_y);
+    if ((pc.mode & 0x100u) != 0u) {
+        return offset; // non-packaged 3D texture: classic GOB order
+    }
     const uint difference = ((offset >> 5) ^ (offset >> 6)) & 1u;
     return offset ^ (difference << 5) ^ (difference << 6);
 }
@@ -81,7 +84,7 @@ void main() {
             continue;
         }
         const uint window = pc.window_offset + uint(at);
-        if (pc.mode == 0u) {
+        if ((pc.mode & 0xFFu) == 0u) {
             bytes[window] = bytes[tight + b];
         } else {
             bytes[tight + b] = bytes[window];

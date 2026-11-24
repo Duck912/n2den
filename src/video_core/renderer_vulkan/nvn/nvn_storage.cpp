@@ -2376,7 +2376,8 @@ void Context::Impl::FlushTextureNow(CmdFlushTexture& command) {
             }
             Tegra::Texture::SwizzleTexture(std::span<u8>{target, static_cast<size_t>(needed)},
                                            source, block.bytes, piece.cols, piece.rows,
-                                           piece.slices, piece.tile_h, piece.tile_d, 0, true);
+                                           piece.slices, piece.tile_h, piece.tile_d, 0,
+                                           UsesNativeGobOrder(s));
             if (!padded.empty()) {
                 std::memcpy(storage_bytes + piece.guest_offset, padded.data(),
                             static_cast<size_t>(available));

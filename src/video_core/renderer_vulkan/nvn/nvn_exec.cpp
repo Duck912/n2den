@@ -2921,6 +2921,14 @@ void Recorder::UploadStorage(Storage& s) {
                             plan.decode == UploadPlan::Decode::None && !s.host.bc_standin &&
                             !s.host.needs_transcode && s.aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
                             BytesAllZero(data, size);
+    if (!plan.linear && !zero_clear && !UsesNativeGobOrder(s)) {
+        // One line per shape: which 3D textures read guest bytes in the classic GOB order.
+        LogOnce(fmt::format("3D texture upload in classic GOB order: {}x{}x{} format {:#x} "
+                            "levels {} tile_h {} tile_d {} at guest {:#x} ({:#x} bytes)",
+                            s.desc.width, s.desc.height, s.desc.depth, s.desc.format, s.levels,
+                            s.layout.tile_h, s.layout.tile_d, pool.address + s.pool_offset,
+                            s.layout.size));
+    }
     // Block-linear bytes the CPU would only untile: the GPU does it.
     bool untiled_on_gpu = false;
     if (!on_gpu && !zero_clear && !plan.linear && impl.untile_gpu_enabled &&
@@ -3811,6 +3819,7 @@ bool Recorder::UploadUntileOnGpu(Storage& s, const UploadPlan& plan, Pool& pool,
             .bytes_per_block = block.bytes,
             .tile_height = piece.tile_h,
             .tile_depth = piece.tile_d,
+            .native_tiling = UsesNativeGobOrder(s),
         };
         const u64 needed = UntileGpu::InputSize(gpu);
         if (!UntileGpu::ElementsFit(UntileGpu::MakeParams(gpu))) {
@@ -4274,6 +4283,7 @@ bool CollectAliasPieces(const Storage& s, const UploadPlan& plan, u64 window_beg
                 .tile_height = piece.tile_h,
                 .tile_depth = piece.tile_d,
                 .pitch = pitch,
+                .native_tiling = UsesNativeGobOrder(s),
             },
             .region{
                 .bufferOffset = tight,

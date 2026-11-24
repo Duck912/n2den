@@ -34,6 +34,8 @@ public:
         u32 tile_height{}; ///< log2 GOBs per block, block-linear pieces
         u32 tile_depth{};
         u32 pitch{};       ///< linear pieces: bytes per row; 0 = block-linear
+        /// Switch 2 GOB order (bits 5/6); false for a non-packaged 3D texture (UsesNativeGobOrder).
+        bool native_tiling{true};
     };
 
     enum class Mode : u32 {

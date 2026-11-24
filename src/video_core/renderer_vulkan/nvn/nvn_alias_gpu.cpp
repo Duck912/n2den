@@ -31,6 +31,8 @@ struct PushConstants {
 static_assert(sizeof(PushConstants) == 48);
 
 constexpr u32 WORKGROUP_SIZE = 256;
+/// Mode bit telling the shader to address GOBs without the Switch 2 bit 5/6 adjustment.
+constexpr u32 CLASSIC_GOB_ORDER = 0x100;
 constexpr u32 MAX_GROUPS_X = 65535;
 
 } // Anonymous namespace
@@ -130,7 +132,7 @@ void AliasTransferGpu::Begin(vk::CommandBuffer cmd, VkBuffer scratch, u64 size) 
 void AliasTransferGpu::Dispatch(vk::CommandBuffer cmd, Mode mode, u32 window_offset,
                                 u32 window_size, const Piece& piece) const {
     const PushConstants constants{
-        .mode = static_cast<u32>(mode),
+        .mode = static_cast<u32>(mode) | (piece.native_tiling ? 0u : CLASSIC_GOB_ORDER),
         .tight_offset = piece.tight_offset,
         .window_offset = window_offset,
         .window_size = window_size,

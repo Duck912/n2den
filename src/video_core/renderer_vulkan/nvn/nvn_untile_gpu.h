@@ -32,6 +32,8 @@ public:
         u32 bytes_per_block{};
         u32 tile_height{}; ///< log2 GOBs per tile row (the level's block height)
         u32 tile_depth{};  ///< log2 GOBs per tile in depth
+        /// Switch 2 GOB order (bits 5/6); false for a non-packaged 3D texture (UsesNativeGobOrder).
+        bool native_tiling{true};
     };
 
     /// The shader's push constants for one piece. A row of `columns * bytes_per_block` bytes is

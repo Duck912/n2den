@@ -579,6 +579,15 @@ struct Storage : std::enable_shared_from_this<Storage> {
     std::shared_ptr<StorageViewCache> shared_views;
 };
 
+/// Whether a block-linear storage's guest bytes use the Switch 2 GOB order (bits 5 and 6 of the
+/// GOB offset adjusted, `native_tiling`). A 3D texture without a packaged layout keeps the classic
+/// order: Xenoblade Chronicles 2 fills its colour-grading volumes (16x16x16 RGBA8, automatic
+/// layout) itself, and their bytes only form a smooth table that way. Packaged 3D textures use the
+/// Switch 2 order (Kirby and the Forgotten Land's grading volumes, packaged layout 40 .. c9 00 01).
+[[nodiscard]] inline bool UsesNativeGobOrder(const Storage& s) {
+    return s.type != VK_IMAGE_TYPE_3D || s.desc.pkg_block_h != 0;
+}
+
 struct Texture {
     u64 serial{};
     VC::TextureDesc desc{};

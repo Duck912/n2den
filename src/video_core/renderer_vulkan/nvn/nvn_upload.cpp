@@ -651,7 +651,7 @@ void FillStorageUpload(const Storage& s, const UploadPlan& plan, const u8* guest
             Tegra::Texture::UnswizzleTexture(
                 std::span<u8>{block_destination, static_cast<size_t>(block_bytes)}, input,
                 block.bytes, piece.cols, piece.rows, piece.slices, piece.tile_h, piece.tile_d, 0,
-                true);
+                UsesNativeGobOrder(s));
         }
         if (plan.decode != UploadPlan::Decode::None) {
             DecodeBlocks(s.host, block, blocks, piece.width, piece.height, piece.slices,
