@@ -114,7 +114,18 @@ void EmitInst(EmitContext& ctx, IR::Inst* inst) try {
     throw;
 }
 
+Id TypeIdOf(const EmitContext& ctx, IR::Type type);
+
 Id TypeId(const EmitContext& ctx, IR::Type type) {
+    // U8/U16/U64/F16/F64 exist only when the program uses them and the profile allows.
+    const Id id{TypeIdOf(ctx, type)};
+    if (!Sirit::ValidId(id)) {
+        throw NotImplementedException("Phi node type {} not defined in this module", type);
+    }
+    return id;
+}
+
+Id TypeIdOf(const EmitContext& ctx, IR::Type type) {
     switch (type) {
     case IR::Type::U1:
         return ctx.U1;

@@ -38,12 +38,14 @@ nvhost_ctrl::nvhost_ctrl(Core::System& system_, EventInterface& events_interface
 nvhost_ctrl::~nvhost_ctrl() {
     // A pending wait's host action captures this device. Remove it before the events go away, or
     // a later syncpoint increment (the fence thread outlives the services at shutdown) would read
-    // freed memory and signal a freed event. Deregistering takes the host1x lock that actions run
-    // under, so no action for this device is running once it returns.
+    // freed memory and signal a freed event. Deregistering drops a due action that has not
+    // started and waits for one that is running (actions run outside the host1x lock), so no
+    // action for this device is running once it returns; that includes one already Signalling.
     auto lock = NvEventsLock();
     for (auto& event : events) {
-        if (event.status.exchange(EventState::Cancelling, std::memory_order_acq_rel) ==
-            EventState::Waiting) {
+        const EventState previous =
+            event.status.exchange(EventState::Cancelling, std::memory_order_acq_rel);
+        if (previous == EventState::Waiting || previous == EventState::Signalling) {
             system.Host1x().GetSyncpointManager().DeregisterHostAction(event.assigned_syncpt,
                                                                        event.wait_handle);
             event.wait_handle = {};
@@ -303,8 +305,10 @@ NvResult nvhost_ctrl::IocCtrlClearEventWait(IocCtrlEventClearParams& params) {
     auto lock = NvEventsLock();
 
     auto& event = events[event_id];
-    if (event.status.exchange(EventState::Cancelling, std::memory_order_acq_rel) ==
-        EventState::Waiting) {
+    // Also when Signalling: the deregister then waits for the running action to finish.
+    const EventState previous =
+        event.status.exchange(EventState::Cancelling, std::memory_order_acq_rel);
+    if (previous == EventState::Waiting || previous == EventState::Signalling) {
         auto& host1x_syncpoint_manager = system.Host1x().GetSyncpointManager();
         host1x_syncpoint_manager.DeregisterHostAction(event.assigned_syncpt, event.wait_handle);
         syncpoint_manager.UpdateMin(event.assigned_syncpt);

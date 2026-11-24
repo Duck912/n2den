@@ -127,7 +127,18 @@ void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_var
         due.running = due.pending.front().id;
         due.pending.pop_front();
         lk.unlock();
-        action();
+        try {
+            action();
+        } catch (...) {
+            // `due` lives on this stack: unlist it before unwinding, or a later DeregisterAction
+            // would walk a dead pointer.
+            action = nullptr;
+            lk.lock();
+            due.running = 0;
+            std::erase(due_actions, &due);
+            action_done_cv.notify_all();
+            throw;
+        }
         action = nullptr;
         lk.lock();
         due.running = 0;
