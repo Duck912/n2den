@@ -338,6 +338,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         auto it_current = sub_container.find(base);
         if (it_current == sub_container.end()) {
             sub_container.insert_or_assign(base, query_location);
+            query_interest.Add((cont_addr << Core::DEVICE_PAGEBITS) + base, sizeof(u32));
             VideoCommon::PendingReports::Add(cpu_addr);
             return;
         }
@@ -368,6 +369,8 @@ void QueryCacheBase<Traits>::UnregisterPending() {
             if (it2 != it1->second.end()) {
                 if (it2->second.raw == loc.raw) {
                     it1->second.erase(it2);
+                    query_interest.Remove((static_cast<VAddr>(cont_addr) << Core::DEVICE_PAGEBITS) + base,
+                                          sizeof(u32));
                     VideoCommon::PendingReports::Remove(
                         (static_cast<VAddr>(cont_addr) << Core::DEVICE_PAGEBITS) + base);
                 }

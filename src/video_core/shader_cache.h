@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <map>
 #include <array>
 #include <memory>
@@ -21,6 +23,7 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/page_interest.h"
 #include "video_core/shader_environment.h"
 
 namespace Tegra {
@@ -70,6 +73,13 @@ public:
 
     /// InvalidateRegion for each range, under one lock and one removal pass.
     void InvalidateRegions(std::span<const std::pair<DAddr, std::size_t>> sequences);
+
+    /// False when InvalidateRegion(addr, size) would do nothing: no shader entry and no remembered
+    /// rejection on the range's pages, and no removal left pending. Needs no lock (see PageInterest).
+    [[nodiscard]] bool MayHaveShadersIn(VAddr addr, size_t size) const noexcept {
+        return pending_removals.load(std::memory_order_seq_cst) ||
+               shader_interest.Any(addr, size);
+    }
 
     /// @brief Unmarks a memory region as cached and marks it for removal
     /// @param addr Start address of the CPU write operation
@@ -190,6 +200,11 @@ private:
     /// Ordered by address so invalidations only visit rejections that can overlap them.
     std::map<u64, RejectedShader> rejected_shaders;
     size_t max_rejected_prefix{};
+
+    /// Entries of invalidation_cache (over [addr_start, addr_end)) and rejections (over their prefix)
+    VideoCommon::PageInterest shader_interest;
+    /// marked_for_removal is not empty
+    std::atomic<bool> pending_removals{false};
 };
 
 } // namespace VideoCommon

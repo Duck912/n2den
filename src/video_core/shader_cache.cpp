@@ -318,6 +318,7 @@ void ShaderCache::ThrowIfRejected(VAddr cpu_addr, GPUVAddr gpu_addr) {
         if (size == it->second.prefix_size && PrefixHash(*gpu_memory, gpu_addr, size) == it->second.prefix_hash) {
             error = it->second.error;
         } else {
+            shader_interest.Remove(it->first, it->second.prefix_size);
             rejected_shaders.erase(it);
             return;
         }
@@ -334,6 +335,7 @@ void ShaderCache::DropRejections(VAddr addr, size_t size) {
     for (auto it = rejected_shaders.lower_bound(first);
          it != rejected_shaders.end() && it->first < addr + size;) {
         if (addr < it->first + it->second.prefix_size) {
+            shader_interest.Remove(it->first, it->second.prefix_size);
             it = rejected_shaders.erase(it);
         } else {
             ++it;
@@ -351,6 +353,10 @@ void ShaderCache::RememberRejection(VAddr cpu_addr, GPUVAddr gpu_addr, const cha
     DumpRejected(*gpu_memory, gpu_addr, hash, stage, error);
     std::scoped_lock lock{lookup_mutex};
     max_rejected_prefix = (std::max)(max_rejected_prefix, size);
+    if (const auto old = rejected_shaders.find(cpu_addr); old != rejected_shaders.end()) {
+        shader_interest.Remove(old->first, old->second.prefix_size);
+    }
+    shader_interest.Add(cpu_addr, size);
     rejected_shaders.insert_or_assign(cpu_addr, RejectedShader{hash, size, error});
 }
 
@@ -374,6 +380,7 @@ void ShaderCache::Register(std::unique_ptr<ShaderInfo> data, VAddr addr, size_t 
     for (u64 page = addr >> YUZU_PAGEBITS; page < page_end; ++page) {
         invalidation_cache[page].push_back(entry);
     }
+    shader_interest.Add(addr, size);
 
     storage.push_back(std::move(data));
 
@@ -410,6 +417,7 @@ void ShaderCache::RemovePendingShaders() {
         lookup_cache.erase(it);
     }
     marked_for_removal.clear();
+    pending_removals.store(false, std::memory_order_seq_cst);
 
     if (!removed_shaders.empty()) {
         // Remove the given shaders from the cache
@@ -431,6 +439,7 @@ void ShaderCache::InvalidatePageEntries(std::vector<Entry*>& entries, VAddr addr
         UnmarkMemory(entry);
         RemoveEntryFromInvalidationCache(entry);
         marked_for_removal.push_back(entry);
+        pending_removals.store(true, std::memory_order_seq_cst);
     }
 }
 
@@ -445,6 +454,7 @@ void ShaderCache::RemoveEntryFromInvalidationCache(const Entry* entry) {
         ASSERT(entry_it != entries.end());
         entries.erase(entry_it);
     }
+    shader_interest.Remove(entry->addr_start, entry->addr_end - entry->addr_start);
 }
 
 void ShaderCache::UnmarkMemory(Entry* entry) {

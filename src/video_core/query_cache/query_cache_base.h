@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <mutex>
+#include "video_core/page_interest.h"
 #include <optional>
 #include <span>
 #include "common/container/unordered_map.h"
@@ -56,6 +57,12 @@ public:
                             RuntimeType& runtime_);
 
     ~QueryCacheBase();
+
+    /// False when no query is cached on the pages of [addr, addr + size): InvalidateRegion
+    /// would do nothing there. Needs no lock (see PageInterest).
+    [[nodiscard]] bool MayHaveQueriesIn(VAddr addr, std::size_t size) const noexcept {
+        return query_interest.Any(addr, size);
+    }
 
     void InvalidateRegion(VAddr addr, std::size_t size) {
         IterateCache<true>(addr, size,
@@ -164,7 +171,11 @@ protected:
                     continue;
                 }
                 const auto in_range2 = [&](const std::pair<u32, QueryLocation>& pair) {
-                    return in_range(pair.first);
+                    if (!in_range(pair.first)) {
+                        return false;
+                    }
+                    query_interest.Remove(page_start + pair.first, sizeof(u32));
+                    return true;
                 };
                 erase_if(contents, in_range2);
             }
@@ -181,6 +192,8 @@ protected:
 
     ::Common::unordered_map<u64, ::Common::unordered_map<u32, QueryLocation>> cached_queries;
     std::mutex cache_mutex;
+    /// One count per entry of cached_queries, over the 4 bytes IterateCache matches it by
+    VideoCommon::PageInterest query_interest;
 
     struct QueryCacheBaseImpl;
     friend struct QueryCacheBaseImpl;

@@ -54,6 +54,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/page_interest.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -1106,11 +1107,42 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
     return new_area;
 }
 
+namespace {
+// EDEN_NX2_INVAL_FILTER (default on): a written range is sent only to the texture, query and
+// shader caches that have something registered on its pages (VideoCommon::PageInterest). The
+// buffer cache always gets it. The fence orders the guest's store before the interest load, as
+// the caches' locks did: a cache registering an object concurrently either is seen here or reads
+// the new bytes itself.
+[[nodiscard]] bool InvalFilter() noexcept {
+    if (!VideoCommon::PageInterest::FilterEnabled()) {
+        return false;
+    }
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return true;
+}
+
+template <typename Cache, typename Query>
+[[nodiscard]] bool Wants(bool filter, const Cache& cache, Query query, DAddr addr, u64 size,
+                         VideoCommon::SyncCounters::Counter skip_counter) {
+    if (!filter || (cache.*query)(addr, size)) {
+        return true;
+    }
+    VideoCommon::SyncCounters::Add(skip_counter);
+    return false;
+}
+} // Anonymous namespace
+
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
     if (addr == 0 || size == 0) {
         return;
     }
-    if (True(which & VideoCommon::CacheType::TextureCache)) {
+    using VideoCommon::SyncCounters::InvalQuerySkips;
+    using VideoCommon::SyncCounters::InvalShaderSkips;
+    using VideoCommon::SyncCounters::InvalTextureSkips;
+    const bool filter = InvalFilter();
+    VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::InvalRanges);
+    if (True(which & VideoCommon::CacheType::TextureCache) &&
+        Wants(filter, texture_cache, &TextureCache::MayHaveImagesIn, addr, size, InvalTextureSkips)) {
         const VideoCommon::BackStats::LockTimer lock_timer{VideoCommon::BackStats::shared.other_locks};
         std::scoped_lock lock{texture_cache.mutex};
         lock_timer.Acquired();
@@ -1122,22 +1154,52 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
         lock_timer.Acquired();
         buffer_cache.WriteMemory(addr, size);
     }
-    if ((True(which & VideoCommon::CacheType::QueryCache))) {
+    if (True(which & VideoCommon::CacheType::QueryCache) &&
+        Wants(filter, query_cache, &QueryCache::MayHaveQueriesIn, addr, size, InvalQuerySkips)) {
         query_cache.InvalidateRegion(addr, size);
     }
-    if ((True(which & VideoCommon::CacheType::ShaderCache))) {
+    if (True(which & VideoCommon::CacheType::ShaderCache) &&
+        Wants(filter, pipeline_cache, &PipelineCache::MayHaveShadersIn, addr, size, InvalShaderSkips)) {
         pipeline_cache.InvalidateRegion(addr, size);
     }
 }
 
 void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
     VideoCommon::BackStats::CountInvalidations(VideoCommon::BackStats::shared.flush_caching, sequences);
-    {
+    using VideoCommon::SyncCounters::InvalQuerySkips;
+    using VideoCommon::SyncCounters::InvalShaderSkips;
+    using VideoCommon::SyncCounters::InvalTextureSkips;
+    const bool filter = InvalFilter();
+    VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::InvalRanges, sequences.size());
+    // Ranges each cache wants (bit i: sequences[i]); every range when there are more than 64.
+    u64 texture_ranges = 0;
+    u64 query_ranges = 0;
+    u64 shader_ranges = 0;
+    const bool few = sequences.size() <= 64;
+    for (size_t i = 0; i < sequences.size(); ++i) {
+        const auto& [addr, size] = sequences[i];
+        const u64 bit = few ? u64{1} << i : ~u64{0};
+        if (Wants(filter, texture_cache, &TextureCache::MayHaveImagesIn, addr, size, InvalTextureSkips)) {
+            texture_ranges |= bit;
+        }
+        if (Wants(filter, query_cache, &QueryCache::MayHaveQueriesIn, addr, size, InvalQuerySkips)) {
+            query_ranges |= bit;
+        }
+        if (Wants(filter, pipeline_cache, &PipelineCache::MayHaveShadersIn, addr, size, InvalShaderSkips)) {
+            shader_ranges |= bit;
+        }
+    }
+    const auto wanted = [few](u64 ranges, size_t i) {
+        return ((few ? ranges >> i : ranges) & 1) != 0;
+    };
+    if (texture_ranges != 0) {
         const VideoCommon::BackStats::LockTimer lock_timer{VideoCommon::BackStats::shared.other_locks};
         std::scoped_lock lock{texture_cache.mutex};
         lock_timer.Acquired();
-        for (const auto& [addr, size] : sequences) {
-            texture_cache.WriteMemory(addr, size);
+        for (size_t i = 0; i < sequences.size(); ++i) {
+            if (wanted(texture_ranges, i)) {
+                texture_cache.WriteMemory(sequences[i].first, sequences[i].second);
+            }
         }
     }
     {
@@ -1148,10 +1210,22 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
             buffer_cache.WriteMemory(addr, size);
         }
     }
-    for (const auto& [addr, size] : sequences) {
-        query_cache.InvalidateRegion(addr, size);
+    for (size_t i = 0; i < sequences.size(); ++i) {
+        if (wanted(query_ranges, i)) {
+            query_cache.InvalidateRegion(sequences[i].first, sequences[i].second);
+        }
     }
-    pipeline_cache.InvalidateRegions(sequences);
+    if (shader_ranges == ~u64{0} || !few) {
+        pipeline_cache.InvalidateRegions(sequences);
+    } else if (shader_ranges != 0) {
+        boost::container::small_vector<std::pair<DAddr, std::size_t>, 64> shader_sequences;
+        for (size_t i = 0; i < sequences.size(); ++i) {
+            if (wanted(shader_ranges, i)) {
+                shader_sequences.push_back(sequences[i]);
+            }
+        }
+        pipeline_cache.InvalidateRegions(shader_sequences);
+    }
 }
 
 void RasterizerVulkan::OnCachedWrites(std::span<const std::pair<DAddr, u64>> writes) {
@@ -1204,13 +1278,19 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
             return true;
         }
     }
-    {
+    using VideoCommon::SyncCounters::InvalShaderSkips;
+    using VideoCommon::SyncCounters::InvalTextureSkips;
+    const bool filter = InvalFilter();
+    VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::InvalRanges);
+    if (Wants(filter, texture_cache, &TextureCache::MayHaveImagesIn, addr, size, InvalTextureSkips)) {
         const VideoCommon::BackStats::LockTimer lock_timer{VideoCommon::BackStats::shared.cpu_write};
         std::scoped_lock lock{texture_cache.mutex};
         lock_timer.Acquired();
         texture_cache.WriteMemory(addr, size);
     }
-    pipeline_cache.InvalidateRegion(addr, size);
+    if (Wants(filter, pipeline_cache, &PipelineCache::MayHaveShadersIn, addr, size, InvalShaderSkips)) {
+        pipeline_cache.InvalidateRegion(addr, size);
+    }
     return false;
 }
 

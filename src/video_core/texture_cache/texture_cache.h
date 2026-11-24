@@ -2947,7 +2947,10 @@ void TextureCache<P>::RegisterImage(ImageId image_id) {
         auto map_id =
             slot_map_views.insert(image.gpu_addr, image.cpu_addr, image.guest_size_bytes, image_id);
         ForEachCPUPage(image.cpu_addr, image.guest_size_bytes,
-                       [this, map_id](u64 page) { page_table[page].push_back(map_id); });
+                       [this, map_id](u64 page) {
+                           page_table[page].push_back(map_id);
+                           page_interest.AddPage(page);
+                       });
         image.map_view_id = map_id;
         return;
     }
@@ -2956,7 +2959,10 @@ void TextureCache<P>::RegisterImage(ImageId image_id) {
         image, [this, image_id, &sparse_maps](GPUVAddr gpu_addr, DAddr cpu_addr, size_t size) {
             auto map_id = slot_map_views.insert(gpu_addr, cpu_addr, size, image_id);
             ForEachCPUPage(cpu_addr, size,
-                           [this, map_id](u64 page) { page_table[page].push_back(map_id); });
+                           [this, map_id](u64 page) {
+                           page_table[page].push_back(map_id);
+                           page_interest.AddPage(page);
+                       });
             sparse_maps.push_back(map_id);
         });
     sparse_views.emplace(image_id, std::move(sparse_maps));
@@ -3010,6 +3016,7 @@ void TextureCache<P>::UnregisterImage(ImageId image_id) {
                 return;
             }
             image_map_ids.erase(vector_it);
+            page_interest.RemovePage(page);
         });
         slot_map_views.erase(map_id);
         return;
@@ -3042,6 +3049,7 @@ void TextureCache<P>::UnregisterImage(ImageId image_id) {
                     map.picked = true;
                 }
                 vector_it = image_map_ids.erase(vector_it);
+                page_interest.RemovePage(page);
             }
         });
         slot_map_views.erase(map_view_id);

@@ -144,6 +144,11 @@ void MaybeReport() {
              mark_total ? 100.0 * static_cast<double>(c[CpuMarkNoChange]) / static_cast<double>(mark_total) : 0.0,
              r(c[RegWrites]), r(c[RegWritesSame]),
              c[RegWrites] ? 100.0 * static_cast<double>(c[RegWritesSame]) / static_cast<double>(c[RegWrites]) : 0.0);
+    LOG_INFO(Render_Vulkan,
+             "Sync counters invalidation: ranges {}; skipped texture {} query {} shader {}; sync "
+             "memo misses by other range {}, with nothing to upload {}",
+             r(c[InvalRanges]), r(c[InvalTextureSkips]), r(c[InvalQuerySkips]),
+             r(c[InvalShaderSkips]), r(c[SyncMemoKeyMisses]), r(c[SyncMemoEmptyMisses]));
 
     std::string causes;
     for (u32 i = 0; i < CauseCount; ++i) {

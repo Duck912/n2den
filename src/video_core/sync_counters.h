@@ -43,11 +43,17 @@ enum Counter : u32 {
     PeriodicFlushes,    ///< RasterizerVulkan::FlushWork submits (every N draws)
     SyncMemoHits,       ///< BufferCache::SynchronizeBuffer memo
     SyncMemoMisses,
+    SyncMemoKeyMisses,  ///< ... misses whose slot held another range (not a raised epoch)
+    SyncMemoEmptyMisses,///< ... misses that then found nothing to upload
     CpuMarkNoChange,    ///< MarkRegionAsCpuModified calls that set no new CPU bit
     CpuMarkChanged,     ///< ... that set at least one
     RegWrites,          ///< Maxwell3D::ProcessDirtyRegisters
     RegWritesSame,      ///< ... of the value the register already holds
     Frames,             ///< RasterizerVulkan::TickFrame
+    InvalRanges,        ///< Ranges written by the CPU or engines (InnerInvalidation, OnCPUWrite, ...)
+    InvalTextureSkips,  ///< ... the texture cache was not asked about (no image on their pages)
+    InvalQuerySkips,    ///< ... the query cache was not asked about
+    InvalShaderSkips,   ///< ... the shader cache was not asked about
     CounterCount,
 };
 

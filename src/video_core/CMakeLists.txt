@@ -106,6 +106,7 @@ add_library(video_core STATIC
     back_thread_stats.cpp
     back_thread_stats.h
     sync_counters.cpp
+    page_interest.h
     sync_counters.h
     gpu_split.cpp
     frame_snapshot.h
