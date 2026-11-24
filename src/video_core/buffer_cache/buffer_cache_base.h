@@ -730,6 +730,18 @@ private:
     /// covered range returns the same id.
     u64 buffer_generation = 0;
 
+    /// FindBuffer's recent results by caching page: the buffer found and its bounds, valid while
+    /// buffer_generation holds.
+    struct FindMemo {
+        u64 page{~u64{0}};
+        u64 buffer_generation{};
+        DAddr begin{};
+        DAddr end{};
+        BufferId buffer_id{};
+        bool sparse_compatible{};
+    };
+    std::array<FindMemo, 256> find_memos{};
+
     /// PrepareGroupedStorage memo, one for graphics and one for compute: the same bindings,
     /// mappings and buffers give the same groups. EDEN_GROUPED_MEMO=0 turns it off.
     struct GroupedMemo {

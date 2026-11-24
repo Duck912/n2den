@@ -2673,21 +2673,31 @@ BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_com
         return NULL_BUFFER_ID;
     }
     const u64 page = device_addr >> CACHING_PAGEBITS;
+    // A recent result for the page, found without loading the page table entry and the buffer
+    // (a draw looks up ~20 ranges). Registering or unregistering any buffer raises
+    // buffer_generation, so while it holds the page table and every buffer's bounds are as they
+    // were. Accurate GPU fences synchronize the buffer's writes on each lookup: no memo there.
+    const bool should_sync = Settings::IsGPUFenceBehaviorAccurate();
+    FindMemo& memo = find_memos[page % find_memos.size()];
+    if (!should_sync && memo.page == page && memo.buffer_generation == buffer_generation &&
+        device_addr >= memo.begin && device_addr + size <= memo.end &&
+        (memo.sparse_compatible || !sparse_compatible)) {
+        return memo.buffer_id;
+    }
     const BufferId buffer_id = page_table[page];
     if (buffer_id) {
         Buffer& buffer = slot_buffers[buffer_id];
         if (buffer.IsInBounds(device_addr, size)) {
-            const bool should_sync = Settings::IsGPUFenceBehaviorAccurate();
             if (should_sync) {
                 SynchronizeBufferWrites(buffer);
             }
-            bool usable = true;
+            bool sparse = true;
             if constexpr (requires { buffer.IsSparseCompatible(); }) {
-                if (sparse_compatible && !buffer.IsSparseCompatible()) {
-                    usable = false;
-                }
+                sparse = buffer.IsSparseCompatible();
             }
-            if (usable) {
+            if (!sparse_compatible || sparse) {
+                memo = {page, buffer_generation, buffer.CpuAddr(),
+                        buffer.CpuAddr() + buffer.SizeBytes(), buffer_id, sparse};
                 return buffer_id;
             }
         }
