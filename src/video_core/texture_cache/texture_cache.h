@@ -52,6 +52,9 @@ using namespace Common::Literals;
 // [DEBUG] EDEN_NX2_TRACE_ALIAS_COPIES=1: tallies SynchronizeAliases copies per (destination,
 // source) image pair and logs the top 20 pairs about every 2 s with both images' description and
 // the role each was last prepared in (render target / sampled).
+/// EDEN_NX2_PADDED_TARGETS when unset (see UsePaddedTargetWidths).
+inline constexpr int PADDED_TARGETS_DEFAULT = 0;
+
 namespace AliasCopyTrace {
 inline const bool enabled = std::getenv("EDEN_NX2_TRACE_ALIAS_COPIES") != nullptr;
 struct Entry {
@@ -749,6 +752,12 @@ bool TextureCache<P>::RescaleRenderTargets() {
     bool rescaled = false;
     std::array<ImageId, NUM_RT> tmp_color_images{};
     ImageId tmp_depth_image{};
+    // A padded Switch 2 target is looked up at the surface clip's width (ClipPaddedTarget): look
+    // every target up again when the clip's right edge moves, whether the targets were narrowed
+    // for the last edge or not.
+    const auto& clip = maxwell3d->regs.surface_clip;
+    const bool clip_moved = UsePaddedTargetWidths() &&
+                            render_target_clip.Update(clip.x.Value() + clip.width.Value());
     do {
         flags[Dirty::RenderTargets] = false;
 
@@ -779,13 +788,13 @@ bool TextureCache<P>::RescaleRenderTargets() {
         };
         for (size_t index = 0; index < NUM_RT; ++index) {
             ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
-            if (flags[Dirty::ColorBuffer0 + index] || force) {
+            if (flags[Dirty::ColorBuffer0 + index] || force || clip_moved) {
                 flags[Dirty::ColorBuffer0 + index] = false;
                 BindRenderTarget(&color_buffer_id, FindColorBuffer(index));
             }
             check_rescale(color_buffer_id, tmp_color_images[index]);
         }
-        if (flags[Dirty::ZetaBuffer] || force) {
+        if (flags[Dirty::ZetaBuffer] || force || clip_moved) {
             flags[Dirty::ZetaBuffer] = false;
             BindRenderTarget(&render_targets.depth_buffer_id, FindDepthBuffer());
         }
@@ -2533,10 +2542,29 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
     if (can_be_depth_blit) {
         try_options |= RelaxedOptions::Format;
     }
+    // A Switch 2 blit surface padded to whole GOBs: when no image has its own width, look for one
+    // as wide as the copy span (Bananza copies the 8x8 level of a texture it rendered as a 16x8
+    // surface, which matched no image and ran in software on a download of the source). The
+    // narrower image must also have the level's GOB layout.
+    const bool try_padded = src_addr != dst_addr && UsePaddedTargetWidths() &&
+                            copy.filter == Tegra::Engines::Fermi2D::Filter::Point;
+    const auto find_image = [&](const ImageInfo& info, GPUVAddr addr, s32 x0, s32 x1) {
+        const ImageId exact = FindImage(info, addr, try_options);
+        if (exact || !try_padded || GetFormatType(info.format) != SurfaceType::ColorTexture) {
+            return exact;
+        }
+        const u32 width = PaddedBlitWidth(info, x0, x1);
+        if (width == info.size.width) {
+            return ImageId{};
+        }
+        ImageInfo narrow = info;
+        narrow.size.width = width;
+        return FindImage(narrow, addr, RelaxedOptions::RequireBlockLayout);
+    };
     do {
         has_deleted_images = false;
-        src_id = FindImage(src_info, src_addr, try_options);
-        dst_id = FindImage(dst_info, dst_addr, try_options);
+        src_id = find_image(src_info, src_addr, copy.src_x0, copy.src_x1);
+        dst_id = find_image(dst_info, dst_addr, copy.dst_x0, copy.dst_x1);
         if (!copy.must_accelerate) {
             do {
                 if (!src_id && !dst_id) {
@@ -2680,8 +2708,41 @@ ImageViewId TextureCache<P>::FindColorBuffer(size_t index) {
     if (rt.format == Tegra::RenderTargetFormat::NONE) {
         return ImageViewId{};
     }
-    const ImageInfo info(regs.rt[index], regs.anti_alias_samples_mode);
+    ImageInfo info(regs.rt[index], regs.anti_alias_samples_mode);
+    ClipPaddedTarget(info);
     return FindRenderTargetView(info, gpu_addr);
+}
+
+template <class P>
+bool TextureCache<P>::UsePaddedTargetWidths() const {
+    // EDEN_NX2_PADDED_TARGETS: 0 off, 1 Donkey Kong Bananza only (as the source), 2 every
+    // Switch 2 program.
+    static const int mode = [] {
+        const char* const value = std::getenv("EDEN_NX2_PADDED_TARGETS");
+        if (value && value[0] >= '0' && value[0] <= '2') {
+            return value[0] - '0';
+        }
+        return PADDED_TARGETS_DEFAULT;
+    }();
+    constexpr u64 DkbProgramId = 0x040074A01BF12000ULL;
+    return mode != 0 && gpu_memory && gpu_memory->UsesNativeTiling() &&
+           (mode == 2 || Settings::GetCurrentProgramID() == DkbProgramId);
+}
+
+template <class P>
+void TextureCache<P>::ClipPaddedTarget(ImageInfo& info) const {
+    // A Switch 2 program gives a target's width padded to whole GOBs and samples it at its own:
+    // Donkey Kong Bananza draws into a 2112x1179 R16_FLOAT target (32 texels a GOB) and a
+    // 2096x1179 depth target with a 2095x1179 surface clip, and samples the first as a 2095x1179
+    // texture at the same address. Image lookups compare sizes strictly, so the target and the
+    // texture were two images, copied into each other on every switch between drawing and
+    // sampling. Both take the same guest memory with the same layout, and the clip keeps
+    // rendering out of the padding.
+    if (!UsePaddedTargetWidths()) {
+        return;
+    }
+    const auto& clip = maxwell3d->regs.surface_clip;
+    info.size.width = PaddedTargetWidth(info, clip.x.Value() + clip.width.Value());
 }
 
 template <class P>
@@ -2694,7 +2755,8 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
     if (gpu_addr == 0) {
         return ImageViewId{};
     }
-    const ImageInfo info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
+    ImageInfo info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
+    ClipPaddedTarget(info);
     return FindRenderTargetView(info, gpu_addr);
 }
 

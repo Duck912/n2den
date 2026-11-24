@@ -44,6 +44,7 @@
 #include "video_core/page_interest.h"
 #include "video_core/texture_cache/texture_bank_reuse.h"
 #include "video_core/texture_cache/types.h"
+#include "video_core/texture_cache/util.h"
 #include "video_core/textures/texture.h"
 
 namespace Tegra {
@@ -456,6 +457,12 @@ private:
     /// Find or create an image view for the depth buffer
     [[nodiscard]] ImageViewId FindDepthBuffer();
 
+    /// Switch 2 render targets padded to whole GOBs are looked up at the surface clip's width
+    /// (EDEN_NX2_PADDED_TARGETS).
+    [[nodiscard]] bool UsePaddedTargetWidths() const;
+    /// Narrows a render target given padded to whole GOBs to the surface clip (Switch 2).
+    void ClipPaddedTarget(ImageInfo& info) const;
+
     /// Find or create a view for a render target with the given image parameters
     [[nodiscard]] ImageViewId FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr);
 
@@ -572,6 +579,8 @@ private:
 
     bool has_deleted_images = false;
     bool is_rescaling = false;
+    /// The surface clip the bound render targets were looked up with (ClipPaddedTarget).
+    RenderTargetClip render_target_clip;
 
     /// Validates the entry's table and snapshot against the current graphics descriptor table.
     template <typename Table>
