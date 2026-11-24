@@ -591,8 +591,11 @@ TEST_CASE("MemoryTracker: CPU epoch tells whether a synchronized range can have 
     REQUIRE(memory_track->IsRegionCpuUnchangedSince(c, WORD * 2, synced));
     // A range reaching into that region is affected.
     REQUIRE(!memory_track->IsRegionCpuUnchangedSince(c + HIGH_PAGE_SIZE - PAGE, PAGE * 2, synced));
-    // CPU writes and cached writes in the region raise it.
+    // A write to another word (64 pages) of the region leaves the range alone.
     memory_track->MarkRegionAsCpuModified(c + WORD * 3, PAGE);
+    REQUIRE(memory_track->IsRegionCpuUnchangedSince(c, WORD * 2, synced));
+    // CPU writes and cached writes in the range raise it.
+    memory_track->MarkRegionAsCpuModified(c + WORD, PAGE);
     REQUIRE(!memory_track->IsRegionCpuUnchangedSince(c, WORD * 2, synced));
     memory_track->ForEachUploadRange(c, HIGH_PAGE_SIZE, [](u64, u64) {});
     const u64 resynced = memory_track->CpuEpoch();
@@ -618,7 +621,9 @@ TEST_CASE("MemoryTracker: CPU epoch is raised only when a bit becomes set", "[vi
     bool uploads = false;
     memory_track->ForEachCpuModifiedRange(c, WORD, [&uploads](u64, u64) { uploads = true; });
     REQUIRE(!uploads);
-    // A write to a clean page raises it.
+    // A write to a clean page of another word does not; one in the range does.
+    memory_track->MarkRegionAsCpuModified(c + WORD * 4, PAGE);
+    REQUIRE(memory_track->IsRegionCpuUnchangedSince(c, WORD, synced));
     memory_track->MarkRegionAsCpuModified(c + PAGE, PAGE);
     REQUIRE(!memory_track->IsRegionCpuUnchangedSince(c, WORD, synced));
     // A cached write to a clean page raises it (its page becomes untracked)...

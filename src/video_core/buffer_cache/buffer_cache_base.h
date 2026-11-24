@@ -654,7 +654,10 @@ private:
         u32 size = 0;
         u64 epoch = 0;
     };
-    std::array<SyncMemoEntry, 256> sync_memo{};
+    /// Direct-mapped. DK Bananza synchronizes ~100,000 ranges a frame: with 256 slots nearly every
+    /// miss was another range holding the slot, not a CPU write.
+    static constexpr u32 SYNC_MEMO_BITS = 12;
+    std::array<SyncMemoEntry, size_t{1} << SYNC_MEMO_BITS> sync_memo{};
     u64 sync_memo_hits = 0;
     u64 sync_memo_misses = 0;
 

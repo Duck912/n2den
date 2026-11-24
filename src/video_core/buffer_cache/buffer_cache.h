@@ -2718,8 +2718,13 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
     }();
     SyncMemoEntry* memo = nullptr;
     if (memo_enabled && size != 0) {
-        const u64 key = (device_addr >> 8) ^ (u64{size} * 0x9E3779B97F4A7C15ULL >> 40);
-        memo = &sync_memo[key % sync_memo.size()];
+        if (memory_tracker.ExactEpochs()) {
+            const u64 key = ((device_addr >> 4) ^ (u64{size} << 36)) * 0x9E3779B97F4A7C15ULL;
+            memo = &sync_memo[key >> (64 - SYNC_MEMO_BITS)];
+        } else { // EDEN_SYNC_MEMO_EXACT=0: the earlier 256 slots and hash
+            const u64 key = (device_addr >> 8) ^ (u64{size} * 0x9E3779B97F4A7C15ULL >> 40);
+            memo = &sync_memo[key % 256];
+        }
         if (memo->device_addr == device_addr && memo->size == size &&
             memory_tracker.IsRegionCpuUnchangedSince(device_addr, size, memo->epoch)) {
             ++sync_memo_hits;
@@ -2727,6 +2732,9 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             return true;
         }
         VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::SyncMemoMisses);
+        if (memo->device_addr != device_addr || memo->size != size) {
+            VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::SyncMemoKeyMisses);
+        }
         if (++sync_memo_misses % (1u << 20) == 0 && std::getenv("EDEN_SYNC_MEMO_STATS")) {
             LOG_INFO(HW_GPU, "Sync memo: {} hits, {} misses", sync_memo_hits, sync_memo_misses);
         }
@@ -2772,6 +2780,9 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         });
         remember();
         if (total_size_bytes == 0) {
+            if (memo) {
+                VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::SyncMemoEmptyMisses);
+            }
             return true;
         }
         const std::span<BufferCopy> copies_span(upload_copies.data(), upload_copies.size());

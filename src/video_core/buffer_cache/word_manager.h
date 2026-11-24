@@ -117,9 +117,10 @@ struct WordManager {
     /// @param size          Size in bytes to mark or unmark as modified
     /// @param newly_set     When not null, set to true if a CPU or untracked bit went from 0 to 1
     ///                      (what can make a range need an upload or a tracker update again)
+    /// @param set_epoch     With newly_set, stored in word_epoch of each word where that happened
     /// @return Whether a bit of `type` changed (statistics)
     bool ChangeRegionState(Type type, bool enable, u64 dirty_addr, u64 size,
-                           bool* newly_set = nullptr) noexcept {
+                           bool* newly_set = nullptr, u64 set_epoch = 0) noexcept {
         std::span<u64> state_words = Span(type);
         bool changed = false;
         bool set_bits = false;
@@ -133,10 +134,17 @@ struct WordManager {
             changed |= enable ? (state_words[index] & mask) != mask
                               : (state_words[index] & mask) != 0;
             if (enable) {
+                bool word_set = false;
                 if (type == Type::CPU) {
-                    set_bits |= ((~state_words[index] | ~untracked_words[index]) & mask) != 0;
+                    word_set = ((~state_words[index] | ~untracked_words[index]) & mask) != 0;
                 } else if (type == Type::CachedCPU) {
-                    set_bits |= (~untracked_words[index] & mask) != 0;
+                    word_set = (~untracked_words[index] & mask) != 0;
+                }
+                if (word_set) {
+                    set_bits = true;
+                    if (newly_set) {
+                        word_epoch[index] = set_epoch;
+                    }
                 }
                 state_words[index] |= mask;
                 if (type == Type::CPU || type == Type::CachedCPU)
@@ -268,8 +276,9 @@ struct WordManager {
             : std::make_pair<u64, u64>(0, 0);
     }
 
-    /// @return Whether a CPU or untracked bit went from 0 to 1
-    bool FlushCachedWrites() noexcept {
+    /// @return Whether a CPU or untracked bit went from 0 to 1 (set_epoch is then stored in
+    ///         word_epoch of each word where that happened)
+    bool FlushCachedWrites(u64 set_epoch = 0) noexcept {
         auto const cached_words = Span(Type::CachedCPU);
         auto const untracked_words = Span(Type::Untracked);
         auto const cpu_words = Span(Type::CPU);
@@ -277,7 +286,10 @@ struct WordManager {
         bool set_bits = false;
         for (u64 word_index = 0; word_index < num_words; ++word_index) {
             const u64 cached_bits = cached_words[word_index];
-            set_bits |= (cached_bits & ~(cpu_words[word_index] & untracked_words[word_index])) != 0;
+            if ((cached_bits & ~(cpu_words[word_index] & untracked_words[word_index])) != 0) {
+                set_bits = true;
+                word_epoch[word_index] = set_epoch;
+            }
             CollectChangedRanges(false, word_index, untracked_words[word_index], cached_bits, ranges);
             untracked_words[word_index] |= cached_bits;
             cpu_words[word_index] |= cached_bits;
@@ -352,6 +364,9 @@ struct WordManager {
     DeviceTracker* tracker = nullptr;
     VAddr cpu_addr = 0;
     u64 cpu_epoch = 0; ///< MemoryTrackerBase::CpuEpoch() when a CPU or untracked bit was last set here
+    /// The same per word (64 pages), kept when MemoryTrackerBase raises epochs exactly; never
+    /// above cpu_epoch
+    std::array<u64, num_words> word_epoch{};
 };
 
 } // namespace VideoCommon

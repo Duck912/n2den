@@ -45,8 +45,14 @@ public:
         return cpu_epoch;
     }
 
-    /// True when every region the range touches exists and was not raised after 'epoch'. If the
-    /// range had no CPU or untracked bit set at 'epoch', it still has none.
+    /// EDEN_SYNC_MEMO_EXACT (default on)
+    [[nodiscard]] bool ExactEpochs() const noexcept {
+        return exact_epoch;
+    }
+
+    /// True when every region the range touches exists and was not raised after 'epoch' (with exact
+    /// epochs: no word of 64 pages of the range was). If the range had no CPU or untracked bit set
+    /// at 'epoch', it still has none.
     [[nodiscard]] bool IsRegionCpuUnchangedSince(VAddr cpu_address, u64 size, u64 epoch) const noexcept {
         if (size == 0) {
             return true;
@@ -58,8 +64,23 @@ public:
         }
         for (size_t page_index = first; page_index <= last; ++page_index) {
             const Manager* const manager = top_tier[page_index];
-            if (!manager || manager->cpu_epoch > epoch) {
+            if (!manager) {
                 return false;
+            }
+            if (manager->cpu_epoch <= epoch) {
+                continue;
+            }
+            if (!exact_epoch) {
+                return false;
+            }
+            // Raised since: look at the words (64 pages each) of the range in this region.
+            const VAddr region_begin = page_index << HIGHER_PAGE_BITS;
+            const VAddr begin = (std::max)(cpu_address, region_begin) - region_begin;
+            const VAddr end = (std::min)(cpu_address + size, region_begin + HIGHER_PAGE_SIZE) - region_begin;
+            for (size_t word = begin / BYTES_PER_WORD; word <= (end - 1) / BYTES_PER_WORD; ++word) {
+                if (manager->word_epoch[word] > epoch) {
+                    return false;
+                }
             }
         }
         return true;
@@ -106,7 +127,7 @@ public:
         IteratePages<true>(dirty_cpu_addr, query_size, [this, &changed](Manager* manager, u64 offset, size_t size) {
             bool newly_set = true;
             changed |= manager->ChangeRegionState(Type::CPU, true, manager->cpu_addr + offset, size,
-                                                  exact_epoch ? &newly_set : nullptr);
+                                                  exact_epoch ? &newly_set : nullptr, cpu_epoch + 1);
             if (newly_set) {
                 manager->cpu_epoch = ++cpu_epoch;
             }
@@ -159,7 +180,7 @@ public:
             const VAddr cpu_address = manager->cpu_addr + offset;
             bool newly_set = true;
             manager->ChangeRegionState(Type::CachedCPU, true, cpu_address, size,
-                                       exact_epoch ? &newly_set : nullptr);
+                                       exact_epoch ? &newly_set : nullptr, cpu_epoch + 1);
             if (newly_set) {
                 manager->cpu_epoch = ++cpu_epoch;
             }
@@ -170,7 +191,7 @@ public:
     /// Flushes cached CPU writes, and notify the device_tracker about the deltas
     void FlushCachedWrites(VAddr query_cpu_addr, u64 query_size) noexcept {
         IteratePages<false>(query_cpu_addr, query_size, [this](Manager* manager, [[maybe_unused]] u64 offset, [[maybe_unused]] size_t size) {
-            if (manager->FlushCachedWrites() || !exact_epoch) {
+            if (manager->FlushCachedWrites(cpu_epoch + 1) || !exact_epoch) {
                 manager->cpu_epoch = ++cpu_epoch;
             }
         });
@@ -178,7 +199,7 @@ public:
 
     void FlushCachedWrites() noexcept {
         for (auto id : cached_pages) {
-            if (top_tier[id]->FlushCachedWrites() || !exact_epoch) {
+            if (top_tier[id]->FlushCachedWrites(cpu_epoch + 1) || !exact_epoch) {
                 top_tier[id]->cpu_epoch = ++cpu_epoch;
             }
         }
@@ -295,6 +316,7 @@ private:
         const VAddr base_cpu_addr = page_index << HIGHER_PAGE_BITS;
         top_tier[page_index] = GetNewManager(base_cpu_addr);
         top_tier[page_index]->cpu_epoch = ++cpu_epoch;
+        top_tier[page_index]->word_epoch.fill(cpu_epoch);
     }
 
     Manager* GetNewManager(VAddr base_cpu_address) {
