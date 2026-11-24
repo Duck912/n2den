@@ -16,11 +16,10 @@ TEST_CASE("39-bit heap and alias sizes scale with physical RAM", "[address-space
     }
     for (const size_t ram : {10_GiB, 12_GiB, 16_GiB, 32_GiB}) {
         REQUIRE(KAddressSpaceInfo::GetAddressSpaceSize(39, Type::Heap, ram) == ram);
-        REQUIRE(KAddressSpaceInfo::GetAddressSpaceSize(39, Type::Alias, ram) ==
-                (ram <= 16_GiB ? ram * 8 : 128_GiB));
+        REQUIRE(KAddressSpaceInfo::GetAddressSpaceSize(39, Type::Alias, ram) == 128_GiB);
     }
     REQUIRE(KAddressSpaceInfo::GetAddressSpaceSize(39, Type::Heap, 8_GiB + 1) == 9_GiB);
-    REQUIRE(KAddressSpaceInfo::GetAddressSpaceSize(39, Type::Alias, 8_GiB + 1) == 72_GiB);
+    REQUIRE(KAddressSpaceInfo::GetAddressSpaceSize(39, Type::Alias, 8_GiB + 1) == 128_GiB);
     REQUIRE(KAddressSpaceInfo::GetAddressSpaceSize(39, Type::Heap, 16_GiB + 1) == 17_GiB);
     REQUIRE(KAddressSpaceInfo::GetAddressSpaceSize(39, Type::Alias, 16_GiB + 1) == 128_GiB);
     REQUIRE(KAddressSpaceInfo::GetAddressSpaceSize(39, Type::Heap,

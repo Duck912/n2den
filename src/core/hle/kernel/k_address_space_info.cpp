@@ -61,7 +61,10 @@ std::size_t KAddressSpaceInfo::GetAddressSpaceSize(size_t width, KAddressSpaceIn
         const size_t heap_size = std::clamp(
             Common::AlignUp(std::min(physical_memory_size, size_t{32_GiB}), size_t{1_GiB}),
             size_t{8_GiB}, size_t{32_GiB});
-        return type == Type::Heap ? heap_size : std::min(heap_size * 8, size_t{128_GiB});
+        // Above Switch 1's 8 GiB the alias region is 128 GiB: Xenoblade Chronicles 2 Switch 2
+        // Edition reserves two 60 GiB address regions at boot (its allocator is constructed twice
+        // and the first is never freed), which a 96 GiB region from 12 GiB of memory can't hold.
+        return type == Type::Heap ? heap_size : (heap_size > 8_GiB ? 128_GiB : 64_GiB);
     }
     return GetAddressSpaceInfo(width, type).size;
 }
