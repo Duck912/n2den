@@ -246,6 +246,9 @@ public:
     ~BufferCache();
 
     void TickFrame();
+
+    /// [DEBUG] EDEN_NX2_SYNC_COUNTERS: how often a draw's buffer binding list repeats.
+    void NoteDrawBindings(bool is_indexed, bool table_span);
     template <typename Func>
     void ForEachBoundBuffer(bool compute, Func&& func) {
         if (!channel_state)

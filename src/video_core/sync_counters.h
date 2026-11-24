@@ -54,6 +54,20 @@ enum Counter : u32 {
     InvalTextureSkips,  ///< ... the texture cache was not asked about (no image on their pages)
     InvalQuerySkips,    ///< ... the query cache was not asked about
     InvalShaderSkips,   ///< ... the shader cache was not asked about
+    BindDraws,          ///< Draws whose buffer binding lists were compared (NoteDrawBindings)
+    BindSamePrevFull,   ///< ... same full list (uniform, storage, texel, vertex, index) as the previous draw
+    BindRecentFull,     ///< ... same full list as one of the last 32 draws
+    BindDistinctFull,   ///< distinct full lists, counted per frame
+    BindSamePrevNoUni,  ///< as above with uniform addresses left out (masks kept)
+    BindRecentNoUni,
+    BindDistinctNoUni,
+    BindSamePrevNoWr,   ///< ... and written storage addresses left out too
+    BindRecentNoWr,
+    BindDistinctNoWr,
+    BindNative,         ///< draws on the native (Ampere) macro engine
+    BindGrouped,        ///< draws with grouped storage on
+    BindTableSpan,      ///< draws with a pointer table span
+    BindIndirect,       ///< draws with a host indirect buffer
     CounterCount,
 };
 

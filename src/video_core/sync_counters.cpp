@@ -150,6 +150,21 @@ void MaybeReport() {
              r(c[InvalRanges]), r(c[InvalTextureSkips]), r(c[InvalQuerySkips]),
              r(c[InvalShaderSkips]), r(c[SyncMemoKeyMisses]), r(c[SyncMemoEmptyMisses]));
 
+    if (c[BindDraws] != 0) {
+        const double d = static_cast<double>(c[BindDraws]);
+        const auto p = [&](u64 v) { return 100.0 * static_cast<double>(v) / d; };
+        LOG_INFO(Render_Vulkan,
+                 "Sync counters bindings: draws {}; full same-prev {:.1f}% recent32 {:.1f}% "
+                 "distinct {}; no-uniform same-prev {:.1f}% recent32 {:.1f}% distinct {}; "
+                 "no-uniform-no-written same-prev {:.1f}% recent32 {:.1f}% distinct {}; native "
+                 "{:.1f}% grouped {:.1f}% table-span {:.1f}% indirect {:.1f}%",
+                 r(c[BindDraws]), p(c[BindSamePrevFull]), p(c[BindRecentFull]),
+                 r(c[BindDistinctFull]), p(c[BindSamePrevNoUni]), p(c[BindRecentNoUni]),
+                 r(c[BindDistinctNoUni]), p(c[BindSamePrevNoWr]), p(c[BindRecentNoWr]),
+                 r(c[BindDistinctNoWr]), p(c[BindNative]), p(c[BindGrouped]),
+                 p(c[BindTableSpan]), p(c[BindIndirect]));
+    }
+
     std::string causes;
     for (u32 i = 0; i < CauseCount; ++i) {
         const u64 count = cause_counts[i].exchange(0, std::memory_order_relaxed);

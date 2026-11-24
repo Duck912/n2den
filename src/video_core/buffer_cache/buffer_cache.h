@@ -98,6 +98,170 @@ void BufferCache<P>::RunGarbageCollector() {
 }
 
 template <class P>
+void BufferCache<P>::NoteDrawBindings(bool is_indexed, bool table_span) {
+    using namespace VideoCommon::SyncCounters;
+    if (!Enabled()) {
+        return;
+    }
+    struct Hasher {
+        u64 h = 0xcbf29ce484222325ULL;
+        void operator()(u64 v) {
+            h ^= v;
+            h *= 0x100000001b3ULL;
+            h ^= h >> 29;
+        }
+    };
+    // Variant 0 full, 1 without uniform addresses, 2 also without written storage addresses.
+    std::array<Hasher, 3> hs{};
+    const auto all = [&](u64 v) { for (auto& h : hs) h(v); };
+    const auto& cs = *channel_state;
+    const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        all(0x1000 + stage);
+        all(cs.enabled_uniform_buffer_masks[stage]);
+        ForEachEnabledBit(cs.enabled_uniform_buffer_masks[stage], [&](u32 index) {
+            if (native && Tegra::NativeRootTables::IsBank(index)) return;
+            const Binding& b = cs.uniform_buffers[stage][index];
+            hs[0](b.device_addr);
+            hs[0](b.size);
+        });
+        all(cs.enabled_storage_buffers[stage]);
+        all(cs.written_storage_buffers[stage]);
+        ForEachEnabledBit(cs.enabled_storage_buffers[stage], [&](u32 index) {
+            const Binding& b = cs.storage_buffers[stage][index];
+            const bool written = ((cs.written_storage_buffers[stage] >> index) & 1) != 0;
+            hs[0](b.device_addr); hs[0](b.gpu_addr); hs[0](b.size); hs[0](b.write_size); hs[0](b.pointer_offset);
+            hs[1](b.device_addr); hs[1](b.gpu_addr); hs[1](b.size); hs[1](b.write_size); hs[1](b.pointer_offset);
+            if (!written) {
+                hs[2](b.device_addr); hs[2](b.gpu_addr); hs[2](b.size);
+            }
+        });
+        all(cs.enabled_texture_buffers[stage]);
+        ForEachEnabledBit(cs.enabled_texture_buffers[stage], [&](u32 index) {
+            const auto& b = cs.texture_buffers[stage][index];
+            all(b.device_addr);
+            all(b.size);
+            all(static_cast<u64>(b.format));
+        });
+    }
+    all(enabled_vertex_buffers_mask);
+    ForEachEnabledBit(enabled_vertex_buffers_mask, [&](u32 index) {
+        all(v_buffer[index].device_addr);
+        all(v_buffer[index].size);
+    });
+    all(is_indexed);
+    if (is_indexed) {
+        all(cs.index_buffer.device_addr);
+        all(cs.index_buffer.size);
+    }
+    struct State {
+        u64 prev = 0;
+        std::array<u64, 32> recent{};
+        size_t next = 0;
+        std::unordered_set<u64> frame;
+    };
+    static std::array<State, 3> states;
+    static u64 last_frame = ~u64{0};
+    const bool new_frame = last_frame != frame_tick;
+    last_frame = frame_tick;
+    static constexpr std::array<std::array<Counter, 3>, 3> ids{{
+        {BindSamePrevFull, BindRecentFull, BindDistinctFull},
+        {BindSamePrevNoUni, BindRecentNoUni, BindDistinctNoUni},
+        {BindSamePrevNoWr, BindRecentNoWr, BindDistinctNoWr},
+    }};
+    Add(BindDraws);
+    if (native) Add(BindNative);
+    if constexpr (requires { runtime.UseGroupedStorage(); }) {
+        if (runtime.UseGroupedStorage()) Add(BindGrouped);
+    }
+    if (table_span) Add(BindTableSpan);
+    if (current_draw_indirect) Add(BindIndirect);
+    // Per component (uniform addresses, storage, vertex, index) and per slot: repeats within
+    // the recent draws, logged every 256k draws.
+    {
+        std::array<Hasher, 5> comp{};
+        struct SlotStats {
+            std::array<u64, 64> recent{};
+            size_t next = 0;
+            u64 slots = 0, hits = 0;
+            bool Note(u64 key) {
+                ++slots;
+                if (std::find(recent.begin(), recent.end(), key) != recent.end()) {
+                    ++hits;
+                    return true;
+                }
+                recent[next++ % recent.size()] = key;
+                return false;
+            }
+        };
+        static std::array<SlotStats, 4> slot_stats; // uniform, storage read, storage written, vertex+index
+        static std::array<SlotStats, 5> comp_stats;
+        static std::array<u64, 5> comp_prev{};
+        static std::array<u64, 5> comp_same{};
+        static u64 draws = 0;
+        const auto mix = [](u64 a, u64 b) { return (a * 0x9E3779B97F4A7C15ULL) ^ (b + (a >> 17)); };
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            ForEachEnabledBit(cs.enabled_uniform_buffer_masks[stage], [&](u32 index) {
+                if (native && Tegra::NativeRootTables::IsBank(index)) return;
+                const Binding& b = cs.uniform_buffers[stage][index];
+                comp[0](b.device_addr); comp[0](b.size);
+                slot_stats[0].Note(mix(b.device_addr, b.size));
+            });
+            ForEachEnabledBit(cs.enabled_storage_buffers[stage], [&](u32 index) {
+                const Binding& b = cs.storage_buffers[stage][index];
+                const bool written = ((cs.written_storage_buffers[stage] >> index) & 1) != 0;
+                comp[written ? 4 : 1](b.gpu_addr); comp[written ? 4 : 1](b.size);
+                slot_stats[written ? 2 : 1].Note(mix(b.gpu_addr, mix(b.size, b.write_size)));
+            });
+        }
+        ForEachEnabledBit(enabled_vertex_buffers_mask, [&](u32 index) {
+            comp[2](v_buffer[index].device_addr); comp[2](v_buffer[index].size);
+            slot_stats[3].Note(mix(v_buffer[index].device_addr, v_buffer[index].size));
+        });
+        if (is_indexed) {
+            comp[3](cs.index_buffer.device_addr); comp[3](cs.index_buffer.size);
+            slot_stats[3].Note(mix(cs.index_buffer.device_addr, cs.index_buffer.size));
+        }
+        for (size_t i = 0; i < 5; ++i) {
+            comp_stats[i].Note(comp[i].h);
+            comp_same[i] += comp[i].h == comp_prev[i];
+            comp_prev[i] = comp[i].h;
+        }
+        if (++draws % (1u << 18) == 0) {
+            const auto pc = [](u64 a, u64 b) { return b ? 100.0 * double(a) / double(b) : 0.0; };
+            LOG_INFO(HW_GPU,
+                     "Binding repeats per component (same-prev / recent64): uniform addrs "
+                     "{:.1f}/{:.1f}%, storage read {:.1f}/{:.1f}%, storage written {:.1f}/{:.1f}%, "
+                     "vertex {:.1f}/{:.1f}%, index {:.1f}/{:.1f}%; per slot recent64: uniform "
+                     "{:.1f}% ({:.2f}/draw), storage read {:.1f}% ({:.2f}/draw), storage written "
+                     "{:.1f}% ({:.2f}/draw), vertex+index {:.1f}% ({:.2f}/draw)",
+                     pc(comp_same[0], draws), pc(comp_stats[0].hits, draws), pc(comp_same[1], draws),
+                     pc(comp_stats[1].hits, draws), pc(comp_same[4], draws), pc(comp_stats[4].hits, draws),
+                     pc(comp_same[2], draws), pc(comp_stats[2].hits, draws), pc(comp_same[3], draws),
+                     pc(comp_stats[3].hits, draws), pc(slot_stats[0].hits, slot_stats[0].slots),
+                     double(slot_stats[0].slots) / double(draws), pc(slot_stats[1].hits, slot_stats[1].slots),
+                     double(slot_stats[1].slots) / double(draws), pc(slot_stats[2].hits, slot_stats[2].slots),
+                     double(slot_stats[2].slots) / double(draws), pc(slot_stats[3].hits, slot_stats[3].slots),
+                     double(slot_stats[3].slots) / double(draws));
+            draws = 0;
+            comp_same = {};
+            for (auto& s : comp_stats) { s.hits = s.slots = 0; }
+            for (auto& s : slot_stats) { s.hits = s.slots = 0; }
+        }
+    }
+    for (size_t v = 0; v < 3; ++v) {
+        State& st = states[v];
+        const u64 h = hs[v].h;
+        if (new_frame) st.frame.clear();
+        if (h == st.prev) Add(ids[v][0]);
+        if (std::find(st.recent.begin(), st.recent.end(), h) != st.recent.end()) Add(ids[v][1]);
+        else st.recent[st.next++ % st.recent.size()] = h;
+        if (st.frame.insert(h).second) Add(ids[v][2]);
+        st.prev = h;
+    }
+}
+
+template <class P>
 void BufferCache<P>::TickFrame() {
     // Homebrew console apps don't create or bind any channels, so this will be nullptr.
     if (!channel_state) {
