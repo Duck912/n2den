@@ -1248,7 +1248,17 @@ private:
         // Word 12 is (swap interval << 16) | refresh rate (0x1003c, then 0x2003c once the game
         // is past its boot logos). Fortune's Weave runs at interval 2 (30 fps); forcing 1 made
         // it run at double speed.
-        const u32 swap_interval = std::clamp<u32>(packet[12] >> 16, 1, 4);
+        u32 swap_interval = std::clamp<u32>(packet[12] >> 16, 1, 4);
+        // [TEST] EDEN_NX2_SWAP_INTERVAL=N presents every frame at swap interval N (1-4) whatever
+        // the game asks for (Bananza switches between 1 and 2 by its measured frame cost).
+        static const u32 forced_interval = [] {
+            const char* const value = std::getenv("EDEN_NX2_SWAP_INTERVAL");
+            return value ? std::clamp<u32>(static_cast<u32>(std::strtoul(value, nullptr, 0)), 0, 4)
+                         : 0U;
+        }();
+        if (forced_interval != 0) {
+            swap_interval = forced_interval;
+        }
         if (static u32 last_interval{}; swap_interval != std::exchange(last_interval, swap_interval)) {
             LOG_INFO(Service_AM, "Native present swap interval {} (word 12 = {:#x})", swap_interval, packet[12]);
         }
