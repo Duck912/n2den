@@ -75,6 +75,12 @@ public:
     void RequestOutsideRenderPassOperationContext();
 
     /// Returns true when a render pass is currently active in the scheduler state.
+    /// Transform feedback began (vkCmdBeginTransformFeedbackEXT recorded): the render pass that
+    /// ends next gets the transform-feedback output barrier.
+    void NoteTransformFeedbackActive() {
+        xfb_in_pass = true;
+    }
+
     bool IsRenderPassActive() const {
         return state.renderpass != VK_NULL_HANDLE;
     }
@@ -336,6 +342,9 @@ private:
 
     const Device& device;
     StateTracker& state_tracker;
+
+    /// Transform feedback was active since the last render pass end (NoteTransformFeedbackActive).
+    bool xfb_in_pass = false;
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
     bool graphics_pipeline_missing{};

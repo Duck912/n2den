@@ -29,6 +29,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
 #include "video_core/back_thread_stats.h"
+#include "video_core/sync_counters.h"
 #include "video_core/query_cache/pending_reports.h"
 #include "video_core/gpu_split.h"
 #ifdef ARCHITECTURE_x86_64
@@ -654,6 +655,9 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) [[unlikely]] {
         draw_manager.DrawDeferred(*this);
     }
+    if (VideoCommon::SyncCounters::Enabled()) [[unlikely]] {
+        VideoCommon::SyncCounters::NoteRegisterWrite(method, regs.reg_array[method] == argument);
+    }
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
@@ -674,6 +678,7 @@ void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argume
         }
         return;
     case MAXWELL3D_REG_INDEX(wait_for_idle):
+        VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::WfiMethods);
         return rasterizer->WaitForIdle();
     case MAXWELL3D_REG_INDEX(shadow_ram_control):
         shadow_state.shadow_ram_control = static_cast<Regs::ShadowRamControl>(nonshadow_argument);

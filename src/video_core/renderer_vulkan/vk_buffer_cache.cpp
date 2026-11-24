@@ -493,7 +493,9 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
     // Measuring a popular game, this number never exceeds the specified size once data is warmed up
     boost::container::small_vector<VkBufferCopy, 8> vk_copies(copies.size());
     std::ranges::transform(copies, vk_copies.begin(), MakeBufferCopy);
-    if (src_buffer == staging_pool.StreamBuf() && can_reorder_upload) {
+    const bool from_stream = src_buffer == staging_pool.StreamBuf();
+    if (from_stream && can_reorder_upload) {
+        VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::ReorderedUploads);
         scheduler.RecordWithUploadBuffer([src_buffer, dst_buffer, vk_copies](
                                              vk::CommandBuffer, vk::CommandBuffer upload_cmdbuf) {
             upload_cmdbuf.CopyBuffer(src_buffer, dst_buffer, vk_copies);
@@ -501,6 +503,17 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
         return;
     }
 
+    if (VideoCommon::SyncCounters::Enabled()) {
+        u64 bytes = 0;
+        for (const VideoCommon::BufferCopy& copy : copies) {
+            bytes += copy.size;
+        }
+        VideoCommon::SyncCounters::Add(from_stream ? VideoCommon::SyncCounters::InlineUploads : VideoCommon::SyncCounters::OtherCopies);
+        VideoCommon::SyncCounters::Add(from_stream ? VideoCommon::SyncCounters::InlineUploadBytes
+                                                   : VideoCommon::SyncCounters::OtherCopyBytes, bytes);
+    }
+    const VideoCommon::SyncCounters::ScopedCause cause{from_stream ? VideoCommon::SyncCounters::CauseInlineUpload
+                                                                  : VideoCommon::SyncCounters::CauseBufferCopy};
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([src_buffer, dst_buffer, vk_copies, barrier](vk::CommandBuffer cmdbuf) {
         if (barrier) {
@@ -522,6 +535,7 @@ void BufferCacheRuntime::PreCopyBarrier() {
         .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
         .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
     };
+    const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseCopyBarrier};
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([](vk::CommandBuffer cmdbuf) {
         cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -536,6 +550,7 @@ void BufferCacheRuntime::PostCopyBarrier() {
         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
     };
+    const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseCopyBarrier};
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([](vk::CommandBuffer cmdbuf) {
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
@@ -560,6 +575,7 @@ void BufferCacheRuntime::ClearBuffer(VkBuffer dest_buffer, u32 offset, size_t si
         .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
     };
 
+    const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseBufferClear};
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([dest_buffer, offset, size, value](vk::CommandBuffer cmdbuf) {
         cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -574,6 +590,8 @@ void BufferCacheRuntime::FlushStorageWrites() {
     const bool scatter = std::any_of(storage_batch.begin(), storage_batch.end(),
         [](const auto& entry) { return entry.written && !entry.ref.sparse; });
     if (scatter) {
+        const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseScatter};
+        VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::ScatterBatches);
         PreCopyBarrier();
         for (const auto& entry : storage_batch) {
             if (!entry.written || entry.ref.sparse) continue;
@@ -584,6 +602,7 @@ void BufferCacheRuntime::FlushStorageWrites() {
                     .dst_offset = static_cast<u64>(source.offset),
                     .size = static_cast<size_t>(source.size),
                 }}};
+                VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::ScatterCopies);
                 CopyBuffer(source.handle, entry.ref.handle, copy, false);
                 source_offset += source.size;
             }
@@ -609,6 +628,8 @@ bool BufferCacheRuntime::BindMultiRangeStorageBuffer(u64 key, bool is_written, u
                 std::vector<MultiRangeSource>(multi_range_sources.begin(), multi_range_sources.end()), is_written});
             entry = std::prev(storage_batch.end());
             if (!ref.sparse) {
+                const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseGather};
+                VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::GatherBatches);
                 PreCopyBarrier();
                 VkDeviceSize destination_offset = 0;
                 for (const auto& source : entry->sources) {
@@ -617,6 +638,7 @@ bool BufferCacheRuntime::BindMultiRangeStorageBuffer(u64 key, bool is_written, u
                         .dst_offset = static_cast<u64>(destination_offset),
                         .size = static_cast<size_t>(source.size),
                     }}};
+                    VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::GatherCopies);
                     CopyBuffer(ref.handle, source.handle, copy, false);
                     destination_offset += source.size;
                 }

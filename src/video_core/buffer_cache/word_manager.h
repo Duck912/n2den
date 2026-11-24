@@ -115,8 +115,10 @@ struct WordManager {
     /// @param enable        If enabling or disabling
     /// @param dirty_addr    Base address to mark or unmark as modified
     /// @param size          Size in bytes to mark or unmark as modified
-    void ChangeRegionState(Type type, bool enable, u64 dirty_addr, u64 size) noexcept {
+    /// @return Whether a bit of `type` changed (statistics)
+    bool ChangeRegionState(Type type, bool enable, u64 dirty_addr, u64 size) noexcept {
         std::span<u64> state_words = Span(type);
+        bool changed = false;
         [[maybe_unused]] std::span<u64> untracked_words = Span(Type::Untracked);
         [[maybe_unused]] std::span<u64> cached_words = Span(Type::CachedCPU);
         std::vector<std::pair<VAddr, u64>> ranges;
@@ -124,6 +126,8 @@ struct WordManager {
             if (type == Type::CPU || type == Type::CachedCPU) {
                 CollectChangedRanges(!enable, index, untracked_words[index], mask, ranges);
             }
+            changed |= enable ? (state_words[index] & mask) != mask
+                              : (state_words[index] & mask) != 0;
             if (enable) {
                 state_words[index] |= mask;
                 if (type == Type::CPU || type == Type::CachedCPU)
@@ -141,6 +145,7 @@ struct WordManager {
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, (!enable) ? 1 : -1);
         }
+        return changed;
     }
 
     /// @brief Loop over each page in the given range.

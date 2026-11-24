@@ -23,6 +23,7 @@
 #include "video_core/buffer_cache/storage_range_groups.h"
 #include "video_core/buffer_cache/storage_buffer_size.h"
 #include "video_core/back_thread_stats.h"
+#include "video_core/sync_counters.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/guest_memory.h"
 #include "video_core/frame_snapshot.h"
@@ -2722,8 +2723,10 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         if (memo->device_addr == device_addr && memo->size == size &&
             memory_tracker.IsRegionCpuUnchangedSince(device_addr, size, memo->epoch)) {
             ++sync_memo_hits;
+            VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::SyncMemoHits);
             return true;
         }
+        VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::SyncMemoMisses);
         if (++sync_memo_misses % (1u << 20) == 0 && std::getenv("EDEN_SYNC_MEMO_STATS")) {
             LOG_INFO(HW_GPU, "Sync memo: {} hits, {} misses", sync_memo_hits, sync_memo_misses);
         }

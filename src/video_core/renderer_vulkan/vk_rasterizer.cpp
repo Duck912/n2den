@@ -839,6 +839,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 }
 
 void RasterizerVulkan::DispatchCompute() {
+    const VideoCommon::SyncCounters::ScopedCause sync_cause{VideoCommon::SyncCounters::CauseCompute};
     const VideoCommon::BackStats::ScopedSharedTime compute_time{VideoCommon::BackStats::shared.compute};
     if (VideoCommon::BackStats::Enabled()) {
         VideoCommon::BackStats::draw_thread.last_compute_serial = VideoCommon::BackStats::draw_thread.draw_serial;
@@ -1366,7 +1367,12 @@ void RasterizerVulkan::WaitForIdle() {
 
     query_cache.NotifyWFI();
 
-    scheduler.RequestOutsideRenderPassOperationContext();
+    VideoCommon::SyncCounters::Add(scheduler.IsRenderPassActive() ? VideoCommon::SyncCounters::WfiInPass
+                                                       : VideoCommon::SyncCounters::WfiOutsidePass);
+    {
+        const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseWfi};
+        scheduler.RequestOutsideRenderPassOperationContext();
+    }
     scheduler.Record([event = *wfi_event, flags](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetEvent(event, flags);
         cmdbuf.WaitEvents(event, flags, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, {}, {}, {});
@@ -1376,6 +1382,8 @@ void RasterizerVulkan::WaitForIdle() {
 
 void RasterizerVulkan::FragmentBarrier() {
     // We already put barriers when a render pass finishes
+    VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::FragmentBarriers);
+    const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseFragmentBarrier};
     scheduler.RequestOutsideRenderPassOperationContext();
 }
 
@@ -1436,6 +1444,10 @@ void RasterizerVulkan::TickFrame() {
     }
     VideoCore::N2DenDebug::FrameEnd();
     VideoCommon::BackStats::Add(VideoCommon::BackStats::shared.frame, 1);
+    if (VideoCommon::SyncCounters::Enabled()) [[unlikely]] {
+        VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::Frames);
+        VideoCommon::SyncCounters::MaybeReport();
+    }
     draw_counter = 0;
     guest_descriptor_queue.TickFrame();
     compute_pass_descriptor_queue.TickFrame();
@@ -1657,7 +1669,10 @@ void RasterizerVulkan::FlushWork() {
     // waits once a frame (Finish, for the GPU-written handle table) for all work submitted before
     // it: 760 -> 255 us per wait in the city plaza, with more queue submissions (~240 -> ~860/s).
     // EDEN_FLUSH_DRAWS=N sets the period for every title (32 to 1048576, rounded up to a multiple
-    // of CHECK_MASK + 1; 4096 restores the old one for Switch 2 titles).
+    // of CHECK_MASK + 1; 4096 restores the old one for Switch 2 titles, 128 the previous native
+    // default). NATIVE_FLUSH_DRAWS is 1024 since 2026-11-23 (was 128): in Donkey Kong Bananza
+    // EDEN_FLUSH_DRAWS=1024 lowered the GPU's 3D load from 57.7% to 52.1% at a slightly higher
+    // frame rate (fewer queue submissions, each with its own barriers).
     // The counter is checked when it reaches CHECK_MASK modulo CHECK_MASK + 1: with the default
     // period the comparison stays as it was (a flush every DRAWS_TO_DISPATCH + CHECK_MASK draws);
     // with a set one the flush comes every N - 1 draws (the counter restarts at zero). Other
@@ -1675,7 +1690,7 @@ void RasterizerVulkan::FlushWork() {
     }();
     u32 flush_at = custom_flush_at != 0 ? custom_flush_at : DRAWS_TO_DISPATCH;
 #ifndef __ANDROID__
-    static constexpr u32 NATIVE_FLUSH_DRAWS = 128;
+    static constexpr u32 NATIVE_FLUSH_DRAWS = 1024;
     static_assert(NATIVE_FLUSH_DRAWS % (CHECK_MASK + 1) == 0);
     if (custom_flush_at == 0 && maxwell3d != nullptr &&
         maxwell3d->GetNativeMacroEngine().native_turing) {
@@ -1689,6 +1704,7 @@ void RasterizerVulkan::FlushWork() {
         scheduler.DispatchWork();
         return;
     }
+    VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::PeriodicFlushes);
     scheduler.Flush();
     draw_counter = 0;
 }

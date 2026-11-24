@@ -21,6 +21,7 @@
 #include <fmt/format.h>
 
 #include "video_core/renderer_vulkan/vk_query_cache.h"
+#include "video_core/sync_counters.h"
 
 #include "common/settings.h"
 #include "video_core/gpu_written_pages.h"
@@ -126,6 +127,7 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore)
     }
 #endif
     // When finishing, we need to wait for the submission to have executed on the device.
+    VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::Finishes);
     const u64 presubmit_tick = CurrentTick();
     SubmitExecution(signal_semaphore, wait_semaphore);
     Wait(presubmit_tick);
@@ -175,6 +177,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
                                     const VkClearValue* clear_values, u32 clear_value_count) {
     const VkFramebuffer framebuffer_handle = framebuffer->Handle();
     const VkExtent2D render_area = framebuffer->RenderArea();
+    VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::RenderPassBegins);
     state.renderpass = renderpass;
     state.framebuffer = framebuffer_handle;
     state.render_area = render_area;
@@ -248,6 +251,7 @@ bool Scheduler::DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot,
         return false;
     }
     if (deferred_clear.framebuffer != nullptr && deferred_clear.framebuffer != framebuffer) {
+        const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseDeferredClear};
         RealizeDeferredClear();
         EndRenderPass();
     }
@@ -262,6 +266,7 @@ bool Scheduler::DeferDepthStencilClear(const Framebuffer* framebuffer, const VkC
         return false;
     }
     if (deferred_clear.framebuffer != nullptr && deferred_clear.framebuffer != framebuffer) {
+        const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseDeferredClear};
         RealizeDeferredClear();
         EndRenderPass();
     }
@@ -275,6 +280,7 @@ void Scheduler::FlushDeferredClear() {
     if (deferred_clear.framebuffer == nullptr) {
         return;
     }
+    const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseDeferredClear};
     RealizeDeferredClear();
     EndRenderPass();
 }
@@ -293,6 +299,7 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer) {
         return;
     }
     // Ends any active pass and realizes a deferred clear
+    const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseFramebuffer};
     EndRenderPass();
     BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0);
 }
@@ -439,7 +446,11 @@ void Scheduler::AllocateWorkerCommandBuffer() {
 }
 
 u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
-    EndPendingOperations();
+    VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::Submits);
+    {
+        const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseSubmit};
+        EndPendingOperations();
+    }
     InvalidateState();
 
     const u64 signal_value = master_semaphore->NextTick();
@@ -525,10 +536,28 @@ void Scheduler::EndRenderPass()
         query_cache->CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, false);
         query_cache->NotifySegment(false);
 
+        // The transform-feedback output barrier only after a pass in which transform feedback was
+        // begun (NoteTransformFeedbackActive, from the query cache's vkCmdBeginTransformFeedbackEXT);
+        // it used to follow every pass on devices with the extension.
+        // EDEN_NX2_XFB_BARRIER_ALWAYS=1 restores that.
+        static const bool xfb_barrier_always = [] {
+            const char* const value = std::getenv("EDEN_NX2_XFB_BARRIER_ALWAYS");
+            return value != nullptr && value[0] != '\0' && value[0] != '0';
+        }();
+        const bool has_transform_feedback =
+            device.IsExtTransformFeedbackSupported() && (xfb_barrier_always || xfb_in_pass);
+        xfb_in_pass = false;
+        if (VideoCommon::SyncCounters::Enabled()) {
+            VideoCommon::SyncCounters::NoteRenderPassEnd();
+            if (has_transform_feedback) {
+                VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::XfbBarriers);
+            }
+        }
+
         Record([num_images = num_renderpass_images,
                        images = renderpass_images,
                        ranges = renderpass_image_ranges,
-                       has_transform_feedback = device.IsExtTransformFeedbackSupported()](
+                       has_transform_feedback](
                           vk::CommandBuffer cmdbuf) {
             std::array<VkImageMemoryBarrier, 9> barriers;
             for (size_t i = 0; i < num_images; ++i) {

@@ -105,6 +105,8 @@ add_library(video_core STATIC
     native_semaphore.h
     back_thread_stats.cpp
     back_thread_stats.h
+    sync_counters.cpp
+    sync_counters.h
     gpu_split.cpp
     frame_snapshot.h
     upload_stats.h

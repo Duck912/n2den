@@ -17,6 +17,7 @@
 #include "common/alignment.h"
 #include "common/common_types.h"
 #include "video_core/buffer_cache/word_manager.h"
+#include "video_core/sync_counters.h"
 
 namespace VideoCommon {
 
@@ -98,10 +99,15 @@ public:
 
     /// Mark region as CPU modified, notifying the device_tracker about this change
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
-        IteratePages<true>(dirty_cpu_addr, query_size, [this](Manager* manager, u64 offset, size_t size) {
+        bool changed = false;
+        IteratePages<true>(dirty_cpu_addr, query_size, [this, &changed](Manager* manager, u64 offset, size_t size) {
             manager->cpu_epoch = ++cpu_epoch;
-            manager->ChangeRegionState(Type::CPU, true, manager->cpu_addr + offset, size);
+            changed |= manager->ChangeRegionState(Type::CPU, true, manager->cpu_addr + offset, size);
         });
+        if (VideoCommon::SyncCounters::Enabled()) {
+            VideoCommon::SyncCounters::Add(changed ? VideoCommon::SyncCounters::CpuMarkChanged
+                                         : VideoCommon::SyncCounters::CpuMarkNoChange);
+        }
     }
 
     /// Unmark region as CPU modified, notifying the device_tracker about this change

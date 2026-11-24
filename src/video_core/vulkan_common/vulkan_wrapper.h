@@ -20,6 +20,7 @@
 
 #include "common/common_types.h"
 #include "video_core/vulkan_common/vulkan.h"
+#include "video_core/sync_counters.h"
 
 #ifdef _MSC_VER
 #pragma warning(disable : 26812) // Disable prefer enum class over enum
@@ -1432,6 +1433,7 @@ public:
                          VkDependencyFlags dependency_flags, Span<VkMemoryBarrier> memory_barriers,
                          Span<VkBufferMemoryBarrier> buffer_barriers,
                          Span<VkImageMemoryBarrier> image_barriers) const noexcept {
+        VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::Barriers);
         static constexpr u32 MaxBarriers = 16;
         if (dld->vkCmdPipelineBarrier2 && memory_barriers.size() <= MaxBarriers &&
             buffer_barriers.size() <= MaxBarriers && image_barriers.size() <= MaxBarriers) {

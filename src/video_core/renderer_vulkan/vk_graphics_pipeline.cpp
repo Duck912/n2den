@@ -1522,6 +1522,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     VideoCommon::BackStats::Mark(VideoCommon::BackStats::BindStage);
 
     if (regs.transform_feedback_enabled != 0) {
+        const VideoCommon::SyncCounters::ScopedCause cause{VideoCommon::SyncCounters::CauseXfbPipeline};
         scheduler.RequestOutsideRenderPassOperationContext();
     }
 
