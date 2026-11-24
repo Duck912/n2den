@@ -167,6 +167,71 @@ private:
 /// EDEN_NVN_MIRROR_RAW_EPOCH_PRESENTS=N (off by default; N >= 2 turns it on, at most 64): a
 /// split mirror pool takes a new raw epoch at most once every N presents. See
 /// Recorder::MirrorTakeCpuWrites. 0 when off.
+/// EDEN_NVN_MIRROR_MEMO: the clean-range memo of mirror pools (nvn_mirror_memo.h). On by default;
+/// 0 turns it off; verify also runs the full walk and counts disagreements (log line every 10 s).
+enum class MirrorMemoMode : u8 { Off, On, Verify };
+MirrorMemoMode MirrorMemoModeNow() {
+    static const MirrorMemoMode mode = [] {
+        const char* const value = std::getenv("EDEN_NVN_MIRROR_MEMO");
+        MirrorMemoMode m = MirrorMemoMode::On;
+        if (value != nullptr && value[0] == '0') {
+            m = MirrorMemoMode::Off;
+        } else if (value != nullptr && std::string_view{value} == "verify") {
+            m = MirrorMemoMode::Verify;
+        }
+        LOG_INFO(Render_Vulkan, "[nvn] mirror clean-range memo: {} (EDEN_NVN_MIRROR_MEMO)",
+                 m == MirrorMemoMode::Off ? "off" : m == MirrorMemoMode::On ? "on" : "verify");
+        return m;
+    }();
+    return mode;
+}
+
+/// EDEN_NVN_MIRROR_MEMO=verify counts (replay thread only).
+struct MirrorMemoVerify {
+    u64 checks{};          ///< MirrorNeedsUpload calls checked
+    u64 uploads{};         ///< UploadRange calls checked
+    u64 answer_differ{};   ///< MirrorNeedsUpload: the memo walk and the full walk disagree
+    u64 invariant_pages{}; ///< pages inside the memo that failed the skip test
+    u64 pages_requested{};
+    u64 pages_walked{};
+    u64 logged{};
+    std::chrono::steady_clock::time_point last_log{};
+
+    void Report(bool force) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!force && now - last_log < std::chrono::seconds{10}) {
+            return;
+        }
+        last_log = now;
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] mirror memo verify: needs-upload checks {} upload checks {}, answer "
+                 "disagreements {}, pages failing the memo invariant {}; pages requested {} "
+                 "walked {}",
+                 checks, uploads, answer_differ, invariant_pages, pages_requested, pages_walked);
+    }
+};
+MirrorMemoVerify& MirrorMemoVerifyStats() {
+    static MirrorMemoVerify stats;
+    return stats;
+}
+
+/// Pages in [first, end) inside the memo that fail the walk's skip test (verify mode).
+u64 MirrorMemoInvariantFailures(const Pool& pool, u32 stamp, u64 first, u64 end,
+                                bool mario_kart_world) {
+    u64 failures = 0;
+    const MirrorMemo& memo = pool.mirror_memo;
+    for (size_t i = 0; i < memo.count; ++i) {
+        const u64 a = (std::max)(first, memo.runs[i].first);
+        const u64 b = (std::min)(end, memo.runs[i].second);
+        for (u64 page = a; page < b; ++page) {
+            if (!MirrorPagePasses(pool, page, stamp, mario_kart_world)) {
+                ++failures;
+            }
+        }
+    }
+    return failures;
+}
+
 u64 MirrorRawEpochPresents() {
     static const u64 presents = [] {
         const char* const value = std::getenv("EDEN_NVN_MIRROR_RAW_EPOCH_PRESENTS");
@@ -847,8 +912,16 @@ private:
     bool MirrorTakeCpuWrites(Pool& pool);
     /// Whether no unfinished submission writes `page` of a mirror pool (its write-back, which the
     /// tracker does not see, is done). `pending` caches the pool's GPU-written ranges.
-    bool MirrorPageSettled(Pool& pool, u64 page,
-                           std::optional<std::vector<std::pair<u64, u64>>>& pending);
+    bool MirrorPageSettled(Pool& pool, u64 page, std::optional<AscendingRanges>& pending);
+    /// MirrorNeedsUpload's walk over pages [first, end): true at the first page whose guest bytes
+    /// differ from the mirror's (`stopped` = that page, else `end`).
+    bool MirrorCheckWalk(Pool& pool, bool tracked, u32 stamp, u64 first, u64 end, u64& stopped,
+                         std::optional<AscendingRanges>& pending);
+    /// UploadRange's walk over pages [first, end): marks them compared and appends the changed
+    /// byte ranges to `parts` (ascending, merged).
+    void MirrorUploadWalk(Pool& pool, bool tracked, u32 stamp, u64 first, u64 end,
+                          std::vector<std::pair<u64, u64>>& parts,
+                          std::optional<AscendingRanges>& pending);
     /// The replay wrote a pool range on the GPU (through the pool's own buffer unless
     /// `invalidate_mirror` is false: a pool mirror's write-back, after which the mirror and the
     /// guest bytes agree).
@@ -1628,54 +1701,37 @@ bool Recorder::MirrorTakeCpuWrites(Pool& pool) {
         for (u64 page = from / Pool::MIRROR_PAGE; page * Pool::MIRROR_PAGE < to; ++page) {
             pool.mirror_pages[static_cast<size_t>(page)].trusted = false;
         }
+        if (from < to) {
+            MirrorMemoDropCleared(pool, from / Pool::MIRROR_PAGE,
+                                  (to + Pool::MIRROR_PAGE - 1) / Pool::MIRROR_PAGE,
+                                  impl.mario_kart_world);
+        }
     }
     pool.mirror_epoch_clean = epoch; // read before the take: a write in between shows as a change
     return true;
 }
 
-bool Recorder::MirrorPageSettled(Pool& pool, u64 page,
-                                 std::optional<std::vector<std::pair<u64, u64>>>& pending) {
+bool Recorder::MirrorPageSettled(Pool& pool, u64 page, std::optional<AscendingRanges>& pending) {
     if (!pending) {
         // Taken before the page is hashed: the completion writes a range back before it drops it
         // from gpu_dirty, so a range missing here is in the guest bytes the hash reads.
         pending.emplace();
-        std::scoped_lock lock{pool.dirty_mutex};
-        for (const Pool::Dirty& dirty : pool.gpu_dirty) {
-            pending->emplace_back(dirty.begin, dirty.end);
+        {
+            std::scoped_lock lock{pool.dirty_mutex};
+            pending->ranges.reserve(pool.gpu_dirty.size());
+            for (const Pool::Dirty& dirty : pool.gpu_dirty) {
+                pending->ranges.emplace_back(dirty.begin, dirty.end);
+            }
         }
+        pending->Finish();
     }
     const u64 begin = page * Pool::MIRROR_PAGE;
-    const u64 end = begin + Pool::MIRROR_PAGE;
-    return std::none_of(pending->begin(), pending->end(), [&](const auto& range) {
-        return range.first < end && range.second > begin;
-    });
+    return !pending->Overlaps(begin, begin + Pool::MIRROR_PAGE);
 }
 
-bool Recorder::MirrorNeedsUpload(Pool& pool, u64 offset, u64 size) {
-    if (pool.backing != Pool::Backing::Mirror || size == 0 || offset >= pool.size) {
-        return false;
-    }
-    const ReplayPhases::Scope phase{ReplayPhases::Phase::MirrorCheck};
-    if (ReplayPhases::Enabled()) [[unlikely]] {
-        const u64 pages = ((std::min)(offset + size, pool.size) - 1) / Pool::MIRROR_PAGE -
-                          offset / Pool::MIRROR_PAGE + 1;
-        ReplayPhases::Count(ReplayPhases::Counter::MirrorPages, pages);
-        ReplayPhases::Count(ReplayPhases::Counter::MirrorCalls);
-    }
-    if (VC::PreRec::NoteWanted()) [[unlikely]] {
-        // The pages compared (hash) or trusted (tracker) for this range.
-        const u64 a = offset / Pool::MIRROR_PAGE * Pool::MIRROR_PAGE;
-        const u64 b = (std::min)((offset + size + Pool::MIRROR_PAGE - 1) / Pool::MIRROR_PAGE *
-                                     Pool::MIRROR_PAGE,
-                                 pool.size);
-        VC::PreRec::NoteRead(VC::PreRec::Cls::MirrorCheck, pool.address + a, b - a, pool.serial);
-    }
-    const bool tracked = MirrorTakeCpuWrites(pool);
+bool Recorder::MirrorCheckWalk(Pool& pool, bool tracked, u32 stamp, u64 first, u64 end,
+                               u64& stopped, std::optional<AscendingRanges>& pending) {
     const bool stats = MirrorRawStats::Enabled();
-    std::optional<std::vector<std::pair<u64, u64>>> pending;
-    const u32 stamp = static_cast<u32>(flight.seq) + 1;
-    const u64 first = offset / Pool::MIRROR_PAGE;
-    const u64 last = (std::min)(offset + size, pool.size) - 1;
     u64 hashed = 0;
     u64 trusted = 0;
     u64 hashed_first = 0;
@@ -1684,14 +1740,15 @@ bool Recorder::MirrorNeedsUpload(Pool& pool, u64 offset, u64 size) {
     // Record-ahead stage 2 (validate-only): the pages this decision uses, checked at the release.
     const bool ra_log = impl.RaValidating();
     bool dirty = false;
-    for (u64 index = first; index <= last / Pool::MIRROR_PAGE; ++index) {
+    stopped = end;
+    for (u64 index = first; index < end; ++index) {
         Pool::MirrorPage& page = pool.mirror_pages[static_cast<size_t>(index)];
         if (ra_log) [[unlikely]] {
             impl.RaNoteMirrorPage(pool, index);
         }
         // `epoch_ok`: no raw store completed since the page was last compared (always for a
         // pool that is not split). Mario Kart World also compares a page again within a
-        // submission once one completed.
+        // submission once one completed. (MirrorPagePasses is the same test.)
         const bool epoch_ok = !pool.split || page.raw_epoch == pool.split_raw_epoch_seen;
         const bool current_epoch = !impl.mario_kart_world || epoch_ok;
         if (page.valid && page.checked == stamp && current_epoch) {
@@ -1720,6 +1777,7 @@ bool Recorder::MirrorNeedsUpload(Pool& pool, u64 offset, u64 size) {
             continue;
         }
         dirty = true;
+        stopped = index;
         break;
     }
     mirror_hash_counts.hashed += hashed;
@@ -1730,38 +1788,93 @@ bool Recorder::MirrorNeedsUpload(Pool& pool, u64 offset, u64 size) {
     return dirty;
 }
 
-void Recorder::UploadRange(Pool& pool, u64 offset, u64 size) {
+bool Recorder::MirrorNeedsUpload(Pool& pool, u64 offset, u64 size) {
     if (pool.backing != Pool::Backing::Mirror || size == 0 || offset >= pool.size) {
-        return;
+        return false;
     }
-    const ReplayPhases::Scope phase{ReplayPhases::Phase::MirrorUpload};
-    if (ReplayPhases::Enabled()) [[unlikely]] {
-        const u64 pages = ((std::min)(offset + size, pool.size) - 1) / Pool::MIRROR_PAGE -
-                          offset / Pool::MIRROR_PAGE + 1;
-        ReplayPhases::Count(ReplayPhases::Counter::MirrorPages, pages);
+    const ReplayPhases::Scope phase{ReplayPhases::Phase::MirrorCheck};
+    const u64 first = offset / Pool::MIRROR_PAGE;
+    const u64 end = ((std::min)(offset + size, pool.size) - 1) / Pool::MIRROR_PAGE + 1;
+    const bool phases = ReplayPhases::Enabled();
+    if (phases) [[unlikely]] {
+        ReplayPhases::Count(ReplayPhases::Counter::MirrorPages, end - first);
         ReplayPhases::Count(ReplayPhases::Counter::MirrorCalls);
     }
-    // A sparse split pool: the GPU uses this range, so raw global memory may reach it too.
-    if (!pool.pending.load(std::memory_order_acquire) && pool.sparse) {
-        impl.WantSparseSplit(pool, offset, size);
-    }
-    // The guest pages of the range that differ from what the mirror holds (all of them the first
-    // time), as runs of consecutive pages. The mirror is made equal to these pages from here on,
-    // so the bookkeeping is updated now.
     if (VC::PreRec::NoteWanted()) [[unlikely]] {
-        // The pages compared and the changed ones copied (memcpy into staging) right here.
+        // The pages compared (hash) or trusted (tracker) for this range.
         const u64 a = offset / Pool::MIRROR_PAGE * Pool::MIRROR_PAGE;
         const u64 b = (std::min)((offset + size + Pool::MIRROR_PAGE - 1) / Pool::MIRROR_PAGE *
                                      Pool::MIRROR_PAGE,
                                  pool.size);
-        VC::PreRec::NoteRead(VC::PreRec::Cls::MirrorCopy, pool.address + a, b - a, pool.serial);
+        VC::PreRec::NoteRead(VC::PreRec::Cls::MirrorCheck, pool.address + a, b - a, pool.serial);
     }
     const bool tracked = MirrorTakeCpuWrites(pool);
-    const bool stats = MirrorRawStats::Enabled();
-    std::optional<std::vector<std::pair<u64, u64>>> pending;
+    std::optional<AscendingRanges> pending;
     const u32 stamp = static_cast<u32>(flight.seq) + 1;
-    const u64 first = offset / Pool::MIRROR_PAGE;
-    const u64 last = (std::min)(offset + size, pool.size) - 1;
+    const MirrorMemoMode mode = MirrorMemoModeNow();
+    u64 stopped = end;
+    if (mode == MirrorMemoMode::Off || impl.RaValidating() || MirrorRawStats::Enabled()) {
+        if (phases) [[unlikely]] {
+            ReplayPhases::Count(ReplayPhases::Counter::MirrorWalked, end - first);
+        }
+        return MirrorCheckWalk(pool, tracked, stamp, first, end, stopped, pending);
+    }
+    MirrorMemo& memo = pool.mirror_memo;
+    memo.Validate(stamp, pool.split_raw_epoch_seen);
+    u64 invariant_failures = 0;
+    if (mode == MirrorMemoMode::Verify) [[unlikely]] {
+        invariant_failures =
+            MirrorMemoInvariantFailures(pool, stamp, first, end, impl.mario_kart_world);
+    }
+    // The gaps first: adding a walked gap reshapes the runs.
+    std::array<std::pair<u64, u64>, MirrorMemo::MAX + 1> gaps{};
+    size_t gap_count = 0;
+    memo.ForEachGap(first, end, [&](u64 a, u64 b) {
+        gaps[gap_count++] = {a, b};
+        return true;
+    });
+    bool dirty = false;
+    u64 walked = 0;
+    for (size_t i = 0; i < gap_count && !dirty; ++i) {
+        const auto [a, b] = gaps[i];
+        dirty = MirrorCheckWalk(pool, tracked, stamp, a, b, stopped, pending);
+        walked += (dirty ? stopped + 1 : b) - a;
+        // Every page before `stopped` passes the skip test now.
+        memo.Add(a, stopped);
+    }
+    if (phases) [[unlikely]] {
+        ReplayPhases::Count(ReplayPhases::Counter::MirrorWalked, walked);
+    }
+    if (mode == MirrorMemoMode::Verify) [[unlikely]] {
+        u64 full_stopped = end;
+        const bool full = MirrorCheckWalk(pool, tracked, stamp, first, end, full_stopped, pending);
+        MirrorMemoVerify& v = MirrorMemoVerifyStats();
+        ++v.checks;
+        v.pages_requested += end - first;
+        v.pages_walked += walked;
+        v.invariant_pages += invariant_failures;
+        if (full != dirty) {
+            ++v.answer_differ;
+        }
+        if ((full != dirty || invariant_failures != 0) && v.logged < 16) {
+            ++v.logged;
+            LOG_WARNING(Render_Vulkan,
+                        "[nvn] mirror memo verify: pool 0x{:x} pages [{}, {}) memo says {} "
+                        "(stopped {}), full walk says {} (stopped {}), {} memo pages fail the skip "
+                        "test",
+                        pool.address, first, end, dirty, stopped, full, full_stopped,
+                        invariant_failures);
+        }
+        v.Report(false);
+        return full;
+    }
+    return dirty;
+}
+
+void Recorder::MirrorUploadWalk(Pool& pool, bool tracked, u32 stamp, u64 first, u64 end,
+                                std::vector<std::pair<u64, u64>>& parts,
+                                std::optional<AscendingRanges>& pending) {
+    const bool stats = MirrorRawStats::Enabled();
     u64 hashed = 0;
     u64 trusted = 0;
     u64 hashed_first = 0;
@@ -1769,15 +1882,14 @@ void Recorder::UploadRange(Pool& pool, u64 offset, u64 size) {
     u64 hashed_raw_epoch = 0;
     // Record-ahead stage 2 (validate-only): the pages this decision uses, checked at the release.
     const bool ra_log = impl.RaValidating();
-    std::vector<std::pair<u64, u64>> parts;
-    for (u64 index = first; index <= last / Pool::MIRROR_PAGE; ++index) {
+    for (u64 index = first; index < end; ++index) {
         Pool::MirrorPage& page = pool.mirror_pages[static_cast<size_t>(index)];
         if (ra_log) [[unlikely]] {
             impl.RaNoteMirrorPage(pool, index);
         }
         // `epoch_ok`: no raw store completed since the page was last compared (always for a
         // pool that is not split). Mario Kart World also compares a page again within a
-        // submission once one completed.
+        // submission once one completed. (MirrorPagePasses is the same test.)
         const bool epoch_ok = !pool.split || page.raw_epoch == pool.split_raw_epoch_seen;
         const bool current_epoch = !impl.mario_kart_world || epoch_ok;
         if (page.valid && page.checked == stamp && current_epoch) {
@@ -1809,11 +1921,11 @@ void Recorder::UploadRange(Pool& pool, u64 offset, u64 size) {
             continue;
         }
         const u64 begin = index * Pool::MIRROR_PAGE;
-        const u64 end = (std::min)(begin + Pool::MIRROR_PAGE, pool.size);
+        const u64 page_end = (std::min)(begin + Pool::MIRROR_PAGE, pool.size);
         if (!parts.empty() && parts.back().second == begin) {
-            parts.back().second = end;
+            parts.back().second = page_end;
         } else {
-            parts.emplace_back(begin, end);
+            parts.emplace_back(begin, page_end);
         }
     }
     mirror_hash_counts.hashed += hashed;
@@ -1821,25 +1933,115 @@ void Recorder::UploadRange(Pool& pool, u64 offset, u64 size) {
     mirror_hash_counts.first += hashed_first;
     mirror_hash_counts.untrusted += hashed_untrusted;
     mirror_hash_counts.raw_epoch += hashed_raw_epoch;
+}
+
+void Recorder::UploadRange(Pool& pool, u64 offset, u64 size) {
+    if (pool.backing != Pool::Backing::Mirror || size == 0 || offset >= pool.size) {
+        return;
+    }
+    const ReplayPhases::Scope phase{ReplayPhases::Phase::MirrorUpload};
+    const u64 first = offset / Pool::MIRROR_PAGE;
+    const u64 end_page = ((std::min)(offset + size, pool.size) - 1) / Pool::MIRROR_PAGE + 1;
+    const bool phases = ReplayPhases::Enabled();
+    if (phases) [[unlikely]] {
+        ReplayPhases::Count(ReplayPhases::Counter::MirrorPages, end_page - first);
+        ReplayPhases::Count(ReplayPhases::Counter::MirrorCalls);
+    }
+    // A sparse split pool: the GPU uses this range, so raw global memory may reach it too.
+    if (!pool.pending.load(std::memory_order_acquire) && pool.sparse) {
+        impl.WantSparseSplit(pool, offset, size);
+    }
+    // The guest pages of the range that differ from what the mirror holds (all of them the first
+    // time), as runs of consecutive pages. The mirror is made equal to these pages from here on,
+    // so the bookkeeping is updated now.
+    if (VC::PreRec::NoteWanted()) [[unlikely]] {
+        // The pages compared and the changed ones copied (memcpy into staging) right here.
+        const u64 a = offset / Pool::MIRROR_PAGE * Pool::MIRROR_PAGE;
+        const u64 b = (std::min)((offset + size + Pool::MIRROR_PAGE - 1) / Pool::MIRROR_PAGE *
+                                     Pool::MIRROR_PAGE,
+                                 pool.size);
+        VC::PreRec::NoteRead(VC::PreRec::Cls::MirrorCopy, pool.address + a, b - a, pool.serial);
+    }
+    const bool tracked = MirrorTakeCpuWrites(pool);
+    std::optional<AscendingRanges> pending;
+    const u32 stamp = static_cast<u32>(flight.seq) + 1;
+    const bool ra_log = impl.RaValidating();
+    std::vector<std::pair<u64, u64>> parts;
+    const MirrorMemoMode mode = MirrorMemoModeNow();
+    if (mode == MirrorMemoMode::Off || ra_log || MirrorRawStats::Enabled()) {
+        if (phases) [[unlikely]] {
+            ReplayPhases::Count(ReplayPhases::Counter::MirrorWalked, end_page - first);
+        }
+        MirrorUploadWalk(pool, tracked, stamp, first, end_page, parts, pending);
+    } else {
+        MirrorMemo& memo = pool.mirror_memo;
+        memo.Validate(stamp, pool.split_raw_epoch_seen);
+        if (mode == MirrorMemoMode::Verify) [[unlikely]] {
+            const u64 failures =
+                MirrorMemoInvariantFailures(pool, stamp, first, end_page, impl.mario_kart_world);
+            MirrorMemoVerify& v = MirrorMemoVerifyStats();
+            ++v.uploads;
+            v.invariant_pages += failures;
+            if (failures != 0 && v.logged < 16) {
+                ++v.logged;
+                LOG_WARNING(Render_Vulkan,
+                            "[nvn] mirror memo verify: upload of pool 0x{:x} pages [{}, {}): {} "
+                            "memo pages fail the skip test",
+                            pool.address, first, end_page, failures);
+            }
+            v.Report(false);
+        }
+        std::array<std::pair<u64, u64>, MirrorMemo::MAX + 1> gaps{};
+        size_t gap_count = 0;
+        memo.ForEachGap(first, end_page, [&](u64 a, u64 b) {
+            gaps[gap_count++] = {a, b};
+            return true;
+        });
+        u64 walked = 0;
+        for (size_t i = 0; i < gap_count; ++i) {
+            MirrorUploadWalk(pool, tracked, stamp, gaps[i].first, gaps[i].second, parts, pending);
+            walked += gaps[i].second - gaps[i].first;
+        }
+        if (phases) [[unlikely]] {
+            ReplayPhases::Count(ReplayPhases::Counter::MirrorWalked, walked);
+        }
+        // Every page of the range was compared in this submission now (or passed already).
+        memo.Add(first, end_page);
+    }
     if (parts.empty()) {
         impl.stats.mirror_ranges_clean.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     // The GPU's version is newer than the guest's wherever an unfinished submission wrote.
     {
-        std::scoped_lock lock{pool.dirty_mutex};
-        for (const Pool::Dirty& dirty : pool.gpu_dirty) {
+        AscendingRanges dirty;
+        {
+            std::scoped_lock lock{pool.dirty_mutex};
+            dirty.ranges.reserve(pool.gpu_dirty.size());
+            for (const Pool::Dirty& d : pool.gpu_dirty) {
+                dirty.ranges.emplace_back(d.begin, d.end);
+            }
+        }
+        if (!dirty.ranges.empty()) {
+            dirty.Finish();
+            const auto& ranges = dirty.ranges;
             std::vector<std::pair<u64, u64>> next;
-            for (const auto& [begin, end] : parts) {
-                if (dirty.end <= begin || dirty.begin >= end) {
-                    next.emplace_back(begin, end);
-                    continue;
+            next.reserve(parts.size() + 1);
+            size_t j = 0;
+            for (const auto& [begin, end] : parts) { // ascending, disjoint
+                while (j < ranges.size() && ranges[j].second <= begin) {
+                    ++j;
                 }
-                if (dirty.begin > begin) {
-                    next.emplace_back(begin, dirty.begin);
-                }
-                if (dirty.end < end) {
-                    next.emplace_back(dirty.end, end);
+                u64 at = begin;
+                for (size_t k = j; at < end; ++k) {
+                    if (k >= ranges.size() || ranges[k].first >= end) {
+                        next.emplace_back(at, end);
+                        break;
+                    }
+                    if (ranges[k].first > at) {
+                        next.emplace_back(at, ranges[k].first);
+                    }
+                    at = (std::max)(at, ranges[k].second);
                 }
             }
             parts = std::move(next);
@@ -1929,6 +2131,9 @@ void Recorder::NotePoolWrite(Pool& pool, u64 offset, u64 size, bool invalidate_m
             for (u64 page = offset / Pool::MIRROR_PAGE; page * Pool::MIRROR_PAGE < end; ++page) {
                 pool.mirror_pages[static_cast<size_t>(page)].trusted = false;
             }
+            MirrorMemoDropCleared(pool, offset / Pool::MIRROR_PAGE,
+                                  (end + Pool::MIRROR_PAGE - 1) / Pool::MIRROR_PAGE,
+                                  impl.mario_kart_world);
         }
         dirty_pool_set.insert(&pool);
         for (const InFlight::Readback& existing : readbacks) {

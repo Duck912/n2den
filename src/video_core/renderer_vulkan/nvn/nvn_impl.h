@@ -54,6 +54,7 @@
 #include "video_core/renderer_vulkan/nvn/nvn_pool_mirror.h"
 #include "video_core/renderer_vulkan/nvn/nvn_screenshot.h"
 #include "video_core/renderer_vulkan/nvn/nvn_rescale.h"
+#include "video_core/renderer_vulkan/nvn/nvn_mirror_memo.h"
 #include "video_core/renderer_vulkan/nvn/nvn_mirror_prehash.h"
 #include "video_core/renderer_vulkan/nvn/nvn_tex_prehash.h"
 #include "video_core/renderer_vulkan/nvn/nvn_ra_vram.h"
@@ -217,6 +218,9 @@ struct Pool : std::enable_shared_from_this<Pool> {
     };
     static constexpr u64 MIRROR_PAGE = 4096;
     std::vector<MirrorPage> mirror_pages;
+    /// Mirror pools: page ranges known to pass the walk's skip test in this submission and raw
+    /// epoch (nvn_mirror_memo.h; EDEN_NVN_MIRROR_MEMO). Replay thread, like `mirror_pages`.
+    MirrorMemo mirror_memo;
     /// Mirror pools: GuestMemory::Track registration over the whole pool, every page armed, so
     /// that unchanged pages need no hash (Impl::mirror_hash_tracked). 0: not registered (yet, or
     /// tracking unavailable: `mirror_track_tried`). Replay thread.
@@ -331,6 +335,28 @@ struct Pool : std::enable_shared_from_this<Pool> {
         return backing == Backing::Virtual;
     }
 };
+
+/// The mirror walk's skip test (Recorder::MirrorNeedsUpload / UploadRange) for page `index` at
+/// submission stamp `stamp`: the page needs no look.
+[[nodiscard]] inline bool MirrorPagePasses(const Pool& pool, u64 index, u32 stamp,
+                                           bool mario_kart_world) {
+    const Pool::MirrorPage& page = pool.mirror_pages[static_cast<size_t>(index)];
+    const bool epoch_ok = !pool.split || page.raw_epoch == pool.split_raw_epoch_seen;
+    const bool current_epoch = !mario_kart_world || epoch_ok;
+    return page.valid && ((page.checked == stamp && current_epoch) || (page.trusted && epoch_ok));
+}
+
+/// Pages [first, end) of a mirror pool had checked, trusted or valid cleared: the clean-range memo
+/// forgets those of them that no longer pass (nvn_mirror_memo.h). Call after clearing.
+inline void MirrorMemoDropCleared(Pool& pool, u64 first, u64 end, bool mario_kart_world) {
+    if (pool.mirror_memo.Empty()) {
+        return;
+    }
+    const u32 stamp = pool.mirror_memo.stamp;
+    pool.mirror_memo.DropCleared(first, end, [&](u64 index) {
+        return MirrorPagePasses(pool, index, stamp, mario_kart_world);
+    });
+}
 
 /// Where a storage's bytes came from last, which decides how it is kept coherent.
 enum class StorageOrigin : u8 {

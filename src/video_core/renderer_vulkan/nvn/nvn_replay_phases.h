@@ -105,6 +105,7 @@ enum class Counter : u8 {
     MirrorCalls,     ///< MirrorNeedsUpload / UploadRange calls on mirror pools
     PipelineMemoHits,///< ResolvePipeline found the pipeline in its memo
     PipelineLookups, ///< ResolvePipeline asked the pipeline cache
+    MirrorWalked,    ///< of MirrorPages, those walked (outside the clean-range memo)
     Count,
 };
 

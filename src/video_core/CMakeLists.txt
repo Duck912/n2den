@@ -715,6 +715,7 @@ target_sources(video_core PRIVATE
     renderer_vulkan/nvn/nvn_ra_validate.h
     renderer_vulkan/nvn/nvn_mirror_raw_stats.cpp
     renderer_vulkan/nvn/nvn_mirror_raw_stats.h
+    renderer_vulkan/nvn/nvn_mirror_memo.h
     renderer_vulkan/nvn/nvn_mirror_prehash.cpp
     renderer_vulkan/nvn/nvn_mirror_prehash.h
     renderer_vulkan/nvn/nvn_tex_prehash.cpp

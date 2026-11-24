@@ -1226,6 +1226,11 @@ void Context::Impl::CpuWriteMirrorPageReset(Pool& pool, u64 begin, u64 size, boo
                 mirror_page.trusted = false;
             }
         }
+        if (begin < last) {
+            MirrorMemoDropCleared(pool, begin / Pool::MIRROR_PAGE,
+                                  (last + Pool::MIRROR_PAGE - 1) / Pool::MIRROR_PAGE,
+                                  mario_kart_world);
+        }
     }
 }
 
@@ -2391,6 +2396,8 @@ void Context::Impl::FlushTextureNow(CmdFlushTexture& command) {
         for (u64 page = s.pool_offset / Pool::MIRROR_PAGE; page * Pool::MIRROR_PAGE < end; ++page) {
             pool.mirror_pages[static_cast<size_t>(page)].trusted = false;
         }
+        MirrorMemoDropCleared(pool, s.pool_offset / Pool::MIRROR_PAGE,
+                              (end + Pool::MIRROR_PAGE - 1) / Pool::MIRROR_PAGE, mario_kart_world);
     }
     // The guest bytes are the texture's contents now: from here on it is a CPU-sourced storage.
     s.origin = StorageOrigin::Cpu;
