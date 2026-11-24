@@ -40,6 +40,7 @@ BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, R
     : runtime{runtime_}, device_memory{device_memory_}, memory_tracker{device_memory} {
     // Ensure the first slot is used for the null buffer
     void(slot_buffers.insert(runtime, NullBufferParams{}));
+    ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
     gpu_modified_ranges.Clear();
     // Asked ~850,000 times a second in Fortune's Weave's crowds (IsRegionGpuModified), 87% of the
     // time about memory the GPU never wrote: a bit per 4 KiB page answers those without walking the
@@ -148,7 +149,14 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size) {
     Nx2NoteListHostWrite(device_addr, size);
     if (IsRegionGpuModified(device_addr, size)) {
         ClearDownload(device_addr, size);
+        ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
         gpu_modified_ranges.Subtract(device_addr, size);
+    }
+    // Guest CPU writes come ~100,000 times a second: forget only the marks they overlap.
+    for (RecentMark& mark : recent_marks) {
+        if (mark.address < device_addr + size && device_addr < mark.address + mark.size) {
+            mark.generation = 0;
+        }
     }
     memory_tracker.MarkRegionAsCpuModified(device_addr, size);
 }
@@ -271,6 +279,7 @@ auto BufferCache<P>::RecordDownloadSnapshot(DAddr device_addr, u64 size)
 template <class P>
 void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
     async_downloads.DeleteAll(device_addr, size);
+    ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
     uncommitted_gpu_modified_ranges.Subtract(device_addr, size);
     for (auto& interval_set : committed_gpu_modified_ranges) {
         interval_set.Subtract(device_addr, size);
@@ -321,6 +330,7 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     // This subtraction in this order is important for overlapping copies.
     // CPU-backed portions also replace command words, invalidating any older page copy.
     Nx2NoteListHostWrite(*cpu_dest_address, amount);
+    ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
     gpu_modified_ranges.Subtract(*cpu_dest_address, amount);
     const bool has_new_downloads = tmp_intervals.size() != 0;
     for (const auto& pair : tmp_intervals) {
@@ -361,6 +371,7 @@ bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
     // The DMA engine mirrors this fill into guest memory before its method completes.
     Nx2NoteListHostWrite(*cpu_dst_address, size);
     ClearDownload(*cpu_dst_address, size);
+    ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
     gpu_modified_ranges.Subtract(*cpu_dst_address, size);
 
     const BufferId buffer = FindBuffer(*cpu_dst_address, static_cast<u32>(size), false);
@@ -403,6 +414,7 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
         break;
     case ObtainBufferOperation::DiscardWrite: {
         ClearDownload(device_addr, size);
+        ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
         gpu_modified_ranges.Subtract(device_addr, size);
         break;
     }
@@ -874,6 +886,7 @@ void BufferCache<P>::BindComputeTextureBuffer(size_t tbo_index, GPUVAddr gpu_add
 
 template <class P>
 void BufferCache<P>::FlushCachedWrites() {
+    ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
     memory_tracker.FlushCachedWrites();
 }
 
@@ -887,6 +900,7 @@ void BufferCache<P>::AccumulateFlushes() {
     if (uncommitted_gpu_modified_ranges.Empty()) {
         return;
     }
+    ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
     committed_gpu_modified_ranges.emplace_back(std::move(uncommitted_gpu_modified_ranges));
 }
 
@@ -957,6 +971,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
             });
         });
     }
+    ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
     committed_gpu_modified_ranges.clear();
     if (downloads.empty()) {
         async_buffers.emplace_back(std::optional<Async_Buffer>{});
@@ -1016,6 +1031,7 @@ void BufferCache<P>::PopAsyncBuffers() {
                                                    end - start);
         });
         async_downloads.Subtract(device_addr, copy.size, [&](DAddr start, DAddr end) {
+            ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
             gpu_modified_ranges.Subtract(start, end - start);
         });
     }
@@ -2137,10 +2153,29 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
             buffer.setWriteTick(runtime.CurrentTick());
         }
     }
-    memory_tracker.MarkRegionAsGpuModified(device_addr, size);
-    gpu_modified_ranges.Add(device_addr, size);
-    QueueDownload(device_addr, size);
-    VideoCommon::MarkGpuWritten(device_addr, size);
+    // A draw marks the same written ranges as the draws before it (Bananza: thousands a frame,
+    // ~7% of the GPU back thread). Marking a range again changes nothing until a download, CPU
+    // write, flush commit or unmark clears its state (mark_generation counts those).
+    // EDEN_NX2_MARK_EVERY_WRITE=1 marks every time.
+    static const bool mark_every = std::getenv("EDEN_NX2_MARK_EVERY_WRITE") != nullptr;
+    bool repeat = false;
+    if (!mark_every && size != 0) {
+        for (const RecentMark& mark : recent_marks) {
+            if (mark.address == device_addr && mark.size == size &&
+                mark.generation == mark_generation) {
+                repeat = true;
+                break;
+            }
+        }
+    }
+    if (!repeat) {
+        memory_tracker.MarkRegionAsGpuModified(device_addr, size);
+        gpu_modified_ranges.Add(device_addr, size);
+        QueueDownload(device_addr, size);
+        VideoCommon::MarkGpuWritten(device_addr, size);
+        recent_marks[recent_mark_next++ % recent_marks.size()] = {device_addr, size,
+                                                                 mark_generation};
+    }
     Nx2NoteListWrite(buffer_id, device_addr, size);
 }
 
@@ -2861,6 +2896,7 @@ template <class P>
 void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_size,
                                                 std::span<const u8> inlined_buffer) {
     ClearDownload(dest_address, copy_size);
+    ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
     gpu_modified_ranges.Subtract(dest_address, copy_size);
 
     BufferId buffer_id = FindBuffer(dest_address, static_cast<u32>(copy_size), false);
@@ -2893,6 +2929,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
     boost::container::small_vector<BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;
+    ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
     memory_tracker.ForEachDownloadRangeAndClear(
         device_addr, size, [&](u64 device_addr_out, u64 range_size) {
             const DAddr buffer_addr = buffer.CpuAddr();
@@ -2913,6 +2950,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
             gpu_modified_ranges.ForEachInRange(device_addr_out, range_size, add_download);
             ClearDownload(device_addr_out, range_size);
+            ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
             gpu_modified_ranges.Subtract(device_addr_out, range_size);
         });
     if (total_size_bytes == 0) {
@@ -3033,6 +3071,7 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
     // Mark the whole buffer as CPU written to stop tracking CPU writes
     if (!do_not_mark) {
         Buffer& buffer = slot_buffers[buffer_id];
+        ++mark_generation; // the marks MarkWrittenBuffer skips may be gone
         memory_tracker.MarkRegionAsCpuModified(buffer.CpuAddr(), buffer.SizeBytes());
     }
 

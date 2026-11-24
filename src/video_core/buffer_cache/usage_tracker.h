@@ -25,6 +25,7 @@ public:
     explicit UsageTracker(size_t size) {
         const size_t num_pages = (size >> BUFFER_PAGE_SHIFT) + 1;
         pages.resize(num_pages, 0ULL);
+        groups.resize(num_pages / PAGES_PER_GROUP + 1, 0);
     }
 
     void Reset() noexcept {
@@ -32,6 +33,8 @@ public:
         // Only the pages tracked since the last reset can be set.
         if (dirty_begin < dirty_end) {
             std::fill(pages.begin() + dirty_begin, pages.begin() + dirty_end, 0ULL);
+            std::fill(groups.begin() + dirty_begin / PAGES_PER_GROUP,
+                      groups.begin() + (dirty_end - 1) / PAGES_PER_GROUP + 1, u8{0});
         }
         dirty_begin = (std::numeric_limits<size_t>::max)();
         dirty_end = 0;
@@ -60,8 +63,17 @@ public:
         if (page == page_end) {
             return;
         }
-        for (size_t i = page + 1; i < page_end; i++) {
-            pages[i] = ~u64{0};
+        // Whole pages in between: a group of PAGES_PER_GROUP pages entirely inside is marked
+        // in the coarse level only (large vertex and storage buffers bound by thousands of draws
+        // a frame filled every page of them each time).
+        size_t i = page + 1;
+        while (i < page_end) {
+            if (i % PAGES_PER_GROUP == 0 && i + PAGES_PER_GROUP <= page_end) {
+                groups[i / PAGES_PER_GROUP] = 1;
+                i += PAGES_PER_GROUP;
+            } else {
+                pages[i++] = ~u64{0};
+            }
         }
         const size_t offset_end = offset + size;
         const size_t offset_end_page_aligned = Common::AlignDown(offset_end, BUFFER_PAGE_BYTES);
@@ -86,7 +98,7 @@ public:
             return false;
         }
         for (size_t i = page + 1; i < page_end; i++) {
-            if (pages[i] != 0) {
+            if (pages[i] != 0 || groups[i / PAGES_PER_GROUP] != 0) {
                 return true;
             }
         }
@@ -122,7 +134,7 @@ private:
     }
 
     bool IsPageUsed(u64 page, u64 offset, u64 size) const noexcept {
-        return (pages[page] & PageMask(offset, size)) != 0;
+        return groups[page / PAGES_PER_GROUP] != 0 || (pages[page] & PageMask(offset, size)) != 0;
     }
 
 private:
@@ -133,6 +145,9 @@ private:
     static constexpr Range NO_RANGE{(std::numeric_limits<u64>::max)(), 0};
 
     std::vector<u64> pages;
+    /// One entry per PAGES_PER_GROUP pages: nonzero when every byte of them is used.
+    static constexpr size_t PAGES_PER_GROUP = 64;
+    std::vector<u8> groups;
     /// A draw can bind more than four ranges of one buffer (storage buffers carved from one pool):
     /// with too few slots each draw forgot the others and filled their pages again.
     std::array<Range, 16> recent = [] {

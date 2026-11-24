@@ -658,6 +658,9 @@ private:
     Common::ScratchBuffer<u8> unswizzle_data_buffer;
 
     u64 modification_tick = 0;
+    /// Advances when an image with aliases is modified or an alias list changes: an image whose
+    /// aliases were checked at this generation needs no check (SynchronizeAliases).
+    u64 alias_generation = 1;
     u64 frame_tick = 0;
 
     // Declared before the worker so they outlive it: members are destroyed in reverse order, and

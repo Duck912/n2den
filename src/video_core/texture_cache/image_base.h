@@ -106,6 +106,8 @@ struct ImageBase {
     VAddr cpu_addr_end = 0;
 
     u64 modification_tick = 0;
+    /// TextureCache::alias_generation when SynchronizeAliases last found nothing to copy.
+    u64 alias_check_generation = 0;
     size_t lru_index = SIZE_MAX;
     /// Frame tick of the last LRU touch made by PrepareImage since lru_index was set (~0: none).
     /// The LRU cache ignores a touch that is not newer than the item's tick, so one per frame is

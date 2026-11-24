@@ -660,6 +660,15 @@ private:
 
     MemoryTracker memory_tracker;
     Common::RangeSet<DAddr> uncommitted_gpu_modified_ranges;
+    /// Ranges MarkWrittenBuffer marked under the current mark_generation (see there).
+    struct RecentMark {
+        DAddr address{};
+        u32 size{};
+        u64 generation{};
+    };
+    std::array<RecentMark, 32> recent_marks{};
+    size_t recent_mark_next{};
+    u64 mark_generation{1};
     Common::RangeSet<DAddr> gpu_modified_ranges;
 
     /// Whether every GPU-written range is copied back to guest memory at the next fence. Switch 2

@@ -2171,6 +2171,7 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
 
 template <class P>
 ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DAddr cpu_addr) {
+    ++alias_generation; // new aliases and modification ticks
     ImageInfo new_info = info;
     const size_t size_bytes = CalculateGuestSizeInBytes(new_info);
     const bool broken_views = runtime.HasBrokenTextureViewFormats();
@@ -3100,6 +3101,9 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     RemoveImageViewReferences(image_view_ids);
     RemoveFramebuffers(image_view_ids);
 
+    if (!image.aliased_images.empty()) {
+        ++alias_generation;
+    }
     for (const AliasedImage& alias : image.aliased_images) {
         ImageBase& other_image = slot_images[alias.id];
         [[maybe_unused]] const size_t num_removed_aliases =
@@ -3192,12 +3196,22 @@ template <class P>
 void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     image.flags |= ImageFlagBits::GpuModified;
     image.modification_tick = ++modification_tick;
+    if (!image.aliased_images.empty()) {
+        ++alias_generation;
+    }
 }
 
 template <class P>
 void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
     boost::container::small_vector<const AliasedImage*, 8> aliased_images;
     Image& image = slot_images[image_id];
+    // Nothing aliased was modified since this image's aliases were last found older: skip the
+    // walk (each bound image of each draw did it; ~5% of Bananza's GPU back thread).
+    // EDEN_NX2_ALWAYS_SYNC_ALIASES=1 always walks.
+    static const bool always_sync = std::getenv("EDEN_NX2_ALWAYS_SYNC_ALIASES") != nullptr;
+    if (!always_sync && image.alias_check_generation == alias_generation) {
+        return;
+    }
     bool any_rescaled = True(image.flags & ImageFlagBits::Rescaled);
     bool any_modified = True(image.flags & ImageFlagBits::GpuModified);
     u64 most_recent_tick = image.modification_tick;
@@ -3211,8 +3225,10 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
         }
     }
     if (aliased_images.empty()) {
+        image.alias_check_generation = alias_generation;
         return;
     }
+    ++alias_generation; // this image's tick changes below
     const bool can_rescale = ImageCanRescale(image);
     if (any_rescaled) {
         if (can_rescale) {
