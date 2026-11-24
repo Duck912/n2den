@@ -280,6 +280,18 @@ void DrawContext::DebugOnDraw(u32 mode) {
                         polygon_offset[0], polygon_offset[1], polygon_offset[2], fixed.depth_clamp,
                         impl.device_depth_mode.load(std::memory_order_relaxed));
     line += " tg=" + DebugTargetKey();
+    // The layer (3D slice) each colour target is attached at: texture layer, then the view's
+    // layer range when it sets one.
+    for (u32 slot = 0; slot < color_target_count; ++slot) {
+        const TargetBinding& target = color_targets[slot];
+        if (target.texture) {
+            line += fmt::format(" L{}={}{}", slot, target.ref.texture.layer,
+                                target.ref.view.set_layers
+                                    ? fmt::format("(view {}+{})", target.ref.view.min_layer,
+                                                  target.ref.view.nlayers)
+                                    : std::string{});
+        }
+    }
     emit(line);
     line = fmt::format("[nvn] draw+ f{} #{} va=[", dbg.frame, dbg.draw_index);
     for (u32 i = 0; i < MAX_VERTEX_ATTRIBUTES; ++i) {
