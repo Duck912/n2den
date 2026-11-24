@@ -481,7 +481,7 @@ void DrawResources::ReleaseSampler(u64 serial, u64 after_seq) {
     impl.retired.push_back({after_seq, [variants]() mutable { variants->clear(); }});
 }
 
-VkImageView DrawResources::GetView(const Texture& texture, const ViewKey& key) {
+VkImageView DrawResources::GetView(const Texture& texture, const ViewKey& key, u64* id) {
     // A stand-in changes BC format when a later upload classifies it differently (smart BC,
     // RefitStandin recreates its image as BC1/BC4/BC5/BC3). A ViewKey made before that (a clear's,
     // an attachment's, one memoised by a caller) still names the old format, and a view of another
@@ -511,9 +511,57 @@ VkImageView DrawResources::GetView(const Texture& texture, const ViewKey& key) {
     if (!views.storage) {
         views.storage = texture.storage;
     }
-    for (auto& [existing, view] : views.views) {
-        if (existing == key_valid) {
-            return *view;
+    for (const ViewRef& ref : views.views) {
+        if (ref.key == key_valid) {
+            if (id != nullptr) {
+                *id = ref.id;
+            }
+            return ref.handle;
+        }
+    }
+    if (id != nullptr) {
+        *id = 0;
+    }
+    // EDEN_NVN_VIEW_CACHE (default on): the views of the storage's image, shared by every texture
+    // object over it. DK Bananza initializes about 14 new texture objects on the same storages
+    // every frame; each would otherwise create (and keep) views of its own.
+    static const bool view_cache = [] {
+        const char* env = std::getenv("EDEN_NVN_VIEW_CACHE");
+        const bool on = env == nullptr || env[0] != '0';
+        if (!on) {
+            LOG_INFO(Render_Vulkan, "[nvn] EDEN_NVN_VIEW_CACHE=0: image views per texture object");
+        }
+        return on;
+    }();
+    Storage& storage = *texture.storage;
+    StorageViewCache* shared = nullptr;
+    if (view_cache && storage.image) {
+        if (!storage.shared_views || storage.shared_views->image != *storage.image) {
+            // (A replaced image takes the views first, TakeStorageViews. A mismatch here is an
+            // image swapped without that: other textures may still hold handles of the old
+            // views, so they are kept, never destroyed, and counted.)
+            if (storage.shared_views && !storage.shared_views->views.empty()) {
+                if (stale_view_caches.size() < 4096) {
+                    LOG_WARNING(Render_Vulkan,
+                                "[nvn] view cache: storage image replaced without its views "
+                                "(texture {:#x}); old views kept",
+                                texture.serial);
+                }
+                stale_view_caches.push_back(std::move(storage.shared_views));
+            }
+            storage.shared_views = std::make_shared<StorageViewCache>();
+            storage.shared_views->image = *storage.image;
+        }
+        shared = storage.shared_views.get();
+        for (const StorageViewCache::Entry& entry : shared->views) {
+            if (entry.key == key_valid) {
+                ++view_cache_hits;
+                views.views.push_back({key_valid, *entry.view, entry.id});
+                if (id != nullptr) {
+                    *id = entry.id;
+                }
+                return *entry.view;
+            }
         }
     }
     const auto swizzle = [&](u32 shift) {
@@ -552,8 +600,19 @@ VkImageView DrawResources::GetView(const Texture& texture, const ViewKey& key) {
                 .layerCount = key.layers,
             },
         });
-        views.views.emplace_back(key_valid, std::move(view));
-        return *views.views.back().second;
+        const VkImageView handle = *view;
+        const u64 view_id = next_view_id++;
+        ++view_cache_creates;
+        if (shared != nullptr) {
+            shared->views.push_back({key_valid, std::move(view), view_id});
+        } else {
+            views.owned.push_back(std::move(view));
+        }
+        views.views.push_back({key_valid, handle, view_id});
+        if (id != nullptr) {
+            *id = view_id;
+        }
+        return handle;
     } catch (const vk::Exception& exception) {
         LOG_ERROR(Render_Vulkan,
                   "[nvn] image view for texture {:#x} (format {}, type {}, levels {}+{}, layers "
@@ -579,10 +638,18 @@ std::vector<vk::ImageView> DrawResources::TakeStorageViews(const Storage& storag
         if (!views.views.empty()) {
             NoteViewsReleased(serial);
         }
-        for (auto& [key, view] : views.views) {
+        for (vk::ImageView& view : views.owned) {
             taken.push_back(std::move(view));
         }
+        views.owned.clear();
         views.views.clear();
+    }
+    // The views every texture over the storage shared (EDEN_NVN_VIEW_CACHE).
+    if (storage.shared_views) {
+        for (StorageViewCache::Entry& entry : storage.shared_views->views) {
+            taken.push_back(std::move(entry.view));
+        }
+        const_cast<Storage&>(storage).shared_views.reset();
     }
     return taken;
 }
@@ -594,6 +661,8 @@ std::shared_ptr<TextureViews> DrawResources::TakeViews(u64 serial) {
     if (it == texture_views.end()) {
         return nullptr;
     }
+    // (Views this texture owns go with it, EDEN_NVN_VIEW_CACHE=0; shared ones stay with the
+    // storage.)
     auto result = std::make_shared<TextureViews>(std::move(it->second));
     texture_views.erase(it);
     ++views_epoch;

@@ -86,6 +86,7 @@ class WriteBackMerge;
 class SparseBacking;
 class SparsePagePool;
 struct DrawResources;
+struct StorageViewCache;
 class DrawContext;
 class PresentChain;
 
@@ -572,6 +573,10 @@ struct Storage : std::enable_shared_from_this<Storage> {
     u64 tex_arm_epoch{};
     u32 tex_write_rearms{};
     bool tex_gate_off{false};
+    /// EDEN_NVN_VIEW_CACHE (DrawResources::GetView): the image views of `image`, shared by every
+    /// texture object over this storage. Declared after `image`, so the views go first. Replay
+    /// thread only; taken (and released after the last use) when the image is replaced.
+    std::shared_ptr<StorageViewCache> shared_views;
 };
 
 struct Texture {
