@@ -18,6 +18,10 @@ struct FramebufferLayout;
 
 namespace Vulkan {
 
+/// Settings::values.async_presentation, or EDEN_ASYNC_PRESENTATION=0/1 when set (a test override
+/// that leaves the saved setting alone).
+[[nodiscard]] bool AsyncPresentationEnabled();
+
 class Device;
 class Scheduler;
 

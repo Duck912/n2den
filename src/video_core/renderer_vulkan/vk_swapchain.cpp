@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <limits>
 #include <utility>
@@ -25,6 +26,14 @@
 #include "vulkan/vulkan_core.h"
 
 namespace Vulkan {
+
+bool AsyncPresentationEnabled() {
+    static const int env = [] {
+        const char* const value = std::getenv("EDEN_ASYNC_PRESENTATION");
+        return value != nullptr && value[0] != '\0' ? (value[0] == '1' ? 1 : 0) : -1;
+    }();
+    return env >= 0 ? env == 1 : Settings::values.async_presentation.GetValue();
+}
 
 namespace {
 
@@ -244,7 +253,7 @@ bool Swapchain::AcquireNextImage(bool renderer_paced) {
     // tick makes Scheduler::Wait flush the GPU thread's command chunk from the wrong thread. Wait
     // for the last submitted tick instead; the swapchain copy does not use scheduler work.
     u64 wait_tick = resource_ticks[image_index];
-    if (Settings::values.async_presentation.GetValue()) {
+    if (AsyncPresentationEnabled()) {
         wait_tick = (std::min)(wait_tick, scheduler.CurrentTick() - 1);
     }
 
