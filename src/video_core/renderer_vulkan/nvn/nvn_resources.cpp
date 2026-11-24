@@ -52,17 +52,26 @@ HostImporter::AllocateHook ImportGateHook(VC::GuestMemory* memory, u64 va, u64 s
     };
 }
 
-/// EDEN_NVN_ALIAS_IMPORT=1 (off by default): a CPU-visible pool whose guest storage is several
-/// host runs is imported through a contiguous alias view of them (Pool::alias) instead of
-/// becoming a split pool with a device-local mirror. EDEN_NVN_ALIAS_IMPORT_MAX_MB (default 1024):
-/// larger pools keep the split path (an import pins every page; Ocarina of Time's 2.4 GiB pool
-/// stays sparse).
+/// Alias import: a CPU-visible pool whose guest storage is several host runs is imported through
+/// a contiguous alias view of them (Pool::alias) instead of becoming a split pool with a
+/// device-local mirror. On by default for Donkey Kong Bananza only (its 450 MiB pool lands on a
+/// 1 GiB heap block seam in most boots: 5 fps mirrored, 24-25 fps imported); untested elsewhere
+/// (one Kirby boot crashed with it on, cause unknown). EDEN_NVN_ALIAS_IMPORT=1 turns it on for
+/// every game, =0 off. EDEN_NVN_ALIAS_IMPORT_MAX_MB (default 1024): larger pools keep the split
+/// path (an import pins every page; Ocarina of Time's 2.4 GiB pool stays sparse).
 bool AliasImportOn() {
-    static const bool on = [] {
+    static const int forced = [] {
         const char* const env = std::getenv("EDEN_NVN_ALIAS_IMPORT");
-        return env != nullptr && std::strcmp(env, "1") == 0;
+        if (env == nullptr || *env == 0) {
+            return -1;
+        }
+        return std::strcmp(env, "0") == 0 ? 0 : 1;
     }();
-    return on;
+    if (forced >= 0) {
+        return forced == 1;
+    }
+    constexpr u64 DonkeyKongBananza = 0x040074A01BF12000ULL;
+    return Settings::GetCurrentProgramID() == DonkeyKongBananza;
 }
 u64 AliasImportMaxBytes() {
     static const u64 bytes = [] {
@@ -71,7 +80,7 @@ u64 AliasImportMaxBytes() {
             mib = std::strtoull(env, nullptr, 10);
         }
         LOG_INFO(Render_Vulkan,
-                 "[nvn] alias import: {} (EDEN_NVN_ALIAS_IMPORT), pools up to {} MiB "
+                 "[nvn] alias import: {} (EDEN_NVN_ALIAS_IMPORT, default Donkey Kong Bananza only), pools up to {} MiB "
                  "(EDEN_NVN_ALIAS_IMPORT_MAX_MB)",
                  AliasImportOn() ? "on" : "off", mib);
         return mib << 20;
