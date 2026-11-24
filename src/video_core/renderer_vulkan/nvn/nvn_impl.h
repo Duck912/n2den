@@ -585,7 +585,9 @@ struct Texture {
     std::shared_ptr<Storage> storage; ///< Null when the image could not be created.
     HostFormat host;                  ///< Format of this texture object (views).
     /// DrawResources::GetView: this texture's TextureViews (a texture_views node) and the
-    /// DrawResources::views_epoch it was found at. Replay thread only.
+    /// DrawResources::views_epoch it was found at; with EDEN_NVN_VIEW_CACHE on, the storage's
+    /// StorageViewCache it is registered with and that cache's id (ids start at 2^62, so they
+    /// never equal a views_epoch). Replay thread only.
     void* view_slot{};
     u64 view_slot_epoch{0};
     /// The scaled twin of this texture object (Impl::ScaledTextureOf), for views of the twin

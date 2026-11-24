@@ -57,9 +57,9 @@ struct ViewKey {
     bool operator==(const ViewKey&) const = default;
 };
 
-/// The views of one Texture object. Holds the storage so the image outlives the views.
-/// `views` are handles: owned by `owned` (EDEN_NVN_VIEW_CACHE=0) or by the storage's
-/// StorageViewCache (default), which every texture over the same image shares.
+/// The views of one Texture object with EDEN_NVN_VIEW_CACHE=0 (or a storage without an image).
+/// Holds the storage so the image outlives the views; `owned` owns the `views` handles. With the
+/// cache on (default) a texture has no node: its views are the storage's StorageViewCache's.
 /// A view handle with its creation number (DrawResources::next_view_id): unique for the run,
 /// never reused like a handle can be once the view is destroyed.
 struct ViewRef {
@@ -83,7 +83,15 @@ struct StorageViewCache {
         u64 id{};
     };
     VkImage image{};
+    /// Unique for the run (DrawResources::next_view_cache_id): a texture registered with a cache
+    /// that has since been freed never matches a new cache at the same address.
+    u64 id{};
     std::vector<Entry> views;
+    /// Serials of the texture objects that took handles from this cache (each once per cache;
+    /// Texture::view_slot / view_slot_epoch mark the registration). When the views go
+    /// (TakeStorageViews), these are the textures whose descriptor sets name them. Destroyed
+    /// textures are not removed (8 bytes each; telling the pool sets about one again is harmless).
+    std::vector<u64> holders;
 };
 
 struct DummyImage {
@@ -461,13 +469,16 @@ struct DrawResources {
     /// EDEN_NVN_VIEW_CACHE counters: views found in a storage's shared cache, views created.
     u64 view_cache_hits{};
     u64 view_cache_creates{};
-    /// Shared view caches of storages whose image changed without TakeStorageViews (kept).
-    std::vector<std::shared_ptr<StorageViewCache>> stale_view_caches;
+    u64 next_view_cache_id{u64{1} << 62}; ///< (above any views_epoch: see Texture::view_slot)
+    /// Storage images swapped without TakeStorageViews whose cache GetView retired (counted).
+    u64 stale_view_caches{};
     /// Detaches the views of a destroyed texture so they can be released after its last use.
     std::shared_ptr<TextureViews> TakeViews(u64 serial);
     /// Detaches the views of every texture over `storage`, whose image is being replaced, so they
     /// can be released after its last use (the textures make new ones on the new image).
     std::vector<vk::ImageView> TakeStorageViews(const Storage& storage);
+    /// Releases `views` of `storage` after the submissions recorded so far.
+    void RetireViews(std::vector<vk::ImageView>&& views, const Storage& storage);
 
     // --- framebuffers (EDEN_NVN_FB_CACHE, default on) ---
     /// Keyed by the views' creation numbers (ViewRef::id), not their handles: a handle can be

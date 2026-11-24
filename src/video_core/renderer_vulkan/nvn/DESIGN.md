@@ -2458,8 +2458,11 @@ each cache exact:
 - **Texture of descriptor id** (`DrawContext::TextureOfId`): direct-mapped slots keyed by (id,
   serial) holding the `textures` node; `Impl::texture_epoch` is bumped when a texture is erased.
   The draw plan holds raw `Texture*` for its image bindings (the textures outlive the draw).
-- **Views** (`DrawResources::GetView`): the texture remembers its `texture_views` node
-  (`views_epoch`, bumped by `TakeViews`).
+- **Views** (`DrawResources::GetView`): with `EDEN_NVN_VIEW_CACHE` on (default) the views live in
+  the storage's `StorageViewCache`; a texture registers its serial with that cache once
+  (`Texture::view_slot` = cache, `view_slot_epoch` = cache id), and `TakeStorageViews` tells those
+  holders, so no per-texture node exists. With it off, the texture remembers its `texture_views`
+  node (`views_epoch`, bumped by `TakeViews`).
 - **`NoteUse`**: 256 recent (serial, seq) pairs in front of the `last_use` map.
 - **`StorageNeedsCommands`**: the storage remembers its `storage_index` node
   (`storage_index_epoch`, bumped when a pool's index is evicted).
