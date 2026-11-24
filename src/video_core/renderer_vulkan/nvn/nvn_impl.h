@@ -154,6 +154,14 @@ struct Pool : std::enable_shared_from_this<Pool> {
     /// the first use, as late as possible: the game may still fill the storage after creating
     /// the pool). Replay thread only once `pending` is false.
     bool upload_pending{false};
+    /// EDEN_NVN_ALIAS_IMPORT: the guest storage is several host runs and is imported through a
+    /// contiguous alias view of them (GuestMemory::MapContiguousAlias, the same memory page by
+    /// page): `host_bytes` points into it. Declared before the chunk and buffer members so that it
+    /// is unmapped only after they are gone. Mapped under Impl::backing_mutex before `pending` is
+    /// cleared (by the backing thread ahead of the import, or by BackPoolLocked), never changed
+    /// after while the pool is imported (dropped again if the import fails).
+    std::shared_ptr<u8> alias;
+    std::vector<u64> alias_runs; ///< offsets in the pool where a host run begins (0 first)
     /// The chunk an imported pool buffer lives in (declared before `imported`: the buffer goes
     /// first).
     std::shared_ptr<ImportedChunk> chunk;
@@ -1793,6 +1801,17 @@ struct Context::Impl {
     bool UploadPoolRanges(std::span<const PoolUpload> ranges, bool in_use);
     /// Binds the pool's buffer into a cached (or newly imported) large chunk of guest memory.
     VkResult ImportPoolBuffer(Pool& pool, u8* host, std::string& error);
+    /// EDEN_NVN_ALIAS_IMPORT: whether a split CPU-visible pool of `size` bytes may be imported
+    /// through a contiguous alias view (switch on, under EDEN_NVN_ALIAS_IMPORT_MAX_MB, host
+    /// import available).
+    [[nodiscard]] bool AliasImportWanted(u64 size) const;
+    /// Maps the contiguous alias view of a pool's guest storage (null: not possible); `runs`
+    /// receives where its host runs begin.
+    std::shared_ptr<u8> MapPoolAlias(const Pool& pool, std::vector<u64>& runs) const;
+    /// Pools imported through an alias view (EDEN_NVN_ALIAS_IMPORT), and alias attempts that fell
+    /// back to the split mirror.
+    std::atomic<u64> pools_alias_imported{0};
+    std::atomic<u64> pools_alias_failed{0};
     void CreateTextureNow(const VC::TextureDesc& desc);
     /// The texture object of `desc` with its storage (CreateTextureNow without registering it).
     [[nodiscard]] std::shared_ptr<Texture> BuildTexture(const VC::TextureDesc& desc);

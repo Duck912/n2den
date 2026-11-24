@@ -71,6 +71,13 @@ public:
         VC::GuestMemory* const m = Get();
         return m != nullptr ? m->MappingPointer(va) : nullptr;
     }
+    std::shared_ptr<u8> MapContiguousAlias(u64 va, u64 size, u64 max_runs,
+                                           std::vector<u64>* run_offsets) override {
+        // A host-mapping lookup over the range, like MappingPointer.
+        PreRec::RaMapping(va);
+        VC::GuestMemory* const m = Get();
+        return m != nullptr ? m->MapContiguousAlias(va, size, max_runs, run_offsets) : nullptr;
+    }
     const u8* GuestViewPointer(u64 va) override {
         // Never dereferenced (GuestMemory::GuestViewPointer): a residency query, not a read.
         PreRec::RaMapping(va);

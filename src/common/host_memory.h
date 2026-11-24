@@ -9,6 +9,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <span>
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 
@@ -64,6 +65,28 @@ public:
     void Protect(size_t virtual_offset, size_t length, MemoryPermission perms);
 
     void EnableDirectMappedAddress();
+
+    /// One piece of an alias view: `length` bytes of the backing at `backing_offset`.
+    struct AliasRun {
+        size_t backing_offset;
+        size_t length;
+    };
+
+    /// Maps the backing pieces `runs`, in this order, back to back at a new host address (an
+    /// alias view: the same memory as BackingBasePointer() + backing_offset, contiguous here even
+    /// where the pieces are not neighbours in the backing). Offsets and lengths must be 4 KiB
+    /// aligned; the alias is 64 KiB aligned. Nothing protects or tracks it (like the backing
+    /// itself). Windows: views of at most BackingViewSize (see there). Returns null when the host
+    /// cannot (no fastmem arena, fallback buffer, mapping failure). Release with UnmapAlias.
+    /// Thread-safe.
+    [[nodiscard]] u8* MapAlias(std::span<const AliasRun> runs);
+
+    /// Unmaps an alias returned by MapAlias. Thread-safe.
+    void UnmapAlias(u8* alias);
+
+    [[nodiscard]] size_t BackingSize() const noexcept {
+        return backing_size;
+    }
 
     /// Clears guest memory being handed out. Memory still zero since it was created (or since its
     /// last full clear) is skipped: clearing it only made the host give every page real memory.

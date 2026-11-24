@@ -52,6 +52,82 @@ HostImporter::AllocateHook ImportGateHook(VC::GuestMemory* memory, u64 va, u64 s
     };
 }
 
+/// EDEN_NVN_ALIAS_IMPORT=1 (off by default): a CPU-visible pool whose guest storage is several
+/// host runs is imported through a contiguous alias view of them (Pool::alias) instead of
+/// becoming a split pool with a device-local mirror. EDEN_NVN_ALIAS_IMPORT_MAX_MB (default 1024):
+/// larger pools keep the split path (an import pins every page; Ocarina of Time's 2.4 GiB pool
+/// stays sparse).
+bool AliasImportOn() {
+    static const bool on = [] {
+        const char* const env = std::getenv("EDEN_NVN_ALIAS_IMPORT");
+        return env != nullptr && std::strcmp(env, "1") == 0;
+    }();
+    return on;
+}
+u64 AliasImportMaxBytes() {
+    static const u64 bytes = [] {
+        u64 mib = 1024;
+        if (const char* const env = std::getenv("EDEN_NVN_ALIAS_IMPORT_MAX_MB"); env && *env) {
+            mib = std::strtoull(env, nullptr, 10);
+        }
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] alias import: {} (EDEN_NVN_ALIAS_IMPORT), pools up to {} MiB "
+                 "(EDEN_NVN_ALIAS_IMPORT_MAX_MB)",
+                 AliasImportOn() ? "on" : "off", mib);
+        return mib << 20;
+    }();
+    return bytes;
+}
+/// Most host runs an alias view may have (each is at least one view).
+constexpr u64 ALIAS_MAX_RUNS = 64;
+
+/// The first alias imports check, inside the import gate (the guest's accesses to the pool wait),
+/// that the alias reaches the very bytes the guest's own host pointer does: a marker written
+/// through Pointer() on both sides of every host run seam (at most 8 seams) must read back
+/// through the alias, and the first 64 bytes of every page must agree. Restores what it wrote.
+bool AliasSelfTest(VC::GuestMemory* memory, const Pool& pool, const u8* alias, std::string& report) {
+    constexpr u64 PAGE = 4096;
+    if (memory == nullptr) {
+        report = "no guest memory";
+        return false;
+    }
+    u64 markers = 0;
+    u64 markers_ok = 0;
+    std::vector<u64> probes;
+    for (size_t i = 1; i < pool.alias_runs.size() && i <= 8; ++i) {
+        probes.push_back(pool.alias_runs[i] - PAGE); // last page of the run before the seam
+        probes.push_back(pool.alias_runs[i]);        // first page of the run after it
+    }
+    for (const u64 offset : probes) {
+        u8* const backing = memory->Pointer(pool.address + offset + 1);
+        if (backing == nullptr) {
+            continue;
+        }
+        volatile u8* const b = backing;
+        volatile const u8* const a = alias + offset + 1;
+        const u8 old = *b;
+        const u8 mark = static_cast<u8>(old ^ 0xA5);
+        *b = mark;
+        const bool ok = *a == mark;
+        *b = old;
+        ++markers;
+        markers_ok += ok ? 1 : 0;
+    }
+    u64 pages = 0;
+    u64 pages_equal = 0;
+    for (u64 offset = 0; offset < pool.size; offset += PAGE) {
+        const u8* const backing = memory->Pointer(pool.address + offset);
+        if (backing == nullptr) {
+            continue;
+        }
+        ++pages;
+        pages_equal += std::memcmp(backing, alias + offset, 64) == 0 ? 1 : 0;
+    }
+    report = fmt::format("{} seams, markers {}/{} read back through the alias, pages equal {}/{}",
+                         pool.alias_runs.size() - 1, markers_ok, markers, pages_equal, pages);
+    return markers_ok == markers && pages_equal == pages;
+}
+
 bool IsAllZero(const u8* data, u64 size) {
     const u8* const end = data + size;
     while (data < end && reinterpret_cast<uintptr_t>(data) % alignof(u64) != 0) {
@@ -822,6 +898,26 @@ void Context::Impl::CreatePoolNow(const VC::PoolDesc& desc) {
     }
 }
 
+bool Context::Impl::AliasImportWanted(u64 size) const {
+    return AliasImportOn() && size <= AliasImportMaxBytes() && options.allow_host_import &&
+           importer && importer->Available();
+}
+
+std::shared_ptr<u8> Context::Impl::MapPoolAlias(const Pool& pool, std::vector<u64>& runs) const {
+    VC::GuestMemory* const memory = guest.load(std::memory_order_acquire);
+    // The buffer starts at the alias: pool address and size must suit the import alignment.
+    const u64 align = importer->Alignment();
+    if (memory == nullptr || pool.address % align != 0 || pool.size % align != 0) {
+        return nullptr;
+    }
+    std::shared_ptr<u8> alias = memory->MapContiguousAlias(pool.address, pool.size,
+                                                           ALIAS_MAX_RUNS, &runs);
+    if (alias && !importer->IsAligned(alias.get(), pool.size)) {
+        alias.reset();
+    }
+    return alias;
+}
+
 std::optional<Context::Impl::ChunkWindow> Context::Impl::ImportWindow(u64 address, u64 size,
                                                                       u8* host) const {
     // EDEN_NVN_IMPORT_CHUNK_MB (default 256; 0: the pool's own pages only): the most a window
@@ -912,6 +1008,50 @@ VkResult Context::Impl::ImportPoolBuffer(Pool& pool, u8* host, std::string& erro
         chunk_import_bytes.fetch_add(size, std::memory_order_relaxed);
         return result;
     };
+    if (pool.alias) {
+        // An alias view: guest and host addresses are not congruent (ImportWindow's assumption),
+        // so the pool is imported on its own. The import gate is keyed by guest address as for
+        // any pool; the first alias imports check the alias inside it (AliasSelfTest).
+        static std::atomic<u32> self_tests{0};
+        if (self_tests.fetch_add(1, std::memory_order_relaxed) >= 4) {
+            return per_pool_import();
+        }
+        VC::GuestMemory* const memory = guest.load(std::memory_order_acquire);
+        const HostImporter::AllocateHook gate = ImportGateHook(memory, address, size);
+        bool tested = false;
+        bool passed = false;
+        std::string report;
+        const HostImporter::AllocateHook hook = [&](bool begin) {
+            if (gate) {
+                gate(begin);
+            }
+            if (begin && !tested) {
+                tested = true;
+                passed = AliasSelfTest(memory, pool, host, report);
+            }
+        };
+        pool_import_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        const auto t = std::chrono::steady_clock::now();
+        VkResult result = importer->Import(host, size, pool_usage, pool.imported, error, &hook);
+        chunk_imports.fetch_add(1, std::memory_order_relaxed);
+        chunk_import_ns.fetch_add(
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - t)
+                                 .count()),
+            std::memory_order_relaxed);
+        chunk_import_bytes.fetch_add(size, std::memory_order_relaxed);
+        LOG_INFO(Render_Vulkan, "[nvn] alias self-test of pool {:#x} ({:#x} bytes): {} ({})",
+                 address, size, tested ? (passed ? "passed" : "FAILED") : "not run",
+                 tested ? report : std::string{"the import did not get to vkAllocateMemory"});
+        if (result == VK_SUCCESS && tested && !passed) {
+            pool.imported.buffer = {}; // the buffer before its memory
+            pool.imported.memory = {};
+            pool.imported.size = 0;
+            error = "alias self-test failed";
+            result = VK_ERROR_INITIALIZATION_FAILED;
+        }
+        return result;
+    }
     // Guest and host addresses must differ by a multiple of the import alignment.
     if (!guest.load(std::memory_order_acquire) ||
         (reinterpret_cast<uintptr_t>(host) - address) % importer->Alignment() != 0) {
@@ -1076,6 +1216,25 @@ void Context::Impl::BackingMain() {
                 if (skip()) {
                     continue;
                 }
+            } else if (host == nullptr && !pool->alias && AliasImportWanted(pool->size)) {
+                // A split pool imported through an alias view (EDEN_NVN_ALIAS_IMPORT): the view is
+                // mapped and its pages made resident here, without backing_mutex (the import
+                // would otherwise fault them in under the driver lock: a 40-210 ms hitch for
+                // DK's 450 MiB pool). Mapping the view reads the guest page table only.
+                lock.unlock();
+                std::vector<u64> runs;
+                std::shared_ptr<u8> alias = MapPoolAlias(*pool, runs);
+                if (alias) {
+                    HostImporter::MakeResident(alias.get(), pool->size, false);
+                }
+                lock.lock();
+                if (skip()) {
+                    continue; // (the alias goes with `alias`)
+                }
+                if (alias && !pool->alias) {
+                    pool->alias = std::move(alias);
+                    pool->alias_runs = std::move(runs);
+                }
             }
         }
         BackPoolLocked(*pool);
@@ -1132,6 +1291,15 @@ void Context::Impl::BackPoolLocked(Pool& pool_ref) {
         if (cpu_access) {
             auto t = Clock::now();
             u8* host = const_cast<u8*>(GuestMappingPointer(desc.guest_address, desc.size));
+            // EDEN_NVN_ALIAS_IMPORT: several host runs, imported through a contiguous alias view
+            // of them (mapped by the backing thread already, or now).
+            const bool via_alias = host == nullptr && AliasImportWanted(desc.size);
+            if (via_alias) {
+                if (!pool->alias) {
+                    pool->alias = MapPoolAlias(*pool, pool->alias_runs);
+                }
+                host = pool->alias.get();
+            }
             ns_pointer = since(t);
             pool->host_bytes = host;
             std::string import_error = "not attempted";
@@ -1140,18 +1308,46 @@ void Context::Impl::BackPoolLocked(Pool& pool_ref) {
                 t = Clock::now();
                 import_result = ImportPoolBuffer(*pool, host, import_error);
                 ns_import = since(t);
-                path = "import";
+                path = pool->alias ? "import (alias view)" : "import";
                 if (import_result == VK_SUCCESS) {
                     pool->backing = Pool::Backing::Imported;
                     stats.pools_imported.fetch_add(1, std::memory_order_relaxed);
+                    if (pool->alias) {
+                        const u64 n = pools_alias_imported.fetch_add(1) + 1;
+                        LOG_INFO(Render_Vulkan,
+                                 "[nvn] pool {:#x} ({:#x} bytes, flags {:#x}) imported through a "
+                                 "contiguous alias view of its {} host runs at {:p} (pointer "
+                                 "{:.1f} ms, import {:.1f} ms; alias pools {}, fallbacks {})",
+                                 desc.guest_address, desc.size, desc.flags,
+                                 pool->alias_runs.size(), static_cast<const void*>(host),
+                                 ns_pointer / 1e6, ns_import / 1e6, n,
+                                 pools_alias_failed.load());
+                    }
                     return;
                 }
                 stats.host_import_failures.fetch_add(1, std::memory_order_relaxed);
                 LOG_WARNING(Render_Vulkan,
-                            "[nvn] host import of pool {:#x} ({:#x} bytes) failed: {} ({}); using "
+                            "[nvn] host import of pool {:#x} ({:#x} bytes{}) failed: {} ({}); using "
                             "a device-local mirror",
-                            desc.guest_address, desc.size, import_error,
-                            static_cast<int>(import_result));
+                            desc.guest_address, desc.size, pool->alias ? ", alias view" : "",
+                            import_error, static_cast<int>(import_result));
+            }
+            if (via_alias) {
+                // Back to what a split pool gets today.
+                if (!pool->alias) {
+                    LOG_INFO(Render_Vulkan,
+                             "[nvn] pool {:#x} ({:#x} bytes): no alias view (alignment, more "
+                             "than {} host runs, or the host mapping failed)",
+                             desc.guest_address, desc.size, ALIAS_MAX_RUNS);
+                }
+                pools_alias_failed.fetch_add(1, std::memory_order_relaxed);
+                pool->imported.buffer = {}; // the buffer before its memory
+                pool->imported.memory = {};
+                pool->imported.size = 0;
+                pool->alias.reset();
+                pool->alias_runs.clear();
+                host = nullptr;
+                pool->host_bytes = nullptr;
             }
             t = Clock::now();
             pool->buffer = CreateHostBuffer(desc.size, pool_usage, MemoryUsage::DeviceLocal,
@@ -1865,6 +2061,8 @@ void Context::Impl::DestroyNow(u64 serial) {
                 serial, pool->address, pool->device_address, pool->size, after,
                 replay_seq.load(std::memory_order_relaxed)};
         }
+        // (An alias view, Pool::alias, is unmapped with the pool's last reference, after its
+        // buffer and imported memory: member order.)
         retired.push_back({after, [pool = std::move(pool)]() mutable { pool.reset(); }});
         return;
     }

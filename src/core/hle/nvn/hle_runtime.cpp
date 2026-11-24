@@ -141,9 +141,9 @@ public:
     /// `guest_view`, `guest_view_size`: the fastmem arena (guest VA 0 and its size), null when
     /// the host has none.
     ProcessMemory(Core::Memory::Memory& memory_, const std::atomic<bool>& stopped_,
-                  const u8* guest_view_, u64 guest_view_size_)
+                  const u8* guest_view_, u64 guest_view_size_, Common::HostMemory* host_memory_)
         : memory{memory_}, stopped{stopped_}, guest_view{guest_view_},
-          guest_view_size{guest_view_size_} {}
+          guest_view_size{guest_view_size_}, host_memory{host_memory_} {}
 
     bool Read(u64 va, void* dst, size_t size) override {
         return !stopped.load(std::memory_order_relaxed) && memory.ReadBlockUnsafe(va, dst, size);
@@ -167,6 +167,48 @@ public:
         // Where JIT code reads and writes guest `va` (Memory::Impl maps the arena at the guest
         // address). Only ever asked about, never dereferenced.
         return guest_view != nullptr && va < guest_view_size ? guest_view + va : nullptr;
+    }
+
+    std::shared_ptr<u8> MapContiguousAlias(u64 va, u64 size, u64 max_runs,
+                                           std::vector<u64>* run_offsets) override {
+        constexpr u64 PAGE = 4096;
+        if (host_memory == nullptr || size == 0 || va % PAGE != 0 || size % PAGE != 0 ||
+            stopped.load(std::memory_order_relaxed)) {
+            return nullptr;
+        }
+        // The backing pieces behind the guest pages, merged where they are neighbours.
+        const u8* const base = host_memory->BackingBasePointer();
+        const u64 backing_size = host_memory->BackingSize();
+        std::vector<Common::HostMemory::AliasRun> runs;
+        std::vector<u64> offsets;
+        for (u64 offset = 0; offset < size; offset += PAGE) {
+            const u8* const page = memory.GetPointerSilent(va + offset);
+            if (page == nullptr || page < base ||
+                static_cast<u64>(page - base) + PAGE > backing_size) {
+                return nullptr;
+            }
+            const size_t backing_offset = static_cast<size_t>(page - base);
+            if (!runs.empty() &&
+                runs.back().backing_offset + runs.back().length == backing_offset) {
+                runs.back().length += PAGE;
+                continue;
+            }
+            if (runs.size() == max_runs) {
+                return nullptr;
+            }
+            runs.push_back({backing_offset, PAGE});
+            offsets.push_back(offset);
+        }
+        u8* const alias = host_memory->MapAlias(runs);
+        if (alias == nullptr) {
+            return nullptr;
+        }
+        if (run_offsets != nullptr) {
+            *run_offsets = std::move(offsets);
+        }
+        // The host memory outlives the replay and everything it holds (it is the system's).
+        Common::HostMemory* const owner = host_memory;
+        return std::shared_ptr<u8>(alias, [owner](u8* pointer) { owner->UnmapAlias(pointer); });
     }
 
     u64 Track(u64 va, u64 size) override {
@@ -372,6 +414,7 @@ private:
     const std::atomic<bool>& stopped;
     const u8* guest_view;
     u64 guest_view_size;
+    Common::HostMemory* host_memory;
     std::shared_ptr<ImportGate> gate{std::make_shared<ImportGate>()};
 };
 
@@ -495,11 +538,12 @@ bool Runtime::EnsureRecorder(Core::System& system) {
     const u64 title_id = system.GetApplicationProcessProgramID();
     InstallPackageStageSource(system);
     sink->SetTitleId(title_id);
-    const Common::HostMemory& host_memory = system.DeviceMemory().buffer;
+    Common::HostMemory& host_memory = system.DeviceMemory().buffer;
     if (!Start(*sink,
                std::make_unique<ProcessMemory>(system.ApplicationMemory(), stopped,
                                                host_memory.VirtualBasePointer(),
-                                               static_cast<u64>(host_memory.VirtualSize())),
+                                               static_cast<u64>(host_memory.VirtualSize()),
+                                               &host_memory),
                &system.Kernel())) {
         created.store(true, std::memory_order_release);
         return false;

@@ -209,3 +209,42 @@ TEST_CASE("HostMemory: Partial sparse middle unmap and check bindings", "[common
     REQUIRE(ptr[0x0000] == 19);
     REQUIRE(ptr[0x3fff] == 12);
 }
+
+TEST_CASE("HostMemory: alias view of out-of-order backing pieces", "[common]") {
+    HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE, true);
+    REQUIRE(mem.BackingBasePointer() != nullptr);
+    u8* const backing = mem.BackingBasePointer();
+    // Three pieces whose backing offsets do not ascend, one of them longer than a backing view.
+    const size_t big = HostMemory::BackingViewSize + 0x3000;
+    const HostMemory::AliasRun runs[] = {
+        {0x40000000, 0x5000},
+        {0x10000000, big},
+        {0x20003000, 0x2000},
+    };
+    u8* const alias = mem.MapAlias(runs);
+    REQUIRE(alias != nullptr);
+    REQUIRE(reinterpret_cast<uintptr_t>(alias) % 0x10000 == 0);
+    size_t at = 0;
+    for (const auto& run : runs) {
+        // Written through the backing, read through the alias, both sides of every seam.
+        volatile u8* const b = backing + run.backing_offset;
+        volatile u8* const a = alias + at;
+        b[0] = 0x11;
+        b[run.length - 1] = 0x22;
+        REQUIRE(a[0] == 0x11);
+        REQUIRE(a[run.length - 1] == 0x22);
+        // And the other way.
+        a[0x1000] = 0x33;
+        REQUIRE(b[0x1000] == 0x33);
+        at += run.length;
+    }
+    mem.UnmapAlias(alias);
+    // A second alias after the first went.
+    u8* const again = mem.MapAlias(std::span{runs, 1});
+    REQUIRE(again != nullptr);
+    REQUIRE(static_cast<volatile u8*>(again)[0] == 0x11);
+    mem.UnmapAlias(again);
+    // Out of range or unaligned pieces are refused.
+    const HostMemory::AliasRun bad[] = {{0x1001, 0x1000}};
+    REQUIRE(mem.MapAlias(bad) == nullptr);
+}

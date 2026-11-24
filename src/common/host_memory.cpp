@@ -51,8 +51,10 @@
 
 #endif // ^^^ POSIX ^^^
 
+#include <map>
 #include <mutex>
 #include <random>
+#include <vector>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -237,6 +239,73 @@ public:
     void EnableDirectMappedAddress() {
         // TODO
         UNREACHABLE();
+    }
+
+    u8* MapAlias(std::span<const HostMemory::AliasRun> runs) {
+        // The pieces: each run cut into views of at most BackingViewSize.
+        std::vector<AliasPiece> pieces;
+        size_t total = 0;
+        for (const HostMemory::AliasRun& run : runs) {
+            if (run.length == 0 || run.backing_offset % PageAlignment != 0 ||
+                run.length % PageAlignment != 0 || run.backing_offset + run.length > backing_size) {
+                return nullptr;
+            }
+            for (size_t done = 0; done < run.length;) {
+                const size_t length = (std::min)(run.length - done, HostMemory::BackingViewSize);
+                pieces.push_back({total, run.backing_offset + done, length});
+                total += length;
+                done += length;
+            }
+        }
+        if (total == 0) {
+            return nullptr;
+        }
+        u8* const base = static_cast<u8*>(pfn_VirtualAlloc2(
+            process, nullptr, total, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0));
+        if (base == nullptr) {
+            LOG_WARNING(HW_Memory, "Alias view: failed to reserve {} MiB, error {}", total >> 20,
+                        GetLastError());
+            return nullptr;
+        }
+        // Split the placeholder at every piece boundary (the last piece is what remains).
+        for (size_t i = 0; i + 1 < pieces.size(); ++i) {
+            if (!VirtualFreeEx(process, base + pieces[i].alias_offset, pieces[i].length,
+                               MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) {
+                LOG_WARNING(HW_Memory, "Alias view: failed to split the placeholder, error {}",
+                            GetLastError());
+                ReleaseAlias(base, total, pieces, 0);
+                return nullptr;
+            }
+        }
+        for (size_t i = 0; i < pieces.size(); ++i) {
+            void* const ret = pfn_MapViewOfFile3(backing_handle, process,
+                                                 base + pieces[i].alias_offset,
+                                                 pieces[i].backing_offset, pieces[i].length,
+                                                 MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
+            if (ret != base + pieces[i].alias_offset) {
+                LOG_WARNING(HW_Memory, "Alias view: failed to map a view, error {}",
+                            GetLastError());
+                ReleaseAlias(base, total, pieces, i);
+                return nullptr;
+            }
+        }
+        std::scoped_lock lock{alias_mutex};
+        aliases.emplace(base, AliasMapping{total, std::move(pieces)});
+        return base;
+    }
+
+    void UnmapAlias(u8* base) {
+        AliasMapping mapping;
+        {
+            std::scoped_lock lock{alias_mutex};
+            const auto it = aliases.find(base);
+            if (it == aliases.end()) {
+                return;
+            }
+            mapping = std::move(it->second);
+            aliases.erase(it);
+        }
+        ReleaseAlias(base, mapping.size, mapping.pieces, mapping.pieces.size());
     }
 
     const size_t backing_size; ///< Size of the backing memory in bytes
@@ -438,6 +507,38 @@ private:
         }
         return false;
     }
+
+    struct AliasPiece {
+        size_t alias_offset;
+        size_t backing_offset;
+        size_t length;
+    };
+    struct AliasMapping {
+        size_t size{};
+        std::vector<AliasPiece> pieces;
+    };
+
+    /// Unmaps the first `mapped` pieces of an alias and releases its reservation.
+    void ReleaseAlias(u8* base, size_t total, const std::vector<AliasPiece>& pieces,
+                      size_t mapped) {
+        for (size_t i = 0; i < mapped; ++i) {
+            if (!pfn_UnmapViewOfFile2(process, base + pieces[i].alias_offset,
+                                      MEM_PRESERVE_PLACEHOLDER)) {
+                LOG_CRITICAL(HW_Memory, "Alias view: failed to unmap a view, error {}",
+                             GetLastError());
+            }
+        }
+        if (pieces.size() > 1) {
+            VirtualFreeEx(process, base, total, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS);
+        }
+        if (!VirtualFreeEx(process, base, 0, MEM_RELEASE)) {
+            LOG_CRITICAL(HW_Memory, "Alias view: failed to release the reservation, error {}",
+                         GetLastError());
+        }
+    }
+
+    std::mutex alias_mutex;
+    std::map<u8*, AliasMapping> aliases;
 
     HANDLE process{};        ///< Current process handle
     HANDLE backing_handle{}; ///< File based backing memory
@@ -712,7 +813,60 @@ public:
     u8* virtual_base{reinterpret_cast<u8*>(MAP_FAILED)};
     u8* virtual_map_base{reinterpret_cast<u8*>(MAP_FAILED)};
 
+    u8* MapAlias(std::span<const HostMemory::AliasRun> runs) {
+        if (fd < 0) {
+            return nullptr; // private anonymous backing: no second mapping of the same pages
+        }
+        size_t total = 0;
+        for (const HostMemory::AliasRun& run : runs) {
+            if (run.length == 0 || run.backing_offset % PageAlignment != 0 ||
+                run.length % PageAlignment != 0 || run.backing_offset + run.length > backing_size) {
+                return nullptr;
+            }
+            total += run.length;
+        }
+        if (total == 0) {
+            return nullptr;
+        }
+        void* const reserved = mmap(nullptr, total, PROT_NONE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (reserved == MAP_FAILED) {
+            return nullptr;
+        }
+        u8* const base = static_cast<u8*>(reserved);
+        size_t offset = 0;
+        for (const HostMemory::AliasRun& run : runs) {
+            void* const ret = mmap(base + offset, run.length, PROT_READ | PROT_WRITE,
+                                   MAP_SHARED | MAP_FIXED, fd, static_cast<off_t>(run.backing_offset));
+            if (ret == MAP_FAILED) {
+                munmap(base, total);
+                return nullptr;
+            }
+            offset += run.length;
+        }
+        std::scoped_lock lock{alias_mutex};
+        aliases.emplace(base, total);
+        return base;
+    }
+
+    void UnmapAlias(u8* base) {
+        size_t size = 0;
+        {
+            std::scoped_lock lock{alias_mutex};
+            const auto it = aliases.find(base);
+            if (it == aliases.end()) {
+                return;
+            }
+            size = it->second;
+            aliases.erase(it);
+        }
+        munmap(base, size);
+    }
+
 private:
+    std::mutex alias_mutex;
+    std::map<u8*, size_t> aliases;
+
     /// Release all resources in the object
     void Release() {
         if (virtual_map_base != MAP_FAILED) {
@@ -918,6 +1072,25 @@ void HostMemory::ForgetContents() {
             granules[index].fetch_or(GranuleDirty, std::memory_order_release);
         }
     }
+}
+
+u8* HostMemory::MapAlias([[maybe_unused]] std::span<const AliasRun> runs) {
+#if !(defined(__OPENORBIS__) || defined(__managarm__))
+    if (!impl || fallback_buffer) {
+        return nullptr;
+    }
+    return impl->MapAlias(runs);
+#else
+    return nullptr;
+#endif
+}
+
+void HostMemory::UnmapAlias([[maybe_unused]] u8* alias) {
+#if !(defined(__OPENORBIS__) || defined(__managarm__))
+    if (impl && alias != nullptr) {
+        impl->UnmapAlias(alias);
+    }
+#endif
 }
 
 void HostMemory::EnableDirectMappedAddress() {

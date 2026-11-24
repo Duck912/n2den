@@ -63,6 +63,23 @@ public:
         return nullptr;
     }
 
+    /// A second host mapping of the guest storage [va, va + size) (both 4 KiB aligned) in which it
+    /// is one contiguous range even where Pointer() is not (the host pages behind it come in
+    /// several runs): the same memory as Pointer(), page by page, so reads and writes through
+    /// either are the same bytes. Nothing tracks or protects it (like Pointer()). The mapping is
+    /// fixed at this call: a later guest remap is not followed (see Pointer()'s lifetime). It is
+    /// unmapped when the last copy of the returned pointer goes. `run_offsets`, when given,
+    /// receives the offsets in [0, size) where a new host run begins (0 first). Null: unsupported,
+    /// a page unmapped, more than `max_runs` runs, or the host mapping failed.
+    [[nodiscard]] virtual std::shared_ptr<u8> MapContiguousAlias(u64 va, u64 size, u64 max_runs,
+                                                                 std::vector<u64>* run_offsets) {
+        static_cast<void>(va);
+        static_cast<void>(size);
+        static_cast<void>(max_runs);
+        static_cast<void>(run_offsets);
+        return nullptr;
+    }
+
     /// Guest CPU write tracking of guest pages (4 KiB), for device-local copies of guest memory
     /// (pool mirrors). Optional: the default implementation tracks nothing (Track returns 0 and
     /// the replay keeps such ranges in guest memory).
