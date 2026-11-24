@@ -499,7 +499,19 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     const void* first_next = &features2;
 
     VkDeviceDiagnosticsConfigCreateInfoNV diagnostics_nv{};
-    const bool use_diagnostics_nv = Settings::values.enable_nsight_aftermath && extensions.device_diagnostics_config;
+    // EDEN_NX2_AFTERMATH=0/1 overrides the nsight_aftermath setting for the device diagnostics
+    // config (automatic checkpoints, resource tracking, shader debug info). With it on, the NVIDIA
+    // driver captures a call stack on every draw, which costs several ms per frame in heavy games.
+    bool want_diagnostics_nv = Settings::values.enable_nsight_aftermath.GetValue();
+    if (const char* env = std::getenv("EDEN_NX2_AFTERMATH"); env && (env[0] == '0' || env[0] == '1')) {
+        const bool forced = env[0] == '1';
+        if (forced != want_diagnostics_nv) {
+            LOG_WARNING(Render_Vulkan, "EDEN_NX2_AFTERMATH={}: device diagnostics {} (setting says {})",
+                        env[0], forced ? "on" : "off", want_diagnostics_nv ? "on" : "off");
+        }
+        want_diagnostics_nv = forced;
+    }
+    const bool use_diagnostics_nv = want_diagnostics_nv && extensions.device_diagnostics_config;
     if (use_diagnostics_nv) {
         nsight_aftermath_tracker = std::make_unique<NsightAftermathTracker>();
 
