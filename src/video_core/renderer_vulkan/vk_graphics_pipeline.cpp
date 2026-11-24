@@ -18,6 +18,7 @@
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 
+#include "video_core/gpu_written_pages.h"
 #include "video_core/frame_snapshot.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 
@@ -433,6 +434,76 @@ size_t NumAttachments(const FixedPipelineState& state) {
     return num;
 }
 
+/// The vertices an indexed draw can reach: highest index of its index buffer + 1, plus the base
+/// vertex when positive; ~0 when the indices are not readable on the CPU (GPU-written pages, not
+/// contiguous, too many).
+[[nodiscard]] u64 IndexedVertexCount(Tegra::MemoryManager& gpu_memory,
+                                     const Tegra::Engines::Maxwell3D& maxwell3d) {
+    static const bool disabled = std::getenv("EDEN_NX2_NO_INDEX_EXTENT") != nullptr;
+    if (disabled || VideoCommon::g_host_indirect.active) {
+        // An indirect draw's index range is in GPU memory.
+        return ~u64{0};
+    }
+    const auto& draw_state{maxwell3d.draw_manager.draw_state};
+    const auto& index_buffer{draw_state.index_buffer};
+    const u32 count{index_buffer.count};
+    const size_t index_size{index_buffer.FormatSizeInBytes()};
+    if (count == 0 || count > (1U << 20) || !draw_state.inline_index_draw_indexes.empty()) {
+        return ~u64{0};
+    }
+    const GPUVAddr start{index_buffer.StartAddress() + u64{index_buffer.first} * index_size};
+    const size_t bytes{size_t{count} * index_size};
+    const std::optional<DAddr> device{gpu_memory.GpuToCpuAddress(start, bytes)};
+    if (!device) {
+        return ~u64{0};
+    }
+    for (u64 page = *device >> VideoCommon::GpuWrittenPageBits;
+         page <= (*device + bytes - 1) >> VideoCommon::GpuWrittenPageBits; ++page) {
+        if (VideoCommon::IsGpuWrittenPage(page << VideoCommon::GpuWrittenPageBits)) {
+            return ~u64{0};
+        }
+    }
+    thread_local std::vector<u8> scratch;
+    scratch.resize(bytes);
+    gpu_memory.ReadBlockUnsafe(start, scratch.data(), bytes);
+    u32 tag{};
+    VideoCommon::FrameSnapshot::Overlay(*device, scratch.data(), bytes, tag);
+    const bool restart{maxwell3d.regs.primitive_restart.enabled != 0};
+    const u32 restart_index{maxwell3d.regs.primitive_restart.index};
+    u32 highest{};
+    const auto scan = [&]<typename T>(T) {
+        const T* const indices{reinterpret_cast<const T*>(scratch.data())};
+        if (!restart) {
+            T max_value{};
+            for (u32 i = 0; i < count; ++i) {
+                max_value = (std::max)(max_value, indices[i]);
+            }
+            highest = max_value;
+            return;
+        }
+        for (u32 i = 0; i < count; ++i) {
+            if (indices[i] != static_cast<T>(restart_index)) {
+                highest = (std::max)(highest, static_cast<u32>(indices[i]));
+            }
+        }
+    };
+    switch (index_size) {
+    case 1:
+        scan(u8{});
+        break;
+    case 2:
+        scan(u16{});
+        break;
+    case 4:
+        scan(u32{});
+        break;
+    default:
+        return ~u64{0};
+    }
+    const s64 base_vertex{static_cast<s32>(draw_state.base_index)};
+    return u64{highest} + 1 + static_cast<u64>((std::max)(base_vertex, s64{0}));
+}
+
 template <typename Spec>
 bool Passes(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
             const std::array<Shader::Info, NUM_STAGES>& stage_infos) {
@@ -798,6 +869,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     }};
     bool uses_table_spans{};
     Shader::Backend::SPIRV::TableSpanLayout table_spans{};
+    // An indexed draw's vertex count for vertex-strided storage writes (see IndexedVertexCount).
+    std::optional<u64> indexed_vertices;
     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         VideoCommon::BackStats::Mark(VideoCommon::BackStats::Handles);
         const Shader::Info& info{stage_infos[stage]};
@@ -832,15 +905,24 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     ++ssbo_index;
                     continue;
                 }
-                // Writes indexed by the vertex reach (first + count) records; an indexed draw's
-                // vertices are not known here: the whole binding.
+                // Writes indexed by the vertex reach (first + count) records, or for an indexed
+                // draw (highest index + 1) records, read from the index buffer; the whole binding
+                // when that is not known.
                 u32 write_extent{desc.write_extent};
                 if (desc.write_stride != 0 && write_extent != ~0U) {
                     const auto& draw_state{maxwell3d->draw_manager.draw_state};
-                    const u64 vertices{u64{draw_state.vertex_buffer.first} +
-                                       draw_state.vertex_buffer.count};
-                    const u64 extent{write_extent + vertices * desc.write_stride};
-                    write_extent = is_indexed || extent >= ~0U ? ~0U : static_cast<u32>(extent);
+                    u64 vertices{~u64{0}};
+                    if (!is_indexed) {
+                        vertices = u64{draw_state.vertex_buffer.first} + draw_state.vertex_buffer.count;
+                    } else {
+                        if (!indexed_vertices) {
+                            indexed_vertices = IndexedVertexCount(*gpu_memory, *maxwell3d);
+                        }
+                        vertices = *indexed_vertices;
+                    }
+                    const u64 extent{vertices == ~u64{0} ? ~u64{0}
+                                                         : write_extent + vertices * desc.write_stride};
+                    write_extent = extent >= ~0U ? ~0U : static_cast<u32>(extent);
                 }
                 buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
                                                        desc.cbuf_offset, desc.is_written,
@@ -1462,6 +1544,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         .sampler_ids = compact_sampler_ids,
     };
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+        VideoCommon::g_dbg_stage_hash = key.unique_hashes[stage + 1];
         buffer_cache.BindHostStageBuffers(stage);
         VideoCommon::BackStats::Mark(VideoCommon::BackStats::StageBuffers);
         PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage], rescaling,

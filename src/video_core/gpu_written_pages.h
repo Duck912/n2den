@@ -8,6 +8,8 @@
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "common/common_types.h"
@@ -46,6 +48,12 @@ inline void MarkGpuWritten(u64 device_address, u64 size) {
     }
 }
 
+// [DEBUG] EDEN_NX2_LISTWRITE_BINDINGS=1: the storage binding being marked written, for the
+// list page write tally: {program hash, stage<<56 | index<<48 | cbuf index<<16 | cbuf offset,
+// bound size<<32 | write size}. g_dbg_stage_hash: the hash of the stage being bound.
+inline thread_local u64 g_dbg_mark_ctx[4]{};
+inline thread_local u64 g_dbg_stage_hash{};
+
 [[nodiscard]] inline bool IsGpuWrittenPage(u64 device_address) {
     const u64 page = device_address >> GpuWrittenPageBits;
     if (page >= GpuWrittenPageCount) {
@@ -59,13 +67,84 @@ inline void MarkGpuWritten(u64 device_address, u64 size) {
 inline std::array<std::atomic<u64>, GpuWrittenPageCount / 64> g_command_list_pages{};
 inline std::atomic<bool> g_has_command_list_pages{};
 
+// Written words of command-list pages. Bananza's culling shaders store each draw's arguments
+// (20 bytes) into the command list right before the entry that reads them; with page granularity
+// every other entry of the page (the macro call before the arguments, the state after) drains the
+// split as well. Pages the GPU wrote while they were command-list pages record the words written,
+// 4 bytes granular; a page written before it became one (or a write the buffer cache could not
+// place) counts as written everywhere. Like the page bits, the words never clear.
+// On with host indirect draws (EDEN_NX2_HOST_INDIRECT=1) or EDEN_NX2_LIST_GRANULES=1; =0 off.
+struct ListGranules {
+    std::shared_mutex mutex;
+    std::unordered_map<u64, std::array<u64, 16>> pages; ///< page -> one bit per 4 bytes
+};
+inline ListGranules g_list_granules;
+
+[[nodiscard]] inline bool HostIndirectEnabled();
+[[nodiscard]] inline bool ListGranulesEnabled() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_LIST_GRANULES");
+        if (value && value[0] != 0) {
+            return value[0] == '1';
+        }
+        return HostIndirectEnabled();
+    }();
+    return enabled;
+}
+
+/// Back: the GPU writes [first, end) of the command-list page `page`. `end` clipped to the page.
+inline void NoteListGranules(u64 page, u64 first, u64 end) {
+    const u64 page_base = page << GpuWrittenPageBits;
+    const u64 lo = ((std::max)(first, page_base) - page_base) / 4;
+    const u64 hi = ((std::min)(end, page_base + (u64{1} << GpuWrittenPageBits)) - page_base + 3) / 4;
+    if (lo >= hi) {
+        return;
+    }
+    std::unique_lock lock{g_list_granules.mutex};
+    auto& bits = g_list_granules.pages[page];
+    for (u64 word = lo; word < hi;) {
+        const u64 bit = word % 64;
+        const u64 count = (std::min)(64 - bit, hi - word);
+        bits[word / 64] |= (count == 64 ? ~u64{0} : ((u64{1} << count) - 1)) << bit;
+        word += count;
+    }
+}
+
+/// Front: whether the GPU wrote any word of [first, end) of the written page `page` (true when
+/// the page has no word record).
+[[nodiscard]] inline bool ListGranulesWritten(u64 page, u64 first, u64 end) {
+    if (!ListGranulesEnabled()) {
+        return true;
+    }
+    const u64 page_base = page << GpuWrittenPageBits;
+    const u64 lo = ((std::max)(first, page_base) - page_base) / 4;
+    const u64 hi = ((std::min)(end, page_base + (u64{1} << GpuWrittenPageBits)) - page_base + 3) / 4;
+    std::shared_lock lock{g_list_granules.mutex};
+    const auto it = g_list_granules.pages.find(page);
+    if (it == g_list_granules.pages.end()) {
+        return true;
+    }
+    for (u64 word = lo; word < hi; ++word) {
+        if ((it->second[word / 64] >> (word % 64)) & 1) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline void MarkCommandListPage(u64 device_address) {
     const u64 page = device_address >> GpuWrittenPageBits;
     if (page >= GpuWrittenPageCount) {
         return;
     }
-    g_command_list_pages[page / 64].fetch_or(u64{1} << (page % 64), std::memory_order_relaxed);
+    const u64 old = g_command_list_pages[page / 64].fetch_or(u64{1} << (page % 64),
+                                                             std::memory_order_seq_cst);
     g_has_command_list_pages.store(true, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (((old >> (page % 64)) & 1) == 0 && IsGpuWrittenPage(device_address)) {
+        // Written before it was read as a command list: which words is not known.
+        NoteListGranules(page, page << GpuWrittenPageBits, (page + 1) << GpuWrittenPageBits);
+    }
 }
 
 [[nodiscard]] inline bool IsCommandListPage(u64 device_address) {
@@ -167,6 +246,32 @@ inline void ListRunClose() {
 /// RVA + 0x140000000 (for llvm-symbolizer --obj=eden.exe); zeros elsewhere. Windows only.
 void DebugCaptureCallers(u64* out, u32 count);
 
+// Host indexed indirect draws. Bananza's culling geometry shader stores each object's indexed draw
+// arguments (index count, instance count; 5 words) into the command list right before the
+// entry that passes them to its draw macro, ~1,300 times a frame. Reading them on the CPU drains
+// the split and waits for the GPU each time. Instead the split front runs the macro with the
+// words as the guest wrote them (only the counts differ) and the back turns the macro's indexed
+// draw into a vkCmdDrawIndexedIndirect that reads the 5 words where the GPU wrote them, which is
+// VkDrawIndexedIndirectCommand's layout. Opt-in for now: EDEN_NX2_HOST_INDIRECT=1.
+[[nodiscard]] inline bool HostIndirectEnabled() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_HOST_INDIRECT");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+/// Split front: the GPU address of the GPU-written arguments of the macro call being read.
+inline thread_local u64 g_host_indirect_payload{};
+/// Back: the next indexed draw reads its arguments at `address` (armed by the front's macro).
+struct HostIndirectDraw {
+    u64 address{};
+    u32 count{};   ///< the index count the macro writes (the guest's word)
+    u32 first{};   ///< the first index it writes
+    bool armed{};
+    bool active{}; ///< inside that draw
+};
+inline HostIndirectDraw g_host_indirect;
+
 /// A new emulation session starts: no page has been written by its GPU yet.
 inline void ClearGpuWrittenPages() {
     for (auto& word : g_command_list_pages) {
@@ -176,6 +281,8 @@ inline void ClearGpuWrittenPages() {
     for (auto& word : g_gpu_written_pages) {
         word.store(0, std::memory_order_relaxed);
     }
+    std::unique_lock lock{g_list_granules.mutex};
+    g_list_granules.pages.clear();
 }
 
 } // namespace VideoCommon

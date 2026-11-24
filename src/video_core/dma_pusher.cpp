@@ -4,7 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <mutex>
 #include <cstddef>
 #include <cstdlib>
 #include <string_view>
@@ -170,8 +173,66 @@ bool DmaPusher::Step() {
                 }
             }
         }
+        // [DEBUG] EDEN_NX2_TRACE_PAYLOAD_DIFF=1: for drained macro payloads, which words differ
+        // between guest memory before the drain and the words executed: every 20000 entries a
+        // tally per word index, and the first 40 differing entries.
+        static const bool trace_payload_diff = std::getenv("EDEN_NX2_TRACE_PAYLOAD_DIFF") != nullptr;
+        std::vector<u32> stale_words;
+        if (trace_payload_diff && gpu_written && macro_payload && !served) {
+            stale_words.resize(header.size);
+            memory_manager.ReadBlockUnsafe(dma_state.dma_get, stale_words.data(), entry_bytes);
+        }
+        // Host indexed indirect draws (VideoCommon::HostIndirectEnabled): the last 5 parameters of
+        // a macro call, all in this entry, read as the guest wrote them.
+        bool host_indirect = false;
+        if (!served && gpu_written && macro_payload && VideoCommon::HostIndirectEnabled() &&
+            header.size == 5 && dma_state.method_count == 5 && (dma_state.method & 1) != 0 &&
+            VideoCommon::GpuSplit::Get().Active()) {
+            command_headers.resize_destructive(header.size);
+            memory_manager.ReadBlockUnsafe(dma_state.dma_get, command_headers.data(), entry_bytes);
+            served = true;
+            host_indirect = true;
+            VideoCommon::g_host_indirect_payload = dma_state.dma_get;
+            stale_words.clear();
+        }
+        SCOPE_EXIT {
+            if (host_indirect) {
+                VideoCommon::g_host_indirect_payload = 0;
+            }
+        };
         const bool copied =
             served || (gpu_written && SyncGpuWrittenCommands(dma_state.dma_get, entry_bytes));
+        if (!stale_words.empty()) {
+            std::vector<u32> executed(header.size);
+            if (copied) {
+                std::memcpy(executed.data(), command_headers.data(), entry_bytes);
+            } else {
+                memory_manager.ReadBlockUnsafe(dma_state.dma_get, executed.data(), entry_bytes);
+            }
+            static std::mutex diff_mutex;
+            static std::array<u64, 9> differ_at{};
+            static u64 entries = 0;
+            static u64 differing = 0;
+            static u64 shown = 0;
+            std::scoped_lock diff_lock{diff_mutex};
+            bool any = false;
+            for (size_t i = 0; i < executed.size(); ++i) {
+                if (executed[i] != stale_words[i]) {
+                    ++differ_at[(std::min<size_t>)(i, 8)];
+                    any = true;
+                }
+            }
+            differing += any ? 1 : 0;
+            if (any && shown++ < 40) {
+                LOG_INFO(HW_GPU, "Payload diff method {:#x} at {:#x}: guest [{:08x}] executed [{:08x}]",
+                         dma_state.method, dma_state.dma_get, fmt::join(stale_words, " "),
+                         fmt::join(executed, " "));
+            }
+            if (++entries % 20000 == 0) {
+                LOG_INFO(HW_GPU, "Payload diff: {} entries, {} differ; by word: {}", entries,
+                         differing, fmt::join(differ_at, " "));
+            }
+        }
         if (!run_words.empty() && !served) {
             // Verify: the words as the drain has them.
             std::vector<u32> drained(header.size);
@@ -493,7 +554,15 @@ bool DmaPusher::IsGpuWrittenCommands(GPUVAddr address, size_t size) const {
     for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
         if (const auto device = memory_manager.GpuToCpuAddress(page);
             device && VideoCommon::IsGpuWrittenPage(*device)) {
-            return true;
+            // Only the entry's words on this page (VideoCommon::ListGranules).
+            const u64 first = (std::max)(address, page) - page;
+            const u64 end = (std::min)(address + size, page + 0x1000) - page;
+            const u64 device_page = *device >> VideoCommon::GpuWrittenPageBits;
+            const u64 device_base = device_page << VideoCommon::GpuWrittenPageBits;
+            if (VideoCommon::ListGranulesWritten(device_page, device_base + first,
+                                                 device_base + end)) {
+                return true;
+            }
         }
     }
     return false;

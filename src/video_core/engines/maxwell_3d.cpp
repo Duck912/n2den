@@ -1415,6 +1415,43 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
                               FrontState& fs) {
     const u32 method = fs.executing_macro;
     fs.executing_macro = 0;
+    // Host indexed indirect draw (VideoCommon::HostIndirectEnabled): parameters [topology, count,
+    // instances, first index, base vertex, base instance], the last 5 GPU-written. One instance
+    // so the macro draws once; the draw reads the GPU's instance count.
+    const u64 host_payload = std::exchange(VideoCommon::g_host_indirect_payload, 0);
+    const bool host_indirect = host_payload != 0 && fs.parameters.size() == 6;
+    if (host_payload != 0 && !host_indirect) {
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1) < 8) {
+            LOG_WARNING(HW_GPU, "Host indirect draw: macro {:#x} has {} parameters, not 6", method,
+                        fs.parameters.size());
+        }
+    }
+    if (host_indirect) {
+        fs.parameters[2] = 1;
+        split.Defer([address = host_payload, count = fs.parameters[1], first = fs.parameters[3]] {
+            auto& draw = VideoCommon::g_host_indirect;
+            draw.address = address;
+            draw.count = count;
+            draw.first = first;
+            draw.armed = true;
+        });
+    }
+    SCOPE_EXIT {
+        if (host_indirect) {
+            split.Defer([] {
+                auto& draw = VideoCommon::g_host_indirect;
+                if (draw.armed) {
+                    static std::atomic<u32> logged{};
+                    if (logged.fetch_add(1) < 8) {
+                        LOG_WARNING(HW_GPU, "Host indirect draw: the macro at {:#x} drew nothing",
+                                    draw.address);
+                    }
+                }
+                draw.armed = false;
+            });
+        }
+    };
     auto& engine = GetNativeMacroEngine();
     const auto positions = GetNativeMacroPositions();
     const u32 start = positions[((method - MacroRegistersStart) >> 1) % positions.size()];

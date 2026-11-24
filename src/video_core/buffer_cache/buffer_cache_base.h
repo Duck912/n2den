@@ -105,6 +105,10 @@ struct Binding {
     /// Storage bindings: bytes from device_addr the program can write (see
     /// Shader::StorageBufferDescriptor::write_extent); the rest is bound for reads only.
     u32 write_size{~0U};
+    /// [DEBUG] storage bindings: cbuf index << 16 | cbuf offset, bit 31 when through a table.
+    u32 dbg_cbuf{};
+    /// Storage bindings: bytes from device_addr (aligned down) to the pointer the program uses.
+    u32 pointer_offset{};
 };
 
 struct MultiRangeSegment {
@@ -510,6 +514,9 @@ private:
     void BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 binding_index, bool needs_bind);
 
     void BindHostGraphicsStorageBuffers(size_t stage);
+
+    /// The bytes a written storage binding can store to (see Binding::write_size).
+    [[nodiscard]] std::pair<DAddr, u32> StorageWriteRange(const Binding& binding, u32 size) const;
 
     void BindHostGraphicsTextureBuffers(size_t stage);
 

@@ -17,6 +17,7 @@
 #include "common/emu_counters.h"
 #include "common/n2den_trace.h"
 #include "common/settings.h"
+#include "video_core/gpu_written_pages.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/rasterizer_interface.h"
@@ -669,6 +670,37 @@ void Maxwell3D::DrawManager::UpdateTopology(Maxwell3D& maxwell3d) {
 }
 
 void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed, u32 instance_count) {
+    // A host indexed indirect draw (VideoCommon::HostIndirectEnabled): the arguments in memory
+    // replace the count, first index and instances the macro wrote.
+    bool host_indirect = false;
+    if (auto& armed = VideoCommon::g_host_indirect; armed.armed) {
+        armed.armed = false;
+        if (draw_indexed && draw_state.index_buffer.count == armed.count &&
+            draw_state.index_buffer.first == armed.first) {
+            host_indirect = true;
+            indirect_state = IndirectParams{
+                .is_byte_count = false,
+                .is_indexed = true,
+                .include_count = false,
+                .count_start_address = 0,
+                .indirect_start_address = armed.address,
+                .buffer_size = 5 * sizeof(u32),
+                .max_draw_counts = 1,
+                .stride = 0,
+            };
+            draw_state.index_buffer.first = 0;
+            draw_state.index_buffer.count = static_cast<u32>(maxwell3d.EstimateIndexBufferSize());
+        } else {
+            static std::atomic<u32> logged{};
+            if (logged.fetch_add(1) < 16) {
+                LOG_WARNING(HW_GPU,
+                            "Host indirect draw at {:#x}: the macro drew indexed={} count {} "
+                            "first {}, expected count {} first {}: drawn with the guest's words",
+                            armed.address, draw_indexed, draw_state.index_buffer.count,
+                            draw_state.index_buffer.first, armed.count, armed.first);
+            }
+        }
+    }
     draw_state.draw_element_count =
         draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
     LOG_TRACE(HW_GPU, "called, topology={}, count={}", draw_state.topology, draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count);
@@ -741,7 +773,13 @@ void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed
         }
         const u64 pipeline_skips =
             trace_draws ? Common::N2denTrace::pipeline_skips.load(std::memory_order_relaxed) : 0;
-        maxwell3d.rasterizer->Draw(draw_indexed, instance_count);
+        if (host_indirect) {
+            VideoCommon::g_host_indirect.active = true;
+            maxwell3d.rasterizer->DrawIndirect();
+            VideoCommon::g_host_indirect.active = false;
+        } else {
+            maxwell3d.rasterizer->Draw(draw_indexed, instance_count);
+        }
         if (trace_draws) {
             const bool skipped =
                 Common::N2denTrace::pipeline_skips.load(std::memory_order_relaxed) != pipeline_skips;

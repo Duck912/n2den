@@ -563,6 +563,8 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
                              maxwell3d->GetNativeMacroEngine().native_turing,
                              indirect_offset != ~0U);
     channel_state->storage_buffers[stage][ssbo_index].write_size = write_extent;
+    channel_state->storage_buffers[stage][ssbo_index].dbg_cbuf =
+        (cbuf_index << 16) | (cbuf_offset & 0xffff) | (indirect_offset != ~0U ? 0x80000000U : 0U);
     return (channel_state->storage_buffers[stage][ssbo_index].buffer_id != NULL_BUFFER_ID);
 }
 
@@ -1588,6 +1590,21 @@ bool BufferCache<P>::BindMultiRangeStorage(const Binding& binding, bool is_writt
 }
 
 template <class P>
+std::pair<DAddr, u32> BufferCache<P>::StorageWriteRange(const Binding& binding, u32 size) const {
+    // write_size counts from the binding's aligned-down start plus a whole alignment (the pass
+    // can't know the pointer's misalignment); the bytes written start at the pointer. On with
+    // the command-list word granules (VideoCommon::ListGranulesEnabled), which need it.
+    static const bool imprecise = !VideoCommon::ListGranulesEnabled();
+    const u32 alignment = static_cast<u32>(runtime.GetStorageBufferAlignment());
+    if (imprecise || binding.write_size == ~0U || binding.write_size < alignment ||
+        binding.pointer_offset >= size) {
+        return {binding.device_addr, (std::min)(size, binding.write_size)};
+    }
+    const u32 bytes = (std::min)(binding.write_size - alignment, size - binding.pointer_offset);
+    return {binding.device_addr + binding.pointer_offset, bytes};
+}
+
+template <class P>
 void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
     u32 binding_index = 0;
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
@@ -1605,7 +1622,21 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, (std::min)(size, binding.write_size));
+            VideoCommon::g_dbg_mark_ctx[0] = VideoCommon::g_dbg_stage_hash;
+            VideoCommon::g_dbg_mark_ctx[1] = (u64{stage} << 56) | (u64{index} << 48) | binding.dbg_cbuf;
+            VideoCommon::g_dbg_mark_ctx[2] = (u64{size} << 32) | binding.write_size;
+            {
+                const auto& ds = maxwell3d->draw_manager.draw_state;
+                const bool indexed = ds.draw_indexed;
+                VideoCommon::g_dbg_mark_ctx[3] =
+                    (u64{indexed} << 63) |
+                    (u64{indexed ? ds.index_buffer.count : ds.vertex_buffer.count} & 0xffffffff) |
+                    (u64{static_cast<u32>(ds.topology)} << 40);
+            }
+            const auto [write_addr, write_bytes] = StorageWriteRange(binding, size);
+            MarkWrittenBuffer(binding.buffer_id, write_addr, write_bytes);
+            VideoCommon::g_dbg_mark_ctx[0] = VideoCommon::g_dbg_mark_ctx[1] =
+                VideoCommon::g_dbg_mark_ctx[2] = VideoCommon::g_dbg_mark_ctx[3] = 0;
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -1770,8 +1801,8 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr,
-                              (std::min)(size, binding.write_size), true);
+            const auto [write_addr, write_bytes] = StorageWriteRange(binding, size);
+            MarkWrittenBuffer(binding.buffer_id, write_addr, write_bytes, true);
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -2116,6 +2147,9 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
 template <class P>
 void BufferCache<P>::Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64 size) {
     if constexpr (!IS_OPENGL) {
+        // Pairs with MarkCommandListPage: a page becoming a list page either sees this write's
+        // page bit or this sees its list bit and records the words.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
         if (size == 0 || !VideoCommon::g_has_command_list_pages.load(std::memory_order_relaxed)) {
             return;
         }
@@ -2137,6 +2171,70 @@ void BufferCache<P>::Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64
                 // [DEBUG] EDEN_NX2_LISTWRITE_CALLERS=1: every 2000 writes noted to command list
                 // pages, the most frequent (written range size, callers) as return addresses
                 // (RVA + 0x140000000, for llvm-symbolizer --obj=eden.exe).
+                // [DEBUG] EDEN_NX2_LISTWRITE_BINDINGS=1: every 2000, the most frequent storage
+                // bindings (see g_dbg_mark_ctx) whose written range covers a list page.
+                static const bool tally_bindings =
+                    std::getenv("EDEN_NX2_LISTWRITE_BINDINGS") != nullptr;
+                if (tally_bindings) {
+                    static std::mutex bind_mutex;
+                    static std::map<std::array<u64, 6>, u32> bind_tally;
+                    static u32 bind_noted = 0;
+                    const std::array<u64, 6> key{size, VideoCommon::g_dbg_mark_ctx[0],
+                                                 VideoCommon::g_dbg_mark_ctx[1],
+                                                 VideoCommon::g_dbg_mark_ctx[2],
+                                                 VideoCommon::g_dbg_mark_ctx[3],
+                                                 (page_addr - (std::min)(page_addr, u64{device_addr})) & ~u64{0xffff}};
+                    std::scoped_lock bind_lock{bind_mutex};
+                    ++bind_tally[key];
+                    if (++bind_noted % 2000 == 0) {
+                        std::vector<std::pair<u32, std::array<u64, 6>>> top;
+                        for (const auto& [k, v] : bind_tally) {
+                            top.emplace_back(v, k);
+                        }
+                        std::ranges::sort(top, std::greater{});
+                        std::string text;
+                        for (size_t i = 0; i < top.size() && i < 8; ++i) {
+                            const auto& k = top[i].second;
+                            text += fmt::format(
+                                " | {} x size {:#x} hash {:016x} stage {} ssbo {} c{}[{:#x}]{} bound {:#x} wsize {:#x} draw {}{} topo {} page@+{:#x}",
+                                top[i].first, k[0], k[1], k[2] >> 56, (k[2] >> 48) & 0xff,
+                                (k[2] >> 16) & 0x7fff, k[2] & 0xffff,
+                                (k[2] & 0x80000000) ? " table" : "", k[3] >> 32, k[3] & 0xffffffff,
+                                (k[4] >> 63) ? "indexed " : "", k[4] & 0xffffffff, (k[4] >> 40) & 0xff, k[5]);
+                        }
+                        std::map<std::pair<u64, u64>, u32> per_shader;
+                        for (const auto& [k, v] : bind_tally) {
+                            per_shader[{k[1], (k[2] >> 48) & 0xff}] += v;
+                        }
+                        std::vector<std::pair<u32, std::pair<u64, u64>>> shaders;
+                        for (const auto& [k, v] : per_shader) {
+                            shaders.emplace_back(v, k);
+                        }
+                        std::ranges::sort(shaders, std::greater{});
+                        text += " || totals:";
+                        for (size_t i = 0; i < shaders.size() && i < 10; ++i) {
+                            text += fmt::format(" {:016x}/{}={}", shaders[i].second.first,
+                                                shaders[i].second.second, shaders[i].first);
+                        }
+                        if (!shaders.empty()) {
+                            text += " || samples of the top shader:";
+                            u32 shown = 0;
+                            for (const auto& [k, v] : bind_tally) {
+                                if (k[1] != shaders[0].second.first || shown++ >= 6) {
+                                    continue;
+                                }
+                                text += fmt::format(
+                                    " [{}x size {:#x} c{}[{:#x}]{} bound {:#x} wsize {:#x} draw {}{} topo {} page@+{:#x}]",
+                                    v, k[0], (k[2] >> 16) & 0x7fff, k[2] & 0xffff,
+                                    (k[2] & 0x80000000) ? " table" : "", k[3] >> 32,
+                                    k[3] & 0xffffffff, (k[4] >> 63) ? "indexed " : "",
+                                    k[4] & 0xffffffff, (k[4] >> 40) & 0xff, k[5]);
+                            }
+                        }
+                        LOG_INFO(HW_GPU, "List page binding writes (last 2000):{}", text);
+                        bind_tally.clear();
+                    }
+                }
                 static const bool tally_writes = std::getenv("EDEN_NX2_LISTWRITE_CALLERS") != nullptr;
                 if (tally_writes) {
                     static std::mutex tally_mutex;
@@ -2164,6 +2262,7 @@ void BufferCache<P>::Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64
                     }
                 }
 #endif
+                VideoCommon::NoteListGranules(page, device_addr, device_addr + size);
                 if (VideoCommon::ListRunNoteWrite(page_addr)) {
                     LOG_WARNING(HW_GPU,
                                 "Command list page {:#x} was written by a draw inside a synced "
@@ -3081,6 +3180,7 @@ Binding BufferCache<P>::StorageBufferBindingUncached(GPUVAddr gpu_addr, u64 foll
         .gpu_addr = aligned_gpu_addr,
         .size = binding_size,
         .buffer_id = BufferId{},
+        .pointer_offset = static_cast<u32>(gpu_addr - aligned_gpu_addr),
     };
     return binding;
 }
