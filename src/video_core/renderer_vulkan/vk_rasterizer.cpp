@@ -1282,7 +1282,11 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
     using VideoCommon::SyncCounters::InvalTextureSkips;
     const bool filter = InvalFilter();
     VideoCommon::SyncCounters::Add(VideoCommon::SyncCounters::InvalRanges);
-    if (Wants(filter, texture_cache, &TextureCache::MayHaveImagesIn, addr, size, InvalTextureSkips)) {
+    // The texture cache is not filtered here: this runs on guest threads before the store lands,
+    // and an image being created (JoinImages: tracked and read in RefreshContents, counted only at
+    // RegisterImage) would miss the write that the cache mutex used to make it wait for. Texture
+    // skips were ~1.4% of writes in Bananza, so nothing is lost.
+    {
         const VideoCommon::BackStats::LockTimer lock_timer{VideoCommon::BackStats::shared.cpu_write};
         std::scoped_lock lock{texture_cache.mutex};
         lock_timer.Acquired();

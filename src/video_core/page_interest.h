@@ -82,7 +82,10 @@ private:
 
     void ChangePage(u64 page, u32 delta) noexcept {
         if (page >= NUM_PAGES) {
-            outside.fetch_add(delta, std::memory_order_seq_cst);
+            // Images without a mapped address get fake addresses past ADDRESS_BITS
+            // (TextureCache::InsertImage): no write can reach them, and counting them in
+            // `outside` turned the filter off while one existed. Any() answers true for queries
+            // past ADDRESS_BITS anyway.
             return;
         }
         counts[page].fetch_add(delta, std::memory_order_seq_cst);
