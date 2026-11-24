@@ -1670,9 +1670,10 @@ void RasterizerVulkan::FlushWork() {
     // it: 760 -> 255 us per wait in the city plaza, with more queue submissions (~240 -> ~860/s).
     // EDEN_FLUSH_DRAWS=N sets the period for every title (32 to 1048576, rounded up to a multiple
     // of CHECK_MASK + 1; 4096 restores the old one for Switch 2 titles, 128 the previous native
-    // default). NATIVE_FLUSH_DRAWS is 1024 since 2026-11-23 (was 128): in Donkey Kong Bananza
-    // EDEN_FLUSH_DRAWS=1024 lowered the GPU's 3D load from 57.7% to 52.1% at a slightly higher
-    // frame rate (fewer queue submissions, each with its own barriers).
+    // default). Donkey Kong Bananza (2026-11-23): 1024 lowers the GPU's 3D load from 64% to 53%
+    // (about 14% less GPU time per frame) but frames come out ~3% later while the back thread is
+    // the limit (the GPU starts later on each frame), so the default stays 128; worth revisiting
+    // once the back thread is faster, or with a time-based flush.
     // The counter is checked when it reaches CHECK_MASK modulo CHECK_MASK + 1: with the default
     // period the comparison stays as it was (a flush every DRAWS_TO_DISPATCH + CHECK_MASK draws);
     // with a set one the flush comes every N - 1 draws (the counter restarts at zero). Other
@@ -1690,7 +1691,7 @@ void RasterizerVulkan::FlushWork() {
     }();
     u32 flush_at = custom_flush_at != 0 ? custom_flush_at : DRAWS_TO_DISPATCH;
 #ifndef __ANDROID__
-    static constexpr u32 NATIVE_FLUSH_DRAWS = 1024;
+    static constexpr u32 NATIVE_FLUSH_DRAWS = 128;
     static_assert(NATIVE_FLUSH_DRAWS % (CHECK_MASK + 1) == 0);
     if (custom_flush_at == 0 && maxwell3d != nullptr &&
         maxwell3d->GetNativeMacroEngine().native_turing) {
