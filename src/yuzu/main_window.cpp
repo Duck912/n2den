@@ -4296,6 +4296,9 @@ void MainWindow::UpdateGpuBackendButton() {
             case Stage::DlssUltraPerformance:
                 name = tr("DLSS Ultra Performance");
                 break;
+            case Stage::GameNetwork:
+                name = tr("Game network");
+                break;
             }
             if (!name.isEmpty() && temporal) {
                 name = tr("%1 + jitter/motion").arg(name);

@@ -11,7 +11,9 @@ namespace VideoCommon {
 // NVN-HLE's disk caches: the NVN pipeline records and the driver's VkPipelineCache data. Bump
 // NVN_PIPELINE_CACHE_VERSION when the record format changes (nvn_pipeline_disk.h).
 // 19: LOWER_LEFT front face follows the bottom-up viewport (pipelines baked with the old face).
-inline constexpr u32 NVN_PIPELINE_CACHE_VERSION = 19;
+// 20: gathers from scaled textures return the guest-lattice texels (rescaling pass); translations
+//     cached before it lack the fix.
+inline constexpr u32 NVN_PIPELINE_CACHE_VERSION = 20;
 inline constexpr u32 NVN_DRIVER_CACHE_VERSION = 1;
 
 inline constexpr std::array<char, 8> NVN_PIPELINE_CACHE_MAGIC{'N', 'V', 'N', 'P',

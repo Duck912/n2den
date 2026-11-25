@@ -30,6 +30,7 @@
 #include "common/settings.h"
 #include "core/debugger/nx2_debug_tools.h"
 #include "core/perf_stats.h"
+#include "video_core/nvn/upscaler_status.h"
 #include "video_core/game_frame_size.h"
 #include "video_core/nvn/prerec_probe.h"
 #include "video_core/nvn/timestamp_mode.h"
@@ -6796,6 +6797,17 @@ void Recorder::RecordPresent(Texture& texture, Frame& frame, std::vector<Frame*>
     impl.ndsr_upscaled_since_present = false;
     impl.dlss_upscaled_since_present = false;
     impl.upscaled_stage = VideoCore::GameFrameSize::Stage::Game;
+    {
+        // The status bar drops a stage that has not run for a second's worth of presents.
+        namespace Status = VideoCommon::Nvn::UpscalerStatus;
+        constexpr u32 STATUS_IDLE_PRESENTS = 60;
+        if (++impl.status_game_idle == STATUS_IDLE_PRESENTS) {
+            Status::Note(Status::Stage::None, false, Status::Slot::Game);
+        }
+        if (++impl.status_network_idle == STATUS_IDLE_PRESENTS) {
+            Status::Note(Status::Stage::None, false, Status::Slot::Network);
+        }
+    }
     impl.compute_chain_count = 0;
     impl.compute_chain_next = 0;
     impl.pass_depth_of_color.clear();

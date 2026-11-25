@@ -22,6 +22,7 @@ enum class Stage : u8 {
     DlssBalanced,
     DlssPerformance,
     DlssUltraPerformance,
+    GameNetwork, ///< the game's own upscaling network ran as shipped
 };
 
 /// Which upscale wrote: a replaced upscaling network (NDSR, the sink's stand-in) or the game's own

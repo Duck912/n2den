@@ -27,6 +27,7 @@
 #include "common/logging.h"
 #include "common/settings.h"
 
+#include "video_core/nvn/upscaler_status.h"
 #include "video_core/upscaler.h"
 #include "video_core/shader_log.h"
 #include "video_core/nvn/shader/nvn_compute_bank.h"
@@ -214,7 +215,13 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
                  Settings::values.resolution_info.active);
     }
     const auto backend = SelectedUpscaleBackend(requested);
-    const bool replacement_wanted = VideoCore::Upscaler::SelectHlePassPrecedence(
+    // The game's own DLSS call already made this frame's picture (XC2: its DLSS to 1080p, then
+    // its network to 4K): at 1X the network runs as the game ships it, as on the console. A
+    // second DLSS over an already resolved, unjittered picture only adds a one-pixel checker.
+    // (With the Resolution setting active the network's 1:1 step is a copy instead, RunUpscale.)
+    const bool after_game_dlss = impl.dlss_upscaled_since_present && !scale.Active();
+    const bool replacement_wanted = !after_game_dlss &&
+                                    VideoCore::Upscaler::SelectHlePassPrecedence(
                                         backend, requested, scale.Active(), false)
                                         .replace_game_network;
     const auto log_skip = [](u64 hash, std::string_view reason, const auto& details) {
@@ -230,7 +237,7 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
         }
     };
     if (!replacement_wanted) {
-        log_skip(0, "policy", [&] {
+        log_skip(0, after_game_dlss ? "the game's DLSS made the frame" : "policy", [&] {
             return fmt::format("requested={} backend={} scale={}x saved upscaler={} AA={}",
                                static_cast<u32>(requested), static_cast<u32>(backend),
                                scale.UpFactor(),
@@ -279,6 +286,12 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
         control->thread_group, control->compute.texture_count, control->compute.image_count,
         push_constants[1].size());
     const u64 program_hash = hash_it->second[STAGE_COMPUTE];
+    if (!replacement_wanted && ndsr_shape) {
+        // The status bar names the game's own network when it does the step.
+        namespace Status = VideoCommon::Nvn::UpscalerStatus;
+        Status::Note(Status::Stage::GameNetwork, false, Status::Slot::Network);
+        impl.status_network_idle = 0;
+    }
     if (replacement_wanted && !ndsr_shape) {
         log_skip(program_hash, "dispatch shape", [&] {
             return fmt::format("hash={:016x} threads={}x{}x{} textures={} images={} push_bytes={}",

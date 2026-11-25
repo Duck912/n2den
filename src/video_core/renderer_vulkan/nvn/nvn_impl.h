@@ -910,6 +910,11 @@ struct Context::Impl {
     bool ndsr_upscaled_since_present{};
     /// True only when DLSS/DLAA (not FSR/bilinear fallback) wrote this frame's upscale.
     bool dlss_upscaled_since_present{};
+    /// Presents since the game's own DLSS call / a replaced network last wrote (status bar: a
+    /// stage that stopped running is cleared after a while, e.g. the menu's network replacement
+    /// once the game's own network takes over).
+    u32 status_game_idle{};
+    u32 status_network_idle{};
     VideoCore::GameFrameSize::Stage upscaled_stage{VideoCore::GameFrameSize::Stage::Game};
     /// Replay thread only: the input and output sizes of that upscale.
     u32 upscaled_input_width{};

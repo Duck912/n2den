@@ -175,6 +175,7 @@ enum class SameSizeStage { Copy, Fsr1, Dlaa };
 void NoteUpscale(Context::Impl& impl, const auto& job, const char* stage) {
     using VideoCore::GameFrameSize::Stage;
     impl.ndsr_upscaled_since_present = true;
+    (job.game_dlss ? impl.status_game_idle : impl.status_network_idle) = 0;
     const std::string_view name{stage};
     impl.dlss_upscaled_since_present = name.starts_with("DLSS") || name.starts_with("DLAA");
     impl.upscaled_stage = name.starts_with("DLSS") ? Stage::Dlss
