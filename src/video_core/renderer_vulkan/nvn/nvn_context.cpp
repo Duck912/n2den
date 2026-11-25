@@ -25,6 +25,7 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/thread.h"
+#include "video_core/nvn_draw_probe.h"
 #include "video_core/game_frame_size.h"
 #include "core/debugger/nx2_debug_tools.h"
 #include "video_core/nvn/prerec_probe.h"
@@ -180,6 +181,18 @@ void RegisterDiagRequests() {
         Debug::RequestDump(0, draw, request.Directory());
         LOG_INFO(Render_Vulkan, "[diag] nvn-draw: logging draw {} of the next frame (also to {}/nvn-draw-{}.txt)",
                  draw, request.Directory().string(), draw);
+    });
+    // `nvn-dispatch <hex program hash> [count]`: the bindings (uniform and storage bytes, textures,
+    // samplers) of the next dispatches of that compute program, as nvn_draw_dump writes them.
+    Common::DiagRequest::Register("nvn-dispatch", [](const Request& request) {
+        const u64 hash = request.args.empty() ? 0 : std::strtoull(request.args[0].c_str(), nullptr, 16);
+        if (hash == 0) {
+            LOG_WARNING(Render_Vulkan, "[diag] nvn-dispatch: needs a compute program hash (hex)");
+            return;
+        }
+        VideoCommon::NvnDrawProbe::ArmDump(hash, request.Directory().string(), request.NumberArg(1, 1));
+        LOG_INFO(Render_Vulkan, "[diag] nvn-dispatch: dumping the next dispatch of {:016x} into {}",
+                 hash, request.Directory().string());
     });
     // `nvn-frame`: the targets of every pass of the next frame (for tools/n2den/scan_nan.py) and its
     // draw log, taken at whatever moment the request file appears (no frame number needed).

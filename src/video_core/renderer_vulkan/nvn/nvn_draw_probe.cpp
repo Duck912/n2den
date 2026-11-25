@@ -27,7 +27,7 @@ constexpr const char* StageNames[Probe::StageCount] = {
 
 /// Bytes of a game uniform buffer and of a storage buffer a dump shows.
 constexpr u64 DumpUniformBytes = 0x1000;
-constexpr u64 DumpStorageBytes = 0x100;
+constexpr u64 DumpStorageBytes = 0x4000;
 
 void AppendHex(std::string& text, const u8* data, u64 bytes, u64 per_line) {
     for (u64 offset = 0; offset < bytes; offset += per_line) {

@@ -181,8 +181,12 @@ void OnPresent() {
 std::optional<DumpTicket> DumpRequested(const DrawInfo& info) {
     State& s = S();
     std::scoped_lock lock{s.mutex};
-    if (!DumpWanted(s) ||
-        std::find(info.hashes.begin(), info.hashes.end(), s.dump.hash) == info.hashes.end()) {
+    // The compute slot (5) only names the program bound for dispatches: a draw does not run it.
+    bool match = false;
+    for (size_t stage = 0; stage < info.hashes.size(); ++stage) {
+        match |= stage != 5 && info.hashes[stage] == s.dump.hash;
+    }
+    if (!DumpWanted(s) || !match) {
         return std::nullopt;
     }
     return ClaimDumpLocked(s, "draw");
