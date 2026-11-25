@@ -187,6 +187,10 @@ ENUM(NvnUpscaler, Auto, Dlss, Fsr1, Copy);
 // choice (DLAA when it draws at the output size); the others are DLSS's modes: Quality 66.7%,
 // Balanced 58%, Performance 50%, Ultra Performance 33%.
 ENUM(NvnDlssQuality, Native, Quality, Balanced, Performance, UltraPerformance);
+// The display a docked Switch 2 game is told it is connected to (display_resolution): Auto picks
+// the largest of 1080p, 1440p and 2160p that the monitor holds. The game sizes its output from it,
+// as on the console with that display.
+ENUM(DisplayResolution, Auto, Fhd1080, Qhd1440, Uhd2160);
 // NVN-HLE's host graphics API (nvn_renderer). Direct3D 12 exists only in Windows builds with
 // ENABLE_D3D12_NVN (video_core); elsewhere the setting is ignored.
 ENUM(NvnRenderer, Vulkan, D3D12);

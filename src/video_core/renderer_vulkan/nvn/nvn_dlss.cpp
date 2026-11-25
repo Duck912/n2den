@@ -531,7 +531,14 @@ bool SinkDlss::Evaluate(vk::CommandBuffer cmd, const Inputs& in,
     if (fresh) {
         state.last_present = in.present; // the retirement clock starts now
     }
-    const u32 mode = ChooseMode(render, in.output);
+    // A game's dynamic resolution moves the render size every few frames: the mode in use stays
+    // while the new size is in its render range (DLSS takes any size of the range per evaluation,
+    // the colour tag's extent), so the feature and its history survive the step.
+    const bool keep_mode = state.options_set && state.output_extent.width == in.output.width &&
+                           state.output_extent.height == in.output.height &&
+                           ModeFromEnv() == ModeSetting::Auto &&
+                           ModeFits(state.mode, render, in.output);
+    const u32 mode = keep_mode ? state.mode : ChooseMode(render, in.output);
     if (mode == static_cast<u32>(sl::DLSSMode::eOff)) {
         // Between two modes' ranges (a game's dynamic resolution passing through): DLSS would
         // reject the evaluation. The caller's copy / FSR1 stage writes this frame; the feature
@@ -548,8 +555,7 @@ bool SinkDlss::Evaluate(vk::CommandBuffer cmd, const Inputs& in,
         return false;
     }
     const bool feature_changed =
-        !state.options_set || state.render.width != render.width ||
-        state.render.height != render.height || state.output_extent.width != in.output.width ||
+        !state.options_set || state.output_extent.width != in.output.width ||
         state.output_extent.height != in.output.height || state.mode != mode ||
         state.hdr != in.hdr || state.auto_exposure != in.auto_exposure ||
         state.depth_inverted != in.depth_inverted;
@@ -775,7 +781,9 @@ bool SinkDlss::Evaluate(vk::CommandBuffer cmd, const Inputs& in,
         default:
             break;
         }
-        Status::Note(shown, in.motion_vectors.Valid());
+        const bool network = (in.viewport & ~0xffu) == (NETWORK_VIEWPORT_BASE & ~0xffu);
+        Status::Note(shown, in.motion_vectors.Valid(),
+                     network ? Status::Slot::Network : Status::Slot::Game);
     }
     ++evaluations;
     if (evaluations % 600 == 0) {

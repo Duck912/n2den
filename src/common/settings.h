@@ -404,6 +404,16 @@ struct Values {
     // NvnDlssQuality), by a built-in patch of the game's code for the builds
     // file_sys/nvn_dlss_scale.h knows; nothing for any other game. The patch is applied when the
     // game's code loads, so a change applies to the next boot. See NvnDlssSceneScale().
+    // The display a docked Switch 2 game is told it is connected to (settings_enums.h
+    // DisplayResolution); Auto follows the monitor. Takes effect when a game starts. See
+    // DockedDisplayHeight().
+    SwitchableSetting<DisplayResolution> display_resolution{linkage,
+                                                            DisplayResolution::Auto,
+                                                            "display_resolution",
+                                                            Category::Renderer,
+                                                            Specialization::Default,
+                                                            true,
+                                                            false};
     SwitchableSetting<NvnDlssQuality> nvn_dlss_quality{linkage,
                                                        NvnDlssQuality::Native,
                                                        "nvn_dlss_quality",
@@ -1128,6 +1138,14 @@ bool CurrentProgramIsSwitch2();
 // console docks to a 4K TV), off for Switch 1 programs, which size their framebuffers from the
 // default display resolution. EDEN_NX2_DOCKED_DEFAULT_4K=0/1 forces it for any program.
 [[nodiscard]] bool DockedDisplayIs4K();
+// The docked display's height a program sees: 1080 for Switch 1 programs; for Switch 2 programs
+// the display_resolution setting (Auto: the largest of 1080, 1440 and 2160 that the host display
+// holds, 2160 while it is unknown). EDEN_NX2_DOCKED_DEFAULT_4K=1 forces 2160, =0 1080. The width
+// is 16:9 of it.
+[[nodiscard]] u32 DockedDisplayHeight();
+// The host display's size in pixels, for display_resolution Auto (the frontend sets it when a
+// game starts); 0 when unknown.
+void SetHostDisplaySize(u32 width, u32 height);
 
 // Why nvn-hle (the NVN high-level emulation) is on or off for the program being started.
 enum class NvnHleReason {
@@ -1156,8 +1174,11 @@ struct NvnHleChoice {
 // meaning; the variables are read once per process, the settings on every call. With the variables
 // unset and the settings at their defaults every answer is the long-standing one (off, Vulkan).
 // The sink evaluates DLSS/DLAA itself: EDEN_NVN_DLSS ("1" on, anything else off), else
-// nvn_upscaler == Dlss.
+// nvn_upscaler == Dlss or Console native (Auto, for the game's own DLSS calls).
 [[nodiscard]] bool NvnSinkDlss();
+// NVN-HLE upscaler "Console native" (nvn_upscaler == Auto): the game's own upscaling runs as on
+// the console: its networks (NDSR) as it ships them, its DLSS calls on real DLSS.
+[[nodiscard]] bool NvnConsoleNative();
 // A game's upscaling network that keeps the picture's size is replaced too:
 // EDEN_NVN_REPLACE_SAME_SIZE_NETWORK ("1" on, anything else off), else nvn_upscaler != Auto.
 [[nodiscard]] bool NvnReplaceSameSizeNetwork();

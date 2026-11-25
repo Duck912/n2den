@@ -118,6 +118,12 @@ struct Shape {
     u32 width{0};
     u32 height{0};
     u32 max_dimension{16384}; ///< the device's image and framebuffer limit
+    /// PC-style upscaling (NVN upscaler DLSS / DLAA): only screen-shaped images (16:9-ish: the
+    /// scene, its depth and motion vectors, the post and menu chain) get twins; shadow maps,
+    /// atlases and other off-screen images keep their size.
+    bool screen_only{false};
+    /// With `screen_only`: no twin taller than the display (0: no limit).
+    u32 height_limit{0};
 };
 
 enum class Reason : u8 {
@@ -133,6 +139,8 @@ enum class Reason : u8 {
     NoBlit,       ///< the device cannot blit the format: the emulated GPU would need a helper pass
     TooSmall,     ///< a colour image of at most HEIGHT_THRESHOLD rows
     TooLarge,     ///< the scaled size exceeds the device's limits
+    NotScreen,    ///< PC-style upscaling: not screen-shaped (a shadow map, an atlas)
+    BeyondOutput, ///< PC-style upscaling: the scaled image would be taller than the display
 };
 
 [[nodiscard]] constexpr const char* ReasonName(Reason reason) noexcept {
@@ -161,6 +169,10 @@ enum class Reason : u8 {
         return "colour image not taller than 288 rows";
     case Reason::TooLarge:
         return "scaled size beyond the device limits";
+    case Reason::NotScreen:
+        return "not screen-shaped (PC-style upscaling)";
+    case Reason::BeyondOutput:
+        return "scaled taller than the display (PC-style upscaling)";
     }
     return "?";
 }
@@ -200,6 +212,16 @@ enum class Reason : u8 {
     if (factor.Scale(shape.width) > shape.max_dimension ||
         factor.Scale(shape.height) > shape.max_dimension) {
         return Reason::TooLarge;
+    }
+    if (shape.screen_only) {
+        // 16:9 is 1.78; 1.6 .. 1.95 keeps rounded half and quarter sizes (640x360, 960x544).
+        if (shape.height == 0 || shape.width * 20 < shape.height * 32 ||
+            shape.width * 20 > shape.height * 39) {
+            return Reason::NotScreen;
+        }
+        if (shape.height_limit != 0 && factor.Scale(shape.height) > shape.height_limit) {
+            return Reason::BeyondOutput;
+        }
     }
     return Reason::Eligible;
 }

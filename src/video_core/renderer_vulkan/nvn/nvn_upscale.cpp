@@ -184,7 +184,8 @@ void NoteUpscale(Context::Impl& impl, const auto& job, const char* stage) {
     if (!impl.dlss_upscaled_since_present) {
         // DLSS / DLAA name their own mode for the status bar (SinkDlss::Evaluate).
         namespace Status = VideoCommon::Nvn::UpscalerStatus;
-        Status::Note(name.starts_with("FSR1") ? Status::Stage::Fsr1 : Status::Stage::Copy);
+        Status::Note(name.starts_with("FSR1") ? Status::Stage::Fsr1 : Status::Stage::Copy, false,
+                     job.game_dlss ? Status::Slot::Game : Status::Slot::Network);
     }
     impl.upscaled_input_width = job.input_rect.width;
     impl.upscaled_input_height = job.input_rect.height;
@@ -556,7 +557,13 @@ bool DrawContext::RunUpscale(const UpscaleJob& job, const char*& stage) {
         backend = same_extent ? VideoCore::Upscaler::Backend::Dlaa
                               : VideoCore::Upscaler::Backend::Dlss;
     }
-    if (job.host_inputs) {
+    if (job.host_inputs && !job.game_dlss && same_extent && impl.dlss_upscaled_since_present &&
+        impl.RescaleFactor().Active()) {
+        // The game's own DLSS call already made this frame's picture at the scaled size (it wrote
+        // the twin this network now reads): the network's 1:1 step is a copy, not a second DLAA
+        // pass over a picture that already holds the menus.
+        backend = VideoCore::Upscaler::Backend::Bilinear;
+    } else if (job.host_inputs) {
         // A network replacement fed its scaled twin: at ratio 1 DLSS is DLAA (a two-pixel twin
         // overhang, OoT 854x480 at 3X, is cropped), whatever DLSS/Auto setting asked for it.
         backend = VideoCore::Upscaler::PromoteNearNativeToDlaa(
@@ -666,7 +673,8 @@ VideoCore::Upscaler::Backend DrawContext::SelectedUpscaleBackend(
         const char* value = std::getenv("EDEN_NX2_NVN_GAME_NETWORK");
         return value != nullptr && value[0] == '1';
     }();
-    if (game_network) {
+    // Console native (NVN upscaler Auto): the game's networks run as it ships them.
+    if (game_network || Settings::NvnConsoleNative()) {
         return VideoCore::Upscaler::Backend::Game;
     }
     constexpr bool tensor_supported = false;
@@ -1019,6 +1027,7 @@ void DrawContext::EvaluateDlssOp(const VC::EvaluateDlssPayload& p) {
     const Rescale::Factor factor = impl.RescaleFactor();
     const VideoCore::Upscaler::Rect guest_input_rect = job.input_rect;
     bool dlss_scaled = false;
+    bool output_scaled = false; ///< DLSS writes the output's twin (job.output is the twin)
     if (factor.Active()) {
         const auto twin_of = [&](const UpscaleImage& image, std::shared_ptr<Texture>& out) {
             return image.texture == nullptr || UpscaleTwinOf(*image.texture, image.level, out);
@@ -1026,9 +1035,34 @@ void DrawContext::EvaluateDlssOp(const VC::EvaluateDlssPayload& p) {
         const Rescale::Rect scaled_input = Rescale::ScaleRect(
             factor, {static_cast<s32>(guest_input_rect.x), static_cast<s32>(guest_input_rect.y),
                      guest_input_rect.width, guest_input_rect.height});
+        // The output's twin: DLSS writes the scaled picture straight into it (the scene drawn at
+        // the scaled size becomes one upscale to the scaled output, e.g. 1440p -> 2160p at 2X),
+        // instead of the guest-sized output that a later scaled pass would blit up again. Only
+        // with low-resolution motion vectors (or none): full-resolution ones are placed by the
+        // output rectangle in guest pixels.
+        const Rescale::Rect scaled_output = Rescale::ScaleRect(
+            factor, {static_cast<s32>(job.output_rect.x), static_cast<s32>(job.output_rect.y),
+                     job.output_rect.width, job.output_rect.height});
+        std::shared_ptr<Texture> output_twin;
+        if ((motion_low_res || job.motion_vectors.texture == nullptr) && job.output.level == 0 &&
+            job.output.layer == 0 &&
+            Rescale::Classify(factor, impl.RescaleShapeOf(*job.output.texture->storage, false)) ==
+                Rescale::Reason::Eligible) {
+            output_twin = impl.ScaledTextureOf(*job.output.texture);
+            if (output_twin != nullptr &&
+                (!impl.EnsureImage(*output_twin->storage) || scaled_output.width == 0 ||
+                 scaled_output.height == 0 ||
+                 static_cast<u32>(scaled_output.x) + scaled_output.width >
+                     output_twin->desc.width ||
+                 static_cast<u32>(scaled_output.y) + scaled_output.height >
+                     output_twin->desc.height)) {
+                output_twin = nullptr;
+            }
+        }
+        const u32 limit_w = output_twin ? scaled_output.width : job.output_rect.width;
+        const u32 limit_h = output_twin ? scaled_output.height : job.output_rect.height;
         dlss_scaled = scaled_input.width != 0 && scaled_input.height != 0 &&
-                      scaled_input.width <= job.output_rect.width &&
-                      scaled_input.height <= job.output_rect.height &&
+                      scaled_input.width <= limit_w && scaled_input.height <= limit_h &&
                       job.input.texture != nullptr && twin_of(job.input, twins[0]) &&
                       twins[0] != nullptr && twin_of(job.depth, twins[1]) &&
                       (!motion_low_res || twin_of(job.motion_vectors, twins[2])) &&
@@ -1048,6 +1082,16 @@ void DrawContext::EvaluateDlssOp(const VC::EvaluateDlssPayload& p) {
                               scaled_input.width, scaled_input.height};
             job.input.x = job.input_rect.x;
             job.input.y = job.input_rect.y;
+            if (output_twin) {
+                held[1] = output_twin;
+                job.output.texture = output_twin.get();
+                job.output_rect = {static_cast<u32>(scaled_output.x),
+                                   static_cast<u32>(scaled_output.y), scaled_output.width,
+                                   scaled_output.height};
+                job.output.x = job.output_rect.x;
+                job.output.y = job.output_rect.y;
+                output_scaled = true;
+            }
         }
     }
     const auto scaled_at = [&](s64 value) -> s64 {
@@ -1092,8 +1136,10 @@ void DrawContext::EvaluateDlssOp(const VC::EvaluateDlssPayload& p) {
     };
     const s64 input_dx = s64{job.input_rect.x} - p.input_base.x;
     const s64 input_dy = s64{job.input_rect.y} - p.input_base.y;
-    const s64 output_dx = s64{job.output_rect.x} - p.output_base.x;
-    const s64 output_dy = s64{job.output_rect.y} - p.output_base.y;
+    // (Guest pixels: a scaled output only comes with low-resolution motion vectors, which use the
+    // input offsets.)
+    const s64 output_dx = output_scaled ? 0 : s64{job.output_rect.x} - p.output_base.x;
+    const s64 output_dy = output_scaled ? 0 : s64{job.output_rect.y} - p.output_base.y;
     // NGX's motion vectors are at the output resolution unless they are low-res ones.
     const VideoCore::Upscaler::Rect& motion_rect = motion_low_res ? job.input_rect : job.output_rect;
     job.motion_width = motion_rect.width;
@@ -1163,7 +1209,7 @@ void DrawContext::EvaluateDlssOp(const VC::EvaluateDlssPayload& p) {
     };
     LogGameDlssEvaluation(fmt::format(
         "game DLSS evaluation: input {}x{} at {},{} format {} -> output {}x{} at {},{} format {}, "
-        "flags {:#x}, motion vectors {} ({}x{}), depth {}, bias {}, exposure {}, scaled {}; "
+        "flags {:#x}, motion vectors {} ({}x{}), depth {}, bias {}, exposure {}, scaled {}{}; "
         "written by the {} stage",
         job.input_rect.width, job.input_rect.height, job.input_rect.x, job.input_rect.y,
         format_of(job.input), job.output_rect.width, job.output_rect.height, job.output_rect.x,
@@ -1171,6 +1217,7 @@ void DrawContext::EvaluateDlssOp(const VC::EvaluateDlssPayload& p) {
         job.motion_vectors.texture ? "yes" : "no", job.motion_width, job.motion_height,
         job.depth.texture ? "yes" : "no", job.bias.texture ? "yes" : "no",
         job.exposure.texture ? "yes" : "no", dlss_scaled ? "yes" : "no",
+        output_scaled ? " (into the output's twin)" : "",
         stage ? stage : "?"));
 }
 

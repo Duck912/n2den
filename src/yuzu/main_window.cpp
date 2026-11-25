@@ -1948,6 +1948,13 @@ bool MainWindow::SelectAndSetCurrentUser(
 
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
+    // display_resolution Auto: the docked display a Switch 2 game sees follows this monitor.
+    if (const QScreen* const host_screen = screen()) {
+        const qreal ratio = host_screen->devicePixelRatio();
+        const QSize size = host_screen->size();
+        Settings::SetHostDisplaySize(static_cast<u32>(size.width() * ratio),
+                                     static_cast<u32>(size.height() * ratio));
+    }
     game_details->SaveChanges();
     LOG_INFO(Frontend, "n2den starting...");
 
@@ -4255,44 +4262,52 @@ void MainWindow::UpdateGpuBackendButton() {
     if (!running) {
         VideoCommon::Nvn::UpscalerStatus::Reset();
     } else if (hle) {
-        // What last wrote a replaced upscaling network's output: the DLSS mode that really ran
-        // (from the sizes: DLAA at the same size), FSR 1 or a copy. Nothing while the game's own
-        // network runs.
+        // What wrote the upscaled image: the DLSS mode that really ran (from the sizes: DLAA at
+        // the same size), FSR 1 or a copy; for the game's own DLSS call and for a replaced
+        // upscaling network (NDSR) each. A game running both shows "game -> network".
         using VideoCommon::Nvn::UpscalerStatus::Stage;
         const auto upscaler = VideoCommon::Nvn::UpscalerStatus::Read();
-        QString name;
-        switch (upscaler.stage) {
-        case Stage::None:
-            break;
-        case Stage::Copy:
-            name = tr("Copy");
-            break;
-        case Stage::Fsr1:
-            name = tr("FSR 1");
-            break;
-        case Stage::Dlaa:
-            name = tr("DLAA");
-            break;
-        case Stage::DlssUltraQuality:
-            name = tr("DLSS Ultra Quality");
-            break;
-        case Stage::DlssQuality:
-            name = tr("DLSS Quality");
-            break;
-        case Stage::DlssBalanced:
-            name = tr("DLSS Balanced");
-            break;
-        case Stage::DlssPerformance:
-            name = tr("DLSS Performance");
-            break;
-        case Stage::DlssUltraPerformance:
-            name = tr("DLSS Ultra Performance");
-            break;
-        }
-        if (!name.isEmpty()) {
-            if (upscaler.temporal) {
+        const auto stage_name = [](Stage stage, bool temporal) {
+            QString name;
+            switch (stage) {
+            case Stage::None:
+                break;
+            case Stage::Copy:
+                name = tr("Copy");
+                break;
+            case Stage::Fsr1:
+                name = tr("FSR 1");
+                break;
+            case Stage::Dlaa:
+                name = tr("DLAA");
+                break;
+            case Stage::DlssUltraQuality:
+                name = tr("DLSS Ultra Quality");
+                break;
+            case Stage::DlssQuality:
+                name = tr("DLSS Quality");
+                break;
+            case Stage::DlssBalanced:
+                name = tr("DLSS Balanced");
+                break;
+            case Stage::DlssPerformance:
+                name = tr("DLSS Performance");
+                break;
+            case Stage::DlssUltraPerformance:
+                name = tr("DLSS Ultra Performance");
+                break;
+            }
+            if (!name.isEmpty() && temporal) {
                 name = tr("%1 + jitter/motion").arg(name);
             }
+            return name;
+        };
+        const QString game = stage_name(upscaler.game_stage, false);
+        const QString network = stage_name(upscaler.stage, upscaler.temporal);
+        QString name = game.isEmpty() ? network
+                       : network.isEmpty() ? game
+                                           : QStringLiteral("%1 -> %2").arg(game, network);
+        if (!name.isEmpty()) {
             text = QStringLiteral("%1 | %2").arg(text, name);
         }
     }

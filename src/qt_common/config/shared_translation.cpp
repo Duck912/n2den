@@ -170,16 +170,23 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "game's picture is not drawn yet.\n"
               "Takes effect the next time a game starts."));
     INSERT(Settings, nvn_upscaler, tr("Upscaler:"),
-           tr("What replaces the game's own upscaling and anti-aliasing network under NVN-HLE "
-              "(only used when the GPU backend is NVN-HLE).\n"
-              "Auto: the game's network runs as it is when it keeps the picture's size; when it "
-              "enlarges the picture, AMD FSR 1 does that instead.\n"
-              "NVIDIA DLSS / DLAA: GeForce RTX cards. DLSS when the picture is enlarged, DLAA "
-              "(anti-aliasing only) when it keeps its size. Needs NVIDIA's Streamline and DLSS "
-              "files: the status and download button show under this list. Without "
-              "them FSR 1 or a plain copy is used.\n"
+           tr("What upscales and smooths the picture under NVN-HLE (only used when the GPU "
+              "backend is NVN-HLE).\n"
+              "Console native: the game's own upscaling, as on a Switch 2: its upscaling "
+              "network runs as the game ships it, and its DLSS calls use NVIDIA DLSS (FSR 1 "
+              "without DLSS files).\n"
+              "NVIDIA DLSS / DLAA: GeForce RTX cards, PC style: one DLSS pass from the 3D "
+              "scene to the picture. Needs NVIDIA's Streamline and DLSS files: the status and "
+              "download button show under this list. Without them FSR 1 or a plain copy is "
+              "used.\n"
               "AMD FSR 1: any graphics card.\n"
               "Plain copy: no anti-aliasing at all, the picture is only stretched to size.\n"
+              "Takes effect the next time a game starts."));
+    INSERT(Settings, display_resolution, tr("Display resolution:"),
+           tr("The display a docked Switch 2 game is told it is connected to. The game sizes its "
+              "picture for it, as the console does with that TV or monitor.\n"
+              "Auto: follows your monitor (the largest of 1080p, 1440p and 4K that fits).\n"
+              "Switch 1 games always see 1080p.\n"
               "Takes effect the next time a game starts."));
     INSERT(Settings, nvn_dlss_quality, tr("DLSS quality:"),
            tr("The size the game draws its 3D scene at before NVIDIA DLSS enlarges it, as a share "
@@ -524,11 +531,18 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
     translations->insert(
         {Settings::EnumMetadata<Settings::NvnUpscaler>::Index(),
          {
-             PAIR(NvnUpscaler, Auto, tr("Auto (game's own network, FSR 1 when enlarging)")),
+             PAIR(NvnUpscaler, Auto, tr("Console native (the game's own upscaling)")),
              PAIR(NvnUpscaler, Dlss, tr("NVIDIA DLSS / DLAA (GeForce RTX)")),
              PAIR(NvnUpscaler, Fsr1, tr("AMD FSR 1")),
              PAIR(NvnUpscaler, Copy, tr("Plain copy (no anti-aliasing)")),
          }});
+    translations->insert({Settings::EnumMetadata<Settings::DisplayResolution>::Index(),
+                          {
+                              PAIR(DisplayResolution, Auto, tr("Auto (match the monitor)")),
+                              PAIR(DisplayResolution, Fhd1080, tr("1080p")),
+                              PAIR(DisplayResolution, Qhd1440, tr("1440p")),
+                              PAIR(DisplayResolution, Uhd2160, tr("4K (2160p)")),
+                          }});
     translations->insert({Settings::EnumMetadata<Settings::NvnDlssQuality>::Index(),
                           {
                               PAIR(NvnDlssQuality, Native, tr("Native (DLAA)")),

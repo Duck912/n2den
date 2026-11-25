@@ -24,19 +24,34 @@ enum class Stage : u8 {
     DlssUltraPerformance,
 };
 
+/// Which upscale wrote: a replaced upscaling network (NDSR, the sink's stand-in) or the game's own
+/// nvnCommandBufferEvaluateDlss. A frame may run both (XC2: the game's DLSS to 1080p, then NDSR
+/// to 4K), so each has its own slot.
+enum class Slot : u8 {
+    Network,
+    Game,
+};
+
 struct Value {
     Stage stage{Stage::None};
     /// DLSS / DLAA was given jitter and motion vectors (always false for the other stages).
     bool temporal{};
+    Stage game_stage{Stage::None};
+    bool game_temporal{};
 };
 
 namespace Detail {
 inline std::atomic<u32> packed{0};
 } // namespace Detail
 
-inline void Note(Stage stage, bool temporal = false) {
-    Detail::packed.store(static_cast<u32>(stage) | (temporal ? 0x100u : 0u),
-                         std::memory_order_relaxed);
+inline void Note(Stage stage, bool temporal = false, Slot slot = Slot::Network) {
+    const u32 shift = slot == Slot::Game ? 16u : 0u;
+    const u32 mask = 0x1ffu << shift;
+    const u32 value = (static_cast<u32>(stage) | (temporal ? 0x100u : 0u)) << shift;
+    u32 old = Detail::packed.load(std::memory_order_relaxed);
+    while (!Detail::packed.compare_exchange_weak(old, (old & ~mask) | value,
+                                                 std::memory_order_relaxed)) {
+    }
 }
 
 inline void Reset() {
@@ -45,7 +60,8 @@ inline void Reset() {
 
 [[nodiscard]] inline Value Read() {
     const u32 value = Detail::packed.load(std::memory_order_relaxed);
-    return Value{static_cast<Stage>(value & 0xffu), (value & 0x100u) != 0};
+    return Value{static_cast<Stage>(value & 0xffu), (value & 0x100u) != 0,
+                 static_cast<Stage>((value >> 16) & 0xffu), (value & 0x1000000u) != 0};
 }
 
 } // namespace VideoCommon::Nvn::UpscalerStatus

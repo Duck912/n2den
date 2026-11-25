@@ -7,6 +7,7 @@
 
 #include <algorithm>
 
+#include "common/settings.h"
 #include "common/logging.h"
 #include "video_core/renderer_vulkan/nvn/nvn_impl.h"
 #include "video_core/surface.h"
@@ -54,6 +55,11 @@ Rescale::Shape Context::Impl::RescaleShapeOf(const Storage& s, bool alias) const
     shape.width = s.extent.width;
     shape.height = s.extent.height;
     shape.max_dimension = (std::min)(device.GetMaxFramebufferWidth(), device.GetMaxFramebufferHeight());
+    // PC-style upscaling scales only what the one upscale to the display needs.
+    if (Settings::values.nvn_upscaler.GetValue() == Settings::NvnUpscaler::Dlss) {
+        shape.screen_only = true;
+        shape.height_limit = Settings::DockedDisplayHeight();
+    }
     return shape;
 }
 

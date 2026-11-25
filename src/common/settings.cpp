@@ -686,11 +686,47 @@ bool IsOpenGL() {
 
 static bool current_program_is_switch2 = false;
 
-bool DockedDisplayIs4K() {
-    if (const char* const value = std::getenv("EDEN_NX2_DOCKED_DEFAULT_4K"); value && value[0] != '\0') {
-        return value[0] == '1';
+static std::atomic<u64> host_display_size{0};
+
+void SetHostDisplaySize(u32 width, u32 height) {
+    host_display_size.store((u64{width} << 32) | height, std::memory_order_relaxed);
+}
+
+u32 DockedDisplayHeight() {
+    if (const char* const value = std::getenv("EDEN_NX2_DOCKED_DEFAULT_4K");
+        value && value[0] != 0) {
+        return value[0] == '1' ? 2160u : 1080u;
     }
-    return CurrentProgramIsSwitch2();
+    if (!CurrentProgramIsSwitch2()) {
+        return 1080;
+    }
+    switch (values.display_resolution.GetValue()) {
+    case DisplayResolution::Fhd1080:
+        return 1080;
+    case DisplayResolution::Qhd1440:
+        return 1440;
+    case DisplayResolution::Uhd2160:
+        return 2160;
+    case DisplayResolution::Auto:
+        break;
+    }
+    const u64 size = host_display_size.load(std::memory_order_relaxed);
+    const u32 width = static_cast<u32>(size >> 32);
+    const u32 height = static_cast<u32>(size);
+    if (width == 0 || height == 0) {
+        return 2160;
+    }
+    if (width >= 3840 && height >= 2160) {
+        return 2160;
+    }
+    if (width >= 2560 && height >= 1440) {
+        return 1440;
+    }
+    return 1080;
+}
+
+bool DockedDisplayIs4K() {
+    return DockedDisplayHeight() == 2160;
 }
 
 void SetCurrentProgramIsSwitch2(bool is_switch2) {
@@ -754,7 +790,12 @@ bool NvnSinkDlss() {
     if (environment.has_value()) {
         return *environment;
     }
-    return values.nvn_upscaler.GetValue() == NvnUpscaler::Dlss;
+    // Console native (Auto) keeps the game's own DLSS calls on real DLSS, as on the console.
+    return values.nvn_upscaler.GetValue() == NvnUpscaler::Dlss || NvnConsoleNative();
+}
+
+bool NvnConsoleNative() {
+    return values.nvn_upscaler.GetValue() == NvnUpscaler::Auto;
 }
 
 bool NvnReplaceSameSizeNetwork() {
