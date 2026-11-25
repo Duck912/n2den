@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+
 #include "common/settings.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
@@ -292,6 +294,60 @@ void PatchImageRead(IR::Block& block, IR::Inst& inst) {
     ScaleIntegerComposite(ir, inst, is_scaled, 1);
 }
 
+// textureGather returns the four texels around a coordinate. On a scaled texture those are texels
+// of the finer image (half a guest texel apart at 2X), while the texel arithmetic of the shader
+// around the gather (texel coordinates, their floor and fraction, the size it was given) is in
+// guest texels: the two no longer describe the same lattice. Xenoblade Chronicles 2 upsamples its
+// half-resolution ambient occlusion in the lighting passes that way (it gathers the half-resolution
+// depth, compares it with the full-resolution depth and moves the occlusion sample inside the
+// guest texel); with scaled images every guest texel showed as a block, a regular grid over the
+// picture once the scaled scene went to the upscaler unreduced. A gather from a scaled texture
+// returns what the guest-sized texture would hold: one sample at the centre of each of the four
+// guest texels (the mean of the scaled texels under it with a linear sampler at integer factors).
+// Gathers with offsets and of integer or shadow textures are left as they are.
+void PatchImageGather(IR::Block& block, IR::Inst& inst) {
+    const auto info{inst.Flags<IR::TextureInstInfo>()};
+    if (info.type != TextureType::Color2D || info.is_pool != 0 || info.is_integer != 0 ||
+        info.is_depth != 0 || !inst.Arg(2).IsEmpty() || !inst.Arg(3).IsEmpty()) {
+        return;
+    }
+    const auto it{IR::Block::InstructionList::s_iterator_to(inst)};
+    IR::IREmitter ir{block, it};
+    const IR::U1 is_scaled{ir.IsTextureScaled(ir.Imm32(info.descriptor_index))};
+    const IR::Value handle{inst.Arg(0)};
+    const IR::Value coords{inst.Arg(1)};
+    const IR::Value gathered{&*block.PrependNewInst(it, inst)};
+    const IR::Value size{&*block.PrependNewInst(
+        it, IR::Opcode::ImageQueryDimensions, {handle, ir.Imm32(0U), ir.Imm1(true)}, info.raw)};
+    const auto axis = [&](size_t index, IR::F32& low, IR::F32& high) {
+        const IR::F32 extent{ir.ConvertUToF(
+            32, 32, DownScale(ir, is_scaled, IR::U32{ir.CompositeExtract(size, index)}))};
+        const IR::F32 texel{ir.FPAdd(ir.FPMul(IR::F32{ir.CompositeExtract(coords, index)}, extent),
+                                     ir.Imm32(-0.5f))};
+        const IR::F32 base{ir.FPFloor(texel)};
+        const IR::F32 recip{ir.FPRecip(extent)};
+        low = IR::F32{ir.FPMul(ir.FPAdd(base, ir.Imm32(0.5f)), recip)};
+        high = IR::F32{ir.FPMul(ir.FPAdd(base, ir.Imm32(1.5f)), recip)};
+    };
+    IR::F32 x0, x1, y0, y1;
+    axis(0, x0, x1);
+    axis(1, y0, y1);
+    const auto texel_at = [&](const IR::F32& x, const IR::F32& y) {
+        const IR::Value sample{&*block.PrependNewInst(
+            it, IR::Opcode::ImageSampleExplicitLod,
+            {handle, ir.CompositeConstruct(x, y), ir.Imm32(0.0f), IR::Value{}}, info.raw)};
+        return IR::F32{ir.CompositeExtract(sample, info.gather_component)};
+    };
+    // The order of a gather: (i0, j1), (i1, j1), (i1, j0), (i0, j0).
+    const std::array<IR::F32, 4> texels{texel_at(x0, y1), texel_at(x1, y1), texel_at(x1, y0),
+                                        texel_at(x0, y0)};
+    std::array<IR::Value, 4> result;
+    for (size_t i = 0; i < result.size(); ++i) {
+        result[i] = ir.Select(is_scaled, texels[i], IR::F32{ir.CompositeExtract(gathered, i)});
+    }
+    inst.ReplaceUsesWith(ir.CompositeConstruct(result[0], result[1], result[2], result[3]));
+}
+
 void Visit(const IR::Program& program, IR::Block& block, IR::Inst& inst) {
     const bool is_fragment_shader{program.stage == Stage::Fragment};
     switch (inst.GetOpcode()) {
@@ -331,6 +387,9 @@ void Visit(const IR::Program& program, IR::Block& block, IR::Inst& inst) {
         } else {
             PatchImageFetch(block, inst);
         }
+        break;
+    case IR::Opcode::ImageGather:
+        PatchImageGather(block, inst);
         break;
     case IR::Opcode::ImageRead:
         if (is_fragment_shader) {

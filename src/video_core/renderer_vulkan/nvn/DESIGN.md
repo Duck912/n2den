@@ -876,7 +876,11 @@ factor is a constant of the run; at 1X nothing below exists (no twin, the push c
   (`DrawPlan::rescale_words`) and the down factor 1/scale in a scaled pass: `gl_FragCoord`, `texelFetch` /
   `imageLoad` coordinates and `textureSize` come out in guest pixels, point sizes scale up. The in-pass
   push constant elision (`PassBoundState::TakePushConstants`) compares the words and the down factor too.
-  Normalized-coordinate sampling needs nothing. Not scaled (as in the emulated GPU): line widths.
+  Normalized-coordinate sampling needs nothing. A `textureGather` from a twin (2D, no offsets, not
+  integer or shadow) returns the four guest-lattice texels instead (one sample at the centre of each guest
+  texel, `PatchImageGather`): the shader's texel arithmetic around a gather is in guest texels (Xenoblade
+  Chronicles 2's depth-aware occlusion upsample in the lighting passes drew a block per guest texel, a
+  regular grid once the game's DLSS read the scaled scene). Not scaled (as in the emulated GPU): line widths.
 - **The game's DLSS** (`Op::EvaluateDlss`). When the colour input, the depth and (for low-resolution motion
   vectors) the motion vectors are current twins and the scaled input rectangle is not larger than the output
   rectangle, DLSS (or the FSR1 / bilinear stand-in) is evaluated on the twins: rectangles, jitter and motion
