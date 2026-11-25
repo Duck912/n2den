@@ -186,18 +186,23 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("The display a docked Switch 2 game is told it is connected to. The game sizes its "
               "picture for it, as the console does with that TV or monitor.\n"
               "Auto: follows your monitor (the largest of 1080p, 1440p and 4K that fits).\n"
-              "Switch 1 games always see 1080p.\n"
+              "Only games that ask for the display size use it (Fire Emblem: Fortune's Weave, "
+              "Fast Fusion); for others, such as Xenoblade Chronicles 2 and Ocarina of Time, it "
+              "does nothing. Switch 1 games always see 1080p.\n"
               "Takes effect the next time a game starts."));
     INSERT(Settings, nvn_dlss_quality, tr("DLSS quality:"),
            tr("The size the game draws its 3D scene at before NVIDIA DLSS enlarges it, as a share "
               "of the picture's size (only used when the GPU backend is NVN-HLE and the upscaler "
               "is NVIDIA DLSS / DLAA).\n"
-              "Native (DLAA): the game's own choice; at full size DLSS only smooths edges.\n"
+              "Native (DLAA): full size, DLSS only smooths edges (Fast Fusion, which otherwise "
+              "asks for Performance in races); in Ocarina of Time the game's own size.\n"
+              "With the upscaler at Console native the game keeps its own choice, as on a Switch "
+              "2.\n"
               "Quality 66.7%, Balanced 58%, Performance 50%, Ultra Performance 33%: smaller is "
               "softer. It may not make the game faster.\n"
-              "Supported games only (The Legend of Zelda: Ocarina of Time, Switch 2 version, one "
-              "game version); for any other game this setting does nothing. It replaces the scene "
-              "size of mods such as Max Resolution or a fixed-resolution mod.\n"
+              "Supported games only: The Legend of Zelda: Ocarina of Time (Switch 2 version, one "
+              "game version; it replaces the scene size of mods such as Max Resolution) and Fast "
+              "Fusion. For any other game it does nothing.\n"
               "Takes effect the next time a game starts."));
     INSERT(Settings, nvn_dlss_temporal, tr("DLSS jitter and motion vectors (experimental)"),
            tr("Gives NVIDIA DLSS / DLAA what it needs to smooth edges over several frames: a tiny "

@@ -127,6 +127,10 @@ void ConfigurePerGameAddons::SetCompactLayout() {
 }
 
 void ConfigurePerGameAddons::ApplyConfiguration() {
+    for (const auto& [item, setting] : builtin_items) {
+        setting->SetValue(item->checkState() == Qt::Checked);
+    }
+
     std::vector<std::string> disabled_addons;
 
     for (const auto& item : list_items) {
@@ -337,6 +341,7 @@ void ConfigurePerGameAddons::LoadConfiguration() {
 
     update_items.clear();
     list_items.clear();
+    builtin_items.clear();
     item_model->removeRows(0, item_model->rowCount());
 
     std::vector<FileSys::Patch> patches = pm.GetPatches(update_raw);
@@ -390,6 +395,41 @@ void ConfigurePerGameAddons::LoadConfiguration() {
         list_items.push_back(QList<QStandardItem*>{
             first_item, new QStandardItem{QString::fromStdString(patch.version)}});
         item_model->appendRow(list_items.back());
+    }
+
+    // n2den's built-in patches for this game (they used to be on the Graphics settings page).
+    constexpr u64 OcarinaOfTime = 0x0400486024DEC000ULL;
+    constexpr u64 DonkeyKongBananza = 0x040074A01BF12000ULL;
+    const auto add_builtin = [&](Settings::SwitchableSetting<bool>& setting, const QString& name,
+                                 const QString& tooltip) {
+        auto* const item = new QStandardItem(name);
+        item->setCheckable(true);
+        item->setCheckState(setting.GetValue() ? Qt::Checked : Qt::Unchecked);
+        item->setToolTip(tooltip);
+        auto* const version = new QStandardItem(tr("built in"));
+        item_model->appendRow(QList<QStandardItem*>{item, version});
+        builtin_items.push_back({item, &setting});
+    };
+    switch (title_id & ~u64{0xfff}) {
+    case OcarinaOfTime:
+        add_builtin(Settings::values.oot_dynamic_fps, tr("Dynamic FPS"),
+                    tr("Below 60 fps the game keeps its normal speed instead of running in slow "
+                       "motion: it steps by the real frame time (down to 20 fps). Only for the "
+                       "Ocarina of Time (Switch 2) release it was made for. Takes effect at game "
+                       "start."));
+        add_builtin(Settings::values.oot_max_resolution, tr("Max resolution"),
+                    tr("Turns the game's dynamic resolution off, so the 3D scene renders at the "
+                       "full output size instead of as low as 854x480. Takes effect at game "
+                       "start."));
+        break;
+    case DonkeyKongBananza:
+        add_builtin(Settings::values.dk_single_interval, tr("Single-interval vsync"),
+                    tr("Presents every frame at the next 60 Hz vsync instead of the game's "
+                       "double-buffered 30/20 fps steps. The game's speed may follow the frame "
+                       "rate."));
+        break;
+    default:
+        break;
     }
 
     tree_view->resizeColumnToContents(1);

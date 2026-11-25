@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 n2den contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <optional>
+#include <string>
+#include <vector>
+
 #include <QApplication>
+#include <QComboBox>
 #include <QBoxLayout>
 #include <QDir>
 #include <QEvent>
@@ -16,10 +21,12 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/file_sys/control_metadata.h"
+#include "core/file_sys/nvn_game_upscaling.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/loader/loader.h"
 #include "hid_core/hid_core.h"
 #include "qt_common/config/qt_config.h"
+#include "qt_common/config/shared_translation.h"
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/qt_common.h"
 #include "yuzu/configuration/configure_input_per_game.h"
@@ -97,6 +104,7 @@ void GameDetailsPanel::ClearTabs() {
     }
     addons = nullptr;
     input = nullptr;
+    upscaling_rows.clear();
 }
 
 void GameDetailsPanel::SetGame(const QModelIndex& index) {
@@ -154,6 +162,7 @@ void GameDetailsPanel::LoadGame() {
     ClearTabs();
     addons_changed = false;
     input_changed = false;
+    upscaling_changed = false;
     title->setText(game_path.isEmpty() ? tr("Game details") : game_name);
     tabs->setVisible(!game_path.isEmpty());
     if (game_path.isEmpty()) {
@@ -211,6 +220,8 @@ void GameDetailsPanel::LoadGame() {
     addons->LoadFromFile(file);
     tabs->addTab(addons, tr("Add-Ons"));
 
+    tabs->addTab(ScrollPage(BuildUpscalingPage()), tr("Upscaling"));
+
     // No per-game settings are activated while the library is being browsed.
     input = new ConfigureInputPerGame(system, nullptr);
     input->SetCompactLayout();
@@ -233,11 +244,116 @@ void GameDetailsPanel::LoadGame() {
     });
 }
 
+// The NVN-HLE upscaling settings that work for this game (file_sys/nvn_game_upscaling.h): each
+// follows Settings or keeps the game's own value, stored in the game's config like the dialog's
+// Upscaling page. Read and written through a per-game QtConfig while no game runs (the panel is
+// disabled during emulation), then Settings goes back to the global values.
+QWidget* GameDetailsPanel::BuildUpscalingPage() {
+    namespace Game = FileSys::NvnGameUpscaling;
+    upscaling_rows.clear();
+    std::vector<Settings::BasicSetting*> settings{&Settings::values.nvn_upscaler};
+    if (Game::DlssQualityApplies(title_id)) {
+        settings.push_back(&Settings::values.nvn_dlss_quality);
+    }
+    if (Game::DisplayResolutionApplies(title_id)) {
+        settings.push_back(&Settings::values.display_resolution);
+    }
+    std::vector<std::optional<std::string>> own(settings.size());
+    if (!system.IsPoweredOn()) {
+        {
+            QtConfig game_config(config_name.toStdString(), Config::ConfigType::PerGameConfig);
+            for (std::size_t i = 0; i < settings.size(); ++i) {
+                if (!settings[i]->UsingGlobal()) {
+                    own[i] = settings[i]->ToString();
+                }
+            }
+        }
+        Settings::RestoreGlobalState(false);
+    }
+
+    auto* page = new QWidget;
+    auto* form = new QFormLayout(page);
+    form->setRowWrapPolicy(QFormLayout::WrapAllRows);
+    const auto note = [form](const QString& text) {
+        auto* label = new QLabel(text);
+        label->setWordWrap(true);
+        form->addRow(label);
+    };
+    note(tr("Used when the GPU backend is NVN-HLE (Switch 2 games). Takes effect the next time "
+            "the game starts."));
+    const auto translations = ConfigurationShared::InitializeTranslations(this);
+    const auto names = ConfigurationShared::ComboboxEnumeration(this);
+    for (std::size_t i = 0; i < settings.size(); ++i) {
+        Settings::BasicSetting* const setting = settings[i];
+        const auto options = names->find(setting->EnumIndex());
+        if (options == names->end()) {
+            continue;
+        }
+        auto* box = new QComboBox;
+        const std::string global = setting->ToStringGlobal();
+        QString global_name;
+        for (const auto& [value, name] : options->second) {
+            if (std::to_string(value) == global) {
+                global_name = name;
+            }
+        }
+        box->addItem(tr("Default (%1)").arg(global_name));
+        for (const auto& [value, name] : options->second) {
+            box->addItem(name, value);
+            if (own[i] && std::to_string(value) == *own[i]) {
+                box->setCurrentIndex(box->count() - 1);
+            }
+        }
+        QString label = QString::fromStdString(setting->GetLabel());
+        QString tooltip;
+        if (const auto text = translations->find(setting->Id()); text != translations->end()) {
+            label = text->second.first;
+            tooltip = text->second.second;
+        }
+        box->setToolTip(tooltip);
+        form->addRow(label, box);
+        upscaling_rows.push_back({setting, box});
+        connect(box, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
+            upscaling_changed = true;
+            SaveChanges();
+        });
+    }
+    if (!Game::DlssQualityApplies(title_id)) {
+        note(tr("DLSS quality is not shown: it does nothing for this game."));
+    } else {
+        note(tr("DLSS quality is used with the upscaler at NVIDIA DLSS / DLAA."));
+    }
+    if (!Game::DisplayResolutionApplies(title_id)) {
+        note(tr("Display resolution is not shown: this game does not ask for the display size."));
+    }
+    return page;
+}
+
+void GameDetailsPanel::SaveUpscaling() {
+    {
+        QtConfig game_config(config_name.toStdString(), Config::ConfigType::PerGameConfig);
+        for (const auto& [setting, box] : upscaling_rows) {
+            if (box->currentIndex() <= 0) {
+                setting->SetGlobal(true);
+            } else {
+                setting->SetGlobal(false);
+                setting->LoadString(std::to_string(box->currentData().toUInt()));
+            }
+        }
+        game_config.SaveAllValues();
+    }
+    Settings::RestoreGlobalState(false);
+}
+
 void GameDetailsPanel::SaveChanges() {
-    if ((!addons_changed && !input_changed) || system.IsPoweredOn() ||
+    if ((!addons_changed && !input_changed && !upscaling_changed) || system.IsPoweredOn() ||
         QApplication::activeModalWidget()) {
         return;
     }
+    if (upscaling_changed && !upscaling_rows.empty()) {
+        SaveUpscaling();
+    }
+    upscaling_changed = false;
     if (addons_changed && addons) {
         addons->ApplyConfiguration();
     }

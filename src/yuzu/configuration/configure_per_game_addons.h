@@ -12,6 +12,7 @@
 #include <QList>
 #include <QWidget>
 
+#include "common/settings.h"
 #include "core/file_sys/vfs/vfs_types.h"
 
 namespace Core {
@@ -76,6 +77,13 @@ private:
     QStandardItemModel* item_model;
 
     std::vector<QList<QStandardItem*>> list_items;
+    // Built-in add-ons of this game (n2den's own patches, on/off in Settings::values): shown in
+    // the list like the mod folders, saved to their settings instead of the disabled list.
+    struct BuiltinAddon {
+        QStandardItem* item;
+        Settings::SwitchableSetting<bool>* setting;
+    };
+    std::vector<BuiltinAddon> builtin_items;
     std::vector<QStandardItem*> update_items;
 
     Core::System& system;

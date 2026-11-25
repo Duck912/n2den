@@ -111,6 +111,7 @@ add_library(core STATIC
     file_sys/nup_container.cpp
     file_sys/nup_container.h
     file_sys/nvn_dlss_scale.h
+    file_sys/nvn_game_upscaling.h
     file_sys/nx_archive.cpp
     file_sys/nx_archive.h
     file_sys/partition_filesystem.cpp

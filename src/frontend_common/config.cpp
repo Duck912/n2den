@@ -616,12 +616,19 @@ void Config::ReadValues() {
         }
     } else if (type != ConfigType::InputProfile) {
         // One game, one set of settings: a game's own config (an older version's Game Settings)
-        // can't override Settings any more, except its controls (input profiles).
+        // can't override Settings any more, except its controls (input profiles) and the NVN-HLE
+        // upscaling choices, which differ by game (the per-game dialog's Upscaling page).
+        const std::array per_game_ids{Settings::values.nvn_upscaler.Id(),
+                                      Settings::values.nvn_dlss_quality.Id(),
+                                      Settings::values.display_resolution.Id()};
         for (const auto& [category, settings] : Settings::values.linkage.by_category) {
             if (category == Settings::Category::Controls) {
                 continue;
             }
             for (Settings::BasicSetting* const setting : settings) {
+                if (std::ranges::find(per_game_ids, setting->Id()) != per_game_ids.end()) {
+                    continue;
+                }
                 if (setting->Switchable()) {
                     setting->SetGlobal(true);
                 }

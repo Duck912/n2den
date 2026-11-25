@@ -135,4 +135,6 @@ private:
     NvidiaDlssPanel* nvn_dlss_panel{};
     ConfigurationShared::Widget* nvn_dlss_quality_widget{};
     ConfigurationShared::Widget* nvn_dlss_temporal_widget{};
+    QWidget* nvn_dlss_quality_row{};
+    QWidget* display_resolution_row{};
 };

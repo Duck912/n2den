@@ -244,6 +244,12 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             continue;
         }
 #endif
+        // One game's built-in patch: on that game's Add-Ons list instead (ConfigurePerGameAddons).
+        if (setting->Id() == Settings::values.oot_dynamic_fps.Id() ||
+            setting->Id() == Settings::values.oot_max_resolution.Id() ||
+            setting->Id() == Settings::values.dk_single_interval.Id()) {
+            continue;
+        }
 #ifndef HAS_D3D12_NVN
         // NVN-HLE's Direct3D 12 renderer is not in this build: no row for the renderer choice.
         if (setting->Id() == Settings::values.nvn_renderer.Id()) {
@@ -388,6 +394,18 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             group_layout->setContentsMargins(0, 0, 0, 0);
             group_layout->setSpacing(2);
             group_layout->addWidget(widget);
+            if (Settings::IsConfiguringGlobal()) {
+                // The upscaler is chosen per game (the game's Upscaling page); Settings only keeps
+                // NVIDIA's files (status, download) for the games set to DLSS. The row stays built,
+                // hidden, so the global value is still saved as it is.
+                widget->hide();
+                auto* heading = new QLabel(tr("NVIDIA DLSS files (for games whose Upscaler is "
+                                              "NVIDIA DLSS / DLAA, set on each game's Upscaling "
+                                              "page):"),
+                                           group);
+                heading->setWordWrap(true);
+                group_layout->addWidget(heading);
+            }
 #ifdef EGLANTINE_STREAMLINE
             nvn_dlss_panel = new NvidiaDlssPanel(group);
             group_layout->addWidget(nvn_dlss_panel);
@@ -395,9 +413,22 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             nvn_upscaler_row = group;
             nvn_upscaler_combobox = widget->combobox;
             hold_graphics.emplace(setting->Id(), group);
-        } else if (setting->Id() == Settings::values.nvn_dlss_quality.Id()) {
-            nvn_dlss_quality_widget = widget;
-            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.nvn_dlss_quality.Id() ||
+                   setting->Id() == Settings::values.display_resolution.Id()) {
+            // Game-specific rows, set on each game's Upscaling page: hidden here
+            // (UpdateNvnHleWidgets).
+            QWidget* group = new QWidget(this);
+            QVBoxLayout* group_layout = new QVBoxLayout(group);
+            group_layout->setContentsMargins(0, 0, 0, 0);
+            group_layout->setSpacing(2);
+            group_layout->addWidget(widget);
+            if (setting->Id() == Settings::values.nvn_dlss_quality.Id()) {
+                nvn_dlss_quality_widget = widget;
+                nvn_dlss_quality_row = group;
+            } else {
+                display_resolution_row = group;
+            }
+            hold_graphics.emplace(setting->Id(), group);
         } else if (setting->Id() == Settings::values.nvn_dlss_temporal.Id()) {
             nvn_dlss_temporal_widget = widget;
             hold_graphics.emplace(setting->Id(), widget);
@@ -644,23 +675,27 @@ void ConfigureGraphics::UpdateUpscalerQualityWarning() {
     upscaler_quality_warning->setVisible(!warning.isEmpty());
 }
 
-// One set of GPU rows shows at a time. With the NVN-HLE GPU backend: its renderer, upscaler, DLSS
-// quality and DLSS jitter rows (the last two enabled only with the upscaler at NVIDIA DLSS / DLAA).
-// With the emulated GPU: its upscaler and upscaler quality rows. The other set is hidden, not greyed
-// out. The backend is read from the combobox, the same choice the game will boot with (the
-// per-game dialog's combobox already shows the global value while "use global" is on).
+// One set of GPU rows shows at a time. With the NVN-HLE GPU backend: its renderer, NVIDIA's DLSS
+// files and the DLSS jitter row; with the emulated GPU: its upscaler and upscaler quality rows. The
+// other set is hidden, not greyed out. The backend is read from the combobox, the same choice the
+// game will boot with.
+// The NVN-HLE Upscaler, DLSS quality and Display resolution are chosen per game (the game's
+// Upscaling page, file_sys/nvn_game_upscaling.h), so Settings does not show them; the rows stay
+// built and hidden so the values are saved unchanged. (The per-game dialog builds this page too,
+// hidden.)
 void ConfigureGraphics::UpdateNvnHleWidgets() {
     const bool hle = graphics_path_combobox &&
                      graphics_path_combobox->currentData().toUInt() ==
                          static_cast<u32>(Settings::GraphicsPath::Hle);
-    const bool dlss = nvn_upscaler_combobox &&
-                      nvn_upscaler_combobox->currentData().toUInt() ==
-                          static_cast<u32>(Settings::NvnUpscaler::Dlss);
     for (QWidget* row : {nvn_renderer_row, nvn_upscaler_row,
-                         static_cast<QWidget*>(nvn_dlss_quality_widget),
                          static_cast<QWidget*>(nvn_dlss_temporal_widget)}) {
         if (row) {
             row->setVisible(hle);
+        }
+    }
+    for (QWidget* row : {nvn_dlss_quality_row, display_resolution_row}) {
+        if (row) {
+            row->setVisible(false);
         }
     }
     for (QWidget* row : {upscaler_row, upscaler_quality_row}) {
@@ -668,11 +703,9 @@ void ConfigureGraphics::UpdateNvnHleWidgets() {
             row->setVisible(!hle);
         }
     }
-    SetRowEnabled(nvn_dlss_quality_widget, dlss);
-    SetRowEnabled(nvn_dlss_temporal_widget, dlss);
 #ifdef EGLANTINE_STREAMLINE
     if (nvn_dlss_panel) {
-        nvn_dlss_panel->setVisible(dlss);
+        nvn_dlss_panel->setVisible(hle);
     }
 #endif
 }

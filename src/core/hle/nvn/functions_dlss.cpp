@@ -15,6 +15,9 @@
 
 #include "common/boot_counter.h"
 #include "common/logging.h"
+#include "common/settings.h"
+#include "core/core.h"
+#include "core/file_sys/nvn_game_upscaling.h"
 #include "core/hle/nvn/hle_call.h"
 #include "core/hle/nvn/hle_runtime.h"
 #include "video_core/nvn/record.h"
@@ -274,6 +277,58 @@ std::optional<RenderSizes> RenderSizesFor(u32 method, s32 width, s32 height) {
     sizes.max[1] = height;
     sizes.min[0] = floor_size(width, sizes.optimal[0]);
     sizes.min[1] = floor_size(height, sizes.optimal[1]);
+    return sizes;
+}
+
+/// The render sizes a game is given (GetOptimalSettings, Initialize, Resize): RenderSizesFor, except
+/// for the games that size their 3D scene from them (file_sys/nvn_game_upscaling.h, RenderSizes)
+/// while the upscaler is NVIDIA DLSS / DLAA (not Console native): then the optimal and the maximum
+/// size are the DLSS quality setting's share of the output (Settings::NvnDlssSceneQuality: Native
+/// is DLAA, the full size; Quality 2/3, Balanced 0.58, Performance 1/2, Ultra Performance 1/3), so
+/// a game that draws at either draws at that share; the minimum stays at or below it.
+std::optional<RenderSizes> GameRenderSizes(const Call& c, u32 method, s32 width, s32 height) {
+    std::optional<RenderSizes> sizes = RenderSizesFor(method, width, height);
+    if (!sizes || c.system == nullptr ||
+        FileSys::NvnGameUpscaling::DlssQualityPathOf(c.system->GetApplicationProcessProgramID()) !=
+            FileSys::NvnGameUpscaling::DlssQualityPath::RenderSizes ||
+        Settings::NvnConsoleNative()) {
+        return sizes;
+    }
+    u32 quality_method;
+    switch (Settings::NvnDlssSceneQuality()) {
+    case Settings::NvnDlssQuality::Quality:
+        quality_method = MethodMaxQuality;
+        break;
+    case Settings::NvnDlssQuality::Balanced:
+        quality_method = MethodBalanced;
+        break;
+    case Settings::NvnDlssQuality::Performance:
+        quality_method = MethodMaxPerf;
+        break;
+    case Settings::NvnDlssQuality::UltraPerformance:
+        quality_method = MethodUltraPerformance;
+        break;
+    case Settings::NvnDlssQuality::Native:
+        // "Native (DLAA)" with the NVIDIA DLSS / DLAA upscaler: the scene at the full output size.
+        // (Fast Fusion asks for Performance in races.) Console native
+        // keeps the game's own choice, as on the console.
+        if (!Settings::ResolveNvnHle().hle || !Settings::NvnSinkDlss()) {
+            return sizes;
+        }
+        quality_method = MethodDlaa;
+        break;
+    default:
+        return sizes;
+    }
+    const std::optional<RenderSizes> chosen = RenderSizesFor(quality_method, width, height);
+    if (!chosen) {
+        return sizes;
+    }
+    for (int axis = 0; axis < 2; ++axis) {
+        sizes->optimal[axis] = chosen->optimal[axis];
+        sizes->max[axis] = chosen->optimal[axis];
+        sizes->min[axis] = std::min(sizes->min[axis], chosen->optimal[axis]);
+    }
     return sizes;
 }
 
@@ -538,7 +593,7 @@ void nvnDlssNetworkBuilderGetOptimalSettings(Call& c) {
     const u64 max_w = c.args.NextPointer();
     const u64 max_h = c.args.NextPointer();
 
-    const std::optional<RenderSizes> sizes = RenderSizesFor(b.method, b.width, b.height);
+    const std::optional<RenderSizes> sizes = GameRenderSizes(c, b.method, b.width, b.height);
     if (!sizes) {
         c.ret.SetBool(false);
         return;
@@ -595,7 +650,7 @@ void nvnDlssNetworkInitialize(Call& c) {
     const DlssNetworkLayout& l = *layout.network;
     c.Zero(network, l.size);
     const Builder b = LoadBuilder(c, builder, layout);
-    const std::optional<RenderSizes> sizes = RenderSizesFor(b.method, b.width, b.height);
+    const std::optional<RenderSizes> sizes = GameRenderSizes(c, b.method, b.width, b.height);
     if (b.device == 0 || b.storage == 0 || !sizes || b.storage_size < StorageSizeFor(c, b)) {
         DLSS_WARN("[nvn] nvnDlssNetworkInitialize: network {:#x} refused: device {:#x} storage "
                   "{:#x}+{:#x} (needs {:#x}) method {} output {}x{} sizes {}",
@@ -669,7 +724,7 @@ void nvnDlssNetworkResize(Call& c) {
         c.ret.SetBool(false);
         return;
     }
-    const std::optional<RenderSizes> sizes = RenderSizesFor(n.Get<u32>(l.method), width, height);
+    const std::optional<RenderSizes> sizes = GameRenderSizes(c, n.Get<u32>(l.method), width, height);
     if (n.Get<u64>(DlssNetworkHandle) == 0 || !sizes) {
         c.ret.SetBool(false);
         return;

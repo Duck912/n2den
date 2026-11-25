@@ -49,6 +49,7 @@
 #include "util/util.h"
 #include "yuzu/game/game_details.h"
 #include "yuzu/game/game_list.h"
+#include "qt_common/game_list/game_list_p.h"
 
 #include "applets/qt_amiibo_settings.h"
 #include "applets/qt_controller.h"
@@ -1552,6 +1553,14 @@ void MainWindow::ConnectWidgetEvents() {
         multiplayer_state->UpdateGameList(game_list->GetModel());
     });
     connect(game_list, &GameList::GameSelectionChanged, game_details, &GameDetailsPanel::SetGame);
+    connect(game_list, &GameList::GameSelectionChanged, this, [this](const QModelIndex& index) {
+        const QModelIndex game = index.isValid() ? index.siblingAtColumn(0) : QModelIndex{};
+        const bool is_game = game.data(GameListItem::TypeRole).value<GameListItemType>() ==
+                             GameListItemType::Game;
+        selected_game_path =
+            is_game ? game.data(GameListItemPath::FullPathRole).toString() : QString{};
+        UpdateMenuState();
+    });
     connect(game_details, &GameDetailsPanel::ConfigurationSaved, this, [this] {
         config->SaveAllValues();
         if (UISettings::values.is_game_list_reload_pending.exchange(false)) {
@@ -1711,7 +1720,6 @@ void MainWindow::UpdateMenuState() {
     const std::array running_actions{
         ui->action_Stop,
         ui->action_Restart,
-        ui->action_Configure_Current_Game,
         ui->action_Load_Amiibo,
         ui->action_Pause,
     };
@@ -1719,6 +1727,12 @@ void MainWindow::UpdateMenuState() {
     for (QAction* action : running_actions) {
         action->setEnabled(emulation_running);
     }
+    // The running game's configuration, or the selected game's while none runs.
+    ui->action_Configure_Current_Game->setEnabled(emulation_running ||
+                                                  !selected_game_path.isEmpty());
+    ui->action_Configure_Current_Game->setText(emulation_running
+                                                   ? tr("Configure C&urrent Game...")
+                                                   : tr("Configure Selected Game..."));
 
     ui->action_Capture_Screenshot->setEnabled(emulation_running && !is_paused);
 
@@ -3651,6 +3665,13 @@ void MainWindow::OnToggleGraphicsAPI() {
 }
 
 void MainWindow::OnConfigurePerGame() {
+    if (!emulation_running) {
+        // No game runs: the game selected in the library.
+        if (!selected_game_path.isEmpty()) {
+            OnGameListOpenPerGameProperties(selected_game_path.toStdString());
+        }
+        return;
+    }
     const u64 title_id = QtCommon::system->GetApplicationProcessProgramID();
     OpenPerGameConfiguration(title_id, current_game_path.toStdString());
 }
@@ -3658,12 +3679,17 @@ void MainWindow::OnConfigurePerGame() {
 void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_name) {
     game_details->SaveChanges();
     const auto v_file = Core::GetGameFileFromPath(QtCommon::vfs, file_name);
+    LOG_INFO(Frontend, "Game configuration: {:016X} | {} | file {}, game running {}", title_id,
+             file_name, v_file != nullptr ? "found" : "not found",
+             QtCommon::system->IsPoweredOn());
 
     Settings::SetConfiguringGlobal(false);
     ConfigurePerGame dialog(this, title_id, file_name, vk_device_records, *QtCommon::system);
     dialog.LoadFromFile(v_file);
 
     const auto result = dialog.exec();
+    LOG_INFO(Frontend, "Game configuration closed ({})",
+             result == QDialog::Accepted ? "OK" : "cancelled");
 
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied) {
         Settings::RestoreGlobalState(QtCommon::system->IsPoweredOn());

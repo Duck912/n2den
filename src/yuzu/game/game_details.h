@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include <QPersistentModelIndex>
 #include <QSplitter>
 #include <QTimer>
@@ -10,8 +12,13 @@
 
 #include "common/common_types.h"
 
+namespace Settings {
+class BasicSetting;
+}
+
 class ConfigureInputPerGame;
 class ConfigurePerGameAddons;
+class QComboBox;
 class QLabel;
 class QModelIndex;
 class QTabWidget;
@@ -33,6 +40,8 @@ signals:
 private:
     void LoadGame();
     void ClearTabs();
+    QWidget* BuildUpscalingPage();
+    void SaveUpscaling();
 
     Core::System& system;
     QString game_path;
@@ -48,6 +57,12 @@ private:
     ConfigureInputPerGame* input = nullptr;
     bool addons_changed = false;
     bool input_changed = false;
+    struct UpscalingRow {
+        Settings::BasicSetting* setting;
+        QComboBox* box;
+    };
+    std::vector<UpscalingRow> upscaling_rows;
+    bool upscaling_changed = false;
     int selected_tab = 0;
     QTimer deferred_reload;
     QPersistentModelIndex deferred_selection;

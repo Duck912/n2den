@@ -553,6 +553,8 @@ private:
     bool emulation_running = false;
     // The path to the game currently running
     QString current_game_path;
+    // The game selected in the library: what Configure Game opens while no game runs.
+    QString selected_game_path;
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)
     bool user_flag_cmd_line = false;
 

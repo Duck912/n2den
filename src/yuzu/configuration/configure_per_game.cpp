@@ -44,6 +44,7 @@
 #include "yuzu/configuration/configure_network.h"
 #include "yuzu/configuration/configure_per_game.h"
 #include "yuzu/configuration/configure_per_game_addons.h"
+#include "yuzu/configuration/configure_per_game_upscaling.h"
 #include "yuzu/configuration/configure_system.h"
 #include "yuzu/util/util.h"
 
@@ -72,14 +73,19 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
     system_tab = std::make_unique<ConfigureSystem>(system_, tab_group, *builder, this);
     network_tab = std::make_unique<ConfigureNetwork>(system_, this);
     applets_tab = std::make_unique<ConfigureApplets>(system_, tab_group, *builder, this);
+    // Built after the graphics page, so its rows apply after that page's copies of the same settings.
+    upscaling_tab =
+        std::make_unique<ConfigurePerGameUpscaling>(system_, title_id, tab_group, *builder, this);
 
     ui->setupUi(this);
 
-    // n2den runs one game, so its settings live in one place: Settings. Game Settings
-    // only has the game's add-ons and input profiles (a per-game Upscaler quality silently beat
-    // the one in Settings, #27). The other pages are still built (the dialog applies them) but
-    // not shown, and per-game values of those settings are ignored when the game starts.
+    // n2den runs one game, so most settings live in one place: Settings. Game Settings has the
+    // game's add-ons, input profiles and the NVN-HLE upscaling choices that work for it (they
+    // differ by game). The other pages are still built (the dialog applies them) but not shown,
+    // and per-game values of those settings are ignored when the game starts (a per-game Upscaler
+    // quality silently beat the one in Settings, #27; frontend_common/config.cpp).
     ui->tabWidget->addTab(addons_tab.get(), tr("Add-Ons"));
+    ui->tabWidget->addTab(upscaling_tab.get(), tr("Upscaling"));
     ui->tabWidget->addTab(input_tab.get(), tr("Input Profiles"));
     for (QWidget* const page :
          std::initializer_list<QWidget*>{system_tab.get(), graphics_tab.get(),
