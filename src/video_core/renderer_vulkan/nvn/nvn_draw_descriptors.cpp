@@ -993,6 +993,9 @@ bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool grap
         u32 stage;
         u32 slot;
     };
+    // Low address bits the translated shaders add to their storage buffer offsets.
+    const u64 storage_skew_mask =
+        (std::max<u64>)(impl.device.GetStorageBufferAlignment(), 1) - 1;
     const auto buffer_info = [&](const BufferBinding& binding, bool write, bool uniform,
                                  const SinkSite* sink = nullptr) {
         const auto fallback = [&]() {
@@ -1355,9 +1358,28 @@ bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool grap
             const size_t first = scratch_buffers.size();
             for (u32 i = 0; i < count; ++i) {
                 const u32 slot = binding.slot + i;
-                const BufferBinding resolved = ResolveStorageBinding(binding, i);
+                BufferBinding resolved = ResolveStorageBinding(binding, i);
                 if (resolved.address == 0 || resolved.size == 0) {
                     LogUnboundStorage(graphics, pipe, binding, slot, resolved);
+                }
+                // The shader's offsets into a storage buffer are relative to the buffer address
+                // aligned down to the host's storage buffer offset alignment (StorageOffset of
+                // the global memory to storage buffer pass adds the low bits of the pointer it
+                // reads from the bank), as EvaluateHandleProgram's are: the descriptor starts at
+                // that aligned address. Bound at the address itself, every load and store landed
+                // those low bits further on. Xenoblade Chronicles 2's upscaling network keeps its
+                // weights at an address 8 bytes past a multiple of 16: each weight matrix was
+                // read two words late, which showed as a dot pattern over the whole picture.
+                if (const u64 skew = resolved.address & storage_skew_mask; skew != 0) [[unlikely]] {
+                    Pool* skew_pool = nullptr;
+                    u64 skew_offset = 0;
+                    const u64 aligned_size = resolved.size != 0 ? resolved.size + skew : 0;
+                    if (impl.ResolveBuffer(resolved.address - skew,
+                                           (std::max<u64>)(aligned_size, skew + 1), skew_pool,
+                                           skew_offset)) {
+                        resolved.address -= skew;
+                        resolved.size = aligned_size;
+                    }
                 }
                 const SinkSite site{stage, slot};
                 scratch_buffers.push_back(buffer_info(resolved, binding.is_written, false, &site));
