@@ -30,7 +30,7 @@ for n2den's own changes, not as what another machine will reach.
 | Nintendo Switch Sports Resort | Not tested | Boots | Not tested |
 | Orbitals Deluxe Edition | Not usable | In-game, slow | Not tested |
 | Donkey Kong Bananza | In-game | In-game | Not tested |
-| Xenoblade Chronicles 2 – Nintendo Switch 2 Edition | Not tested | Boots | Not tested |
+| Xenoblade Chronicles 2 – Nintendo Switch 2 Edition | Not tested | In-game | Not tested |
 
 "Prepared launch" means the game's CPU code and graphics pipelines are built before play starts, so that
 nothing has to be compiled while playing.
@@ -166,14 +166,16 @@ Tested to the first level.
 
 ## Xenoblade Chronicles 2 – Nintendo Switch 2 Edition
 
-Tested from a `.nup` container with the base game, update and add-ons: boot, intro and title screen.
+Tested from a `.nup` container with the base game, update and add-ons: boot, title screen and the first
+town in game.
 
-- **NVN-HLE (Vulkan):** boots. Loads (about 30 s, most of it unpacking the game data from the container),
-  then runs the intro and the title screen at full speed. The intro scene renders with correct colours, but
-  it does not reach the screen yet: only the title text and menus show, over black.
+- **NVN-HLE (Vulkan):** in-game at full speed (60 fps) with a correct picture, sound and controls. Loads in
+  about 30 s (most of it unpacking the game data from the container). The game's own upscaling runs as on
+  the console: its DLSS call on NVIDIA DLSS (or FSR 1 without the DLSS files), then its own network to 4K.
 - **Emulated GPU:** not tested past the loading screen.
-- **Fixed on the way:** a crash at boot (the game reserves two very large address ranges for its memory
-  allocator, which did not fit), a crash about 40 s in (the game reads its data through the base program's
-  storage, which the container does not hold separately), and wrong colours in the intro (the game's
-  colour-grading tables are stored in a different memory layout from the one n2den assumed).
-- **Known issues:** the final upscale of the 3D scene to the screen is missing (black background).
+- **Fixed on the way:** crashes at boot and about 40 s in, wrong colours in the intro, the missing final
+  upscale (black background), garbled menus, a video memory leak, stretched triangles and flickering
+  geometry, blocky bright reflections under roofs in the rain, and a dot pattern over the picture from the
+  game's own upscaling network.
+- **Known issues:** with the Resolution setting above 1X a fine grid shows over the picture; use 1X. Video
+  memory use is high (around 10 GB at 1X).
