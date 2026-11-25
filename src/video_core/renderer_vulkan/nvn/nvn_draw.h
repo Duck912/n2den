@@ -934,6 +934,10 @@ private:
     /// A game barrier that orders draws (NVN barrier bits 0xF) came after a counter report of the
     /// open pass: later draws that read the report's bytes must see it (PrepareOutsidePass).
     bool pass_reports_ordered{false};
+    /// A game barrier that orders earlier work was kept inside the open pass (no shader writes
+    /// yet): a later draw of the pass that writes through shaders must not overtake the reads of
+    /// the draws before the barrier, so it ends the pass (PrepareOutsidePass).
+    bool pass_order_pending{false};
     bool targets_dirty{true};
     bool pipeline_dirty{true};
     bool vertex_dirty{true};
@@ -1275,6 +1279,7 @@ private:
         s64 first{};
         bool indexed{};
         u64 index_address{};
+        u32 index_type{}; ///< direct indexed draws (tracing only)
         u64 indirect{}; ///< address of the indirect arguments (0: direct draw)
         u32 args[5]{};  ///< the first indirect command as read from guest memory (tracing only)
         bool args_read{};

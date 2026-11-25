@@ -2190,6 +2190,19 @@ bool DrawContext::PrepareOutsidePass(DrawPlan& plan) {
         }
     }
     report_phase.Stop();
+    // A game barrier that orders earlier work was kept inside this pass (it had no shader writes
+    // then). Vulkan does not order a later draw's shader writes after the earlier draws' reads
+    // inside one render pass, so a writing draw after it ends the pass: XC2 writes the next
+    // light's object matrices from a vertex shader right after the shadow draws that read them
+    // (ORDER_PRIMITIVES between them); without this the draws saw some of the new matrices.
+    if (!need && pass_open && pass_order_pending &&
+        (plan.image_writes || plan.raw_global_writes ||
+         std::any_of(plan.ranges.begin(), plan.ranges.end(),
+                     [](const DrawPlan::RangeUse& use) { return use.write; }))) {
+        cause = BreakCause::Barrier;
+        need = true;
+        ++counters.barrier_write_breaks;
+    }
     // Every storage the draw uses gets its image (lazily created) and the question "would loading
     // its contents record commands" answered BEFORE the pass is begun or continued.
     Phases::Scope images_phase{Phases::Phase::OutImages};
@@ -2273,6 +2286,9 @@ bool DrawContext::PrepareOutsidePass(DrawPlan& plan) {
     }
     if (need && pass_open) {
         EndPass(cause);
+        if (cause == BreakCause::Barrier) {
+            host->HostMarkWritten();
+        }
     }
     Phases::Scope apply_phase{pass_open ? Phases::Phase::OutOpen : Phases::Phase::OutClosed};
     if (!pass_open) {

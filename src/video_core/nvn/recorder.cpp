@@ -1482,6 +1482,35 @@ void RegisterTextureImpl(Recorder::Impl& impl, u64 texture_pool_va, s32 id, u64 
         view.is_image = image ? 1 : 0;
         serial = PlainView(view) ? texture->serial : impl.ViewSerialFor(*texture, view);
     }
+    // EDEN_NX2_NVN_TRACE_TEX_IDS=<id>,<id>: every registration of these descriptor ids.
+    static const std::vector<s32> traced_ids = [] {
+        std::vector<s32> ids;
+        if (const char* list = std::getenv("EDEN_NX2_NVN_TRACE_TEX_IDS")) {
+            for (const char* p = list; *p != '\0';) {
+                char* end = nullptr;
+                const long value = std::strtol(p, &end, 10);
+                if (end == p) {
+                    break;
+                }
+                ids.push_back(static_cast<s32>(value));
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+        return ids;
+    }();
+    if (!traced_ids.empty() && std::find(traced_ids.begin(), traced_ids.end(), id) != traced_ids.end()) {
+        const TextureObject* texture =
+            texture_va != 0 ? impl.Lookup(impl.textures, ObjectKind::Texture, texture_va, function)
+                            : nullptr;
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] {} id {} pool {:#x} base {}: texture {:#x} serial {:x} {}x{} format {:#x} "
+                 "flags {:#x} storage {:x}+{:#x} view {:#x}",
+                 function, id, texture_pool_va, pool->base, texture_va, serial,
+                 texture ? texture->desc.width : 0, texture ? texture->desc.height : 0,
+                 texture ? texture->desc.format : 0, texture ? texture->desc.flags : 0,
+                 texture ? texture->desc.pool_serial : 0, texture ? texture->desc.pool_offset : 0,
+                 view_va);
+    }
     impl.texture_table.Set(pool->base, static_cast<u32>(id), serial);
 }
 } // namespace

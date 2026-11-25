@@ -4,6 +4,7 @@
 // Diagnostics of the draw path (see nvn_debug.h): draw log, per-target draw table, render target
 // dumps. Only reached when Debug::Tracing() (the environment's switches or a diag request).
 
+#include <cmath>
 #include <cstdlib>
 #include <algorithm>
 #include <filesystem>
@@ -285,11 +286,16 @@ void DrawContext::DebugOnDraw(u32 mode) {
     for (u32 slot = 0; slot < color_target_count; ++slot) {
         const TargetBinding& target = color_targets[slot];
         if (target.texture) {
-            line += fmt::format(" L{}={}{}", slot, target.ref.texture.layer,
+            const Storage* s = target.texture->storage.get();
+            line += fmt::format(" L{}={}{} c{}={:x}@{:x}+{:x}/{:x}:th{}:st{:x}", slot,
+                                target.ref.texture.layer,
                                 target.ref.view.set_layers
                                     ? fmt::format("(view {}+{})", target.ref.view.min_layer,
                                                   target.ref.view.nlayers)
-                                    : std::string{});
+                                    : std::string{},
+                                slot, target.texture->serial, s ? s->pool_serial : 0,
+                                s ? s->pool_offset : 0, s ? s->layout.size : 0,
+                                s ? s->layout.tile_h : 0, reinterpret_cast<uintptr_t>(s));
         }
     }
     emit(line);
@@ -311,6 +317,69 @@ void DrawContext::DebugOnDraw(u32 mode) {
         }
     }
     emit(line);
+    // Direct indexed draws: the CPU view of the index range and of the positions it reaches
+    // (attribute 0 read as three floats), to tell bad guest data from a bad host copy.
+    if (dbg_call.indexed && dbg_call.indirect == 0 && dbg_call.count != 0) {
+        const u32 isize = dbg_call.index_type <= 2 ? 1u << dbg_call.index_type : 0u;
+        const u32 word0 = fixed.attributes[0];
+        const u32 stream = S::VertexAttribState::StreamIndex(word0);
+        const u32 stride = stream < MAX_VERTEX_STREAMS ? fixed.stream_stride[stream] : 0;
+        const u64 vb_address = stream < MAX_VERTEX_STREAMS ? vertex_buffers[stream].address : 0;
+        const u64 vb_size = stream < MAX_VERTEX_STREAMS ? vertex_buffers[stream].size : 0;
+        const u8* ib = isize != 0 ? impl.GuestPointer(dbg_call.index_address, u64{dbg_call.count} * isize)
+                                  : nullptr;
+        const u8* vb = vb_address != 0 ? impl.GuestPointer(vb_address, vb_size) : nullptr;
+        line = fmt::format("[nvn] draw idx f{} #{} type={} base={}", dbg.frame, dbg.draw_index,
+                           dbg_call.index_type, dbg_call.first);
+        if (ib == nullptr) {
+            line += " ib=unreadable";
+        } else {
+            u64 lo = ~u64{0}, hi = 0, hash = 0xcbf29ce484222325ULL;
+            float mn[3]{1e30f, 1e30f, 1e30f}, mx[3]{-1e30f, -1e30f, -1e30f};
+            u32 out_of_range = 0, nonfinite = 0, huge = 0;
+            const u64 capacity = stride != 0 ? vb_size / stride : 0;
+            const u32 offset = S::VertexAttribState::Offset(word0);
+            for (u32 i = 0; i < dbg_call.count; ++i) {
+                u32 index = 0;
+                std::memcpy(&index, ib + u64{i} * isize, isize);
+                const u32 restart = isize == 1 ? 0xffu : (isize == 2 ? 0xffffu : 0xffffffffu);
+                if (index == restart) {
+                    continue;
+                }
+                const s64 vertex = static_cast<s64>(index) + dbg_call.first;
+                lo = (std::min)(lo, static_cast<u64>(vertex));
+                hi = (std::max)(hi, static_cast<u64>(vertex));
+                hash = (hash ^ index) * 0x100000001b3ULL;
+                if (vertex < 0 || static_cast<u64>(vertex) >= capacity) {
+                    ++out_of_range;
+                    continue;
+                }
+                if (vb == nullptr) {
+                    continue;
+                }
+                float f[3];
+                std::memcpy(f, vb + static_cast<u64>(vertex) * stride + offset, sizeof(f));
+                for (int c = 0; c < 3; ++c) {
+                    if (!std::isfinite(f[c])) {
+                        ++nonfinite;
+                        continue;
+                    }
+                    huge += std::fabs(f[c]) > 1e5f ? 1 : 0;
+                    mn[c] = (std::min)(mn[c], f[c]);
+                    mx[c] = (std::max)(mx[c], f[c]);
+                }
+            }
+            line += fmt::format(" idx=[{},{}] cap={} oor={} ihash={:016x}", lo, hi, capacity,
+                                out_of_range, hash);
+            if (vb == nullptr) {
+                line += " vb=unreadable";
+            } else {
+                line += fmt::format(" pos=[{:.3g},{:.3g},{:.3g}]..[{:.3g},{:.3g},{:.3g}] nan={} huge={}",
+                                    mn[0], mn[1], mn[2], mx[0], mx[1], mx[2], nonfinite, huge);
+            }
+        }
+        emit(line);
+    }
     line = fmt::format("[nvn] draw+ f{} #{} ubo=[", dbg.frame, dbg.draw_index);
     for (u32 stage = 0; stage < BIND_STAGES; ++stage) {
         for (u32 slot = 0; slot < stages[stage].uniform.size(); ++slot) {

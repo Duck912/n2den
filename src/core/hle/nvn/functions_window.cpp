@@ -35,6 +35,9 @@
 // present. The window's host textures are the NVN textures the game registered; a slot is free
 // again once its present has completed on the GPU.
 namespace Core::NvnHle::Hle {
+
+void CheckTracedDescriptors(Call& c);
+
 namespace {
 
 // NVN2 window builder in place. Offsets and defaults are from Donkey Kong Bananza's sdk NSO
@@ -683,6 +686,7 @@ void WaitPresentDepth(Call& c, u64 seq) {
 }
 
 void nvnQueuePresentTexture(Call& c) {
+    CheckTracedDescriptors(c);
     const u64 queue = c.args.NextPointer();
     const u64 window = c.args.NextPointer();
     const s32 slot = c.args.NextS32();

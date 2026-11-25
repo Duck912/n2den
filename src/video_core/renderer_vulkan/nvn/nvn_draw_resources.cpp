@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 n2den Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later AND MIT
 
+#include <unordered_set>
+#include <mutex>
 #include <algorithm>
 #include <bit>
 #include <cstdlib>
@@ -305,6 +307,32 @@ void DrawResources::OnProgramCreated(const std::shared_ptr<const VC::ProgramDesc
         }
     }
     program_hashes[desc.serial] = hashes;
+    // EDEN_NX2_NVN_LOG_CONTROL=1 (diagnostic): each program stage's control section, once per
+    // stage hash, as hex (finding control flags such as early fragment tests).
+    static const bool log_control = [] {
+        const char* value = std::getenv("EDEN_NX2_NVN_LOG_CONTROL");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (log_control) {
+        static std::mutex logged_mutex;
+        static std::unordered_set<u64> logged;
+        for (u32 stage = 0; stage < STAGE_COUNT; ++stage) {
+            if (hashes[stage] == 0) {
+                continue;
+            }
+            {
+                std::scoped_lock lock{logged_mutex};
+                if (!logged.insert(hashes[stage]).second) {
+                    continue;
+                }
+            }
+            std::string hex;
+            for (const u8 byte : desc.control[stage]) {
+                hex += fmt::format("{:02x}", byte);
+            }
+            LOG_INFO(Render_Vulkan, "[nvn] control s{} {:016x} {}", stage, hashes[stage], hex);
+        }
+    }
     PipelineCache* cache{};
     {
         std::scoped_lock lock{cache_mutex};

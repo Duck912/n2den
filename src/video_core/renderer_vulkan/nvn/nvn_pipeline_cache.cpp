@@ -836,7 +836,7 @@ LoweredEntry PipelineCache::Impl::GetLowered(const StageProgram& program, u32 nv
 
 Shader::RuntimeInfo PipelineCache::Impl::MakeRuntimeInfo(
     u32 nvn_stage, const Shader::IR::Program& program, const Shader::IR::Program* previous,
-    const TranslationState* translation, bool has_geometry) {
+    const TranslationState* translation, bool has_geometry, const std::vector<u8>* control) {
     Shader::RuntimeInfo info;
     if (previous != nullptr) {
         info.previous_stage_stores = previous->info.stores;
@@ -913,6 +913,51 @@ Shader::RuntimeInfo PipelineCache::Impl::MakeRuntimeInfo(
     }
     info.input_topology = topology;
     info.force_early_z = false;
+    // Early fragment tests come from the program's control section, as the NVN driver programs
+    // MANDATED_EARLY_Z from it (Ryujinx: EarlyZForce). Without them, depth/stencil rejection
+    // happens after a shader that stores to memory, so stores of rejected fragments land: XC2
+    // assigns reflection probes with an image atomic OR behind a stencil volume test, and late
+    // tests let rejected fragments take the probe slots (blocky bright reflections under roofs).
+    //   NVN1 (0x880-byte sections): byte +0x718, the driver's getter (nxnative shaders.md).
+    //   NVN2 (magic 0x98761234): byte +0xa3 bit 0 [DATA, inferred]: the SDK reads it with its own
+    //   getter (XC2 sdk+0x66c180; +0xa6, always equal, at +0x66c1b0); in XC2's 2,701 fragment
+    //   shaders it is set in exactly the shaders that store (12 of 12 seen translated, none
+    //   without stores). Not yet traced to the MANDATED_EARLY_Z write itself.
+    // EDEN_NX2_NVN_EARLY_Z: 0 never; 1 every fragment shader that stores (the earlier rule).
+    if (nvn_stage == STAGE_FRAGMENT) {
+        static const int mode = [] {
+            const char* value = std::getenv("EDEN_NX2_NVN_EARLY_Z");
+            if (value == nullptr || *value == '\0') {
+                return -1;
+            }
+            return value[0] == '0' ? 0 : 1;
+        }();
+        bool early = false;
+        if (mode == 1) {
+            for (const auto& d : program.info.image_descriptors) {
+                early |= d.is_written;
+            }
+            for (const auto& d : program.info.image_buffer_descriptors) {
+                early |= d.is_written;
+            }
+            for (const auto& d : program.info.storage_buffers_descriptors) {
+                early |= d.is_written;
+            }
+        } else if (mode < 0 && control != nullptr) {
+            const std::vector<u8>& bytes = *control;
+            u32 magic = 0;
+            if (bytes.size() >= 4) {
+                std::memcpy(&magic, bytes.data(), sizeof(magic));
+            }
+            if (magic == VC::ControlMagic) {
+                early = bytes.size() > 0xa3 && (bytes[0xa3] & 1) != 0;
+            } else if (bytes.size() >= 0x880) {
+                early = (bytes[0x718] & 1) != 0;
+            }
+        }
+        info.force_early_z =
+            early && !program.info.stores_frag_depth && !program.info.stores_sample_mask;
+    }
     info.y_negate = false;
     return info;
 }
@@ -1097,7 +1142,8 @@ bool PipelineCache::Impl::Translate(const TranslateInput& in, TranslateOutput& o
         const StageProgram& source = *in.programs[stage];
         Shader::IR::Program& program = programs[stage];
         const Shader::RuntimeInfo runtime_info =
-            MakeRuntimeInfo(stage, program, previous, in.translation, has_geometry);
+            MakeRuntimeInfo(stage, program, previous, in.translation, has_geometry,
+                            in.programs[stage] ? in.programs[stage]->control : nullptr);
         std::vector<u32> spirv;
         u64 runtime_hash{};
         try {

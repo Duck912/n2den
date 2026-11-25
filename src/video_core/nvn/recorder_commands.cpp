@@ -4,7 +4,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <set>
+#include <tuple>
+#include <vector>
 
 #include "common/boot_counter.h"
 #include "common/logging.h"
@@ -107,6 +112,41 @@ bool Recorder::Impl::ResolveTarget(CommandBufferObject& cb, u64 texture_va, u64 
     out.texture.serial = texture->serial;
     out.texture.level = out.view.set_levels ? out.view.base_level : 0;
     out.texture.layer = out.view.set_layers ? out.view.min_layer : 0;
+    // EDEN_NX2_NVN_TRACE_RT_OFFSETS=<hex>,<hex>: render targets whose storage starts at these pool
+    // offsets, once per (texture object, serial, view) combination.
+    static const std::vector<u64> traced_offsets = [] {
+        std::vector<u64> offsets;
+        if (const char* list = std::getenv("EDEN_NX2_NVN_TRACE_RT_OFFSETS")) {
+            for (const char* p = list; *p != '\0';) {
+                char* end = nullptr;
+                const u64 value = std::strtoull(p, &end, 16);
+                if (end == p) {
+                    break;
+                }
+                offsets.push_back(value);
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+        return offsets;
+    }();
+    if (!traced_offsets.empty() &&
+        std::find(traced_offsets.begin(), traced_offsets.end(), texture->desc.pool_offset) !=
+            traced_offsets.end()) {
+        static std::mutex traced_mutex;
+        static std::set<std::tuple<u64, u64, u64>> traced_seen;
+        std::scoped_lock lock{traced_mutex};
+        if (traced_seen.emplace(texture_va, texture->serial, view_va).second) {
+            LOG_INFO(Render_Vulkan,
+                     "[nvn] {} target: texture {:#x} serial {:x} {}x{} format {:#x} flags {:#x} "
+                     "levels {} pool {:x}+{:#x} view {:#x} (set_format {} format {:#x} "
+                     "set_levels {} set_layers {})",
+                     function, texture_va, texture->serial, texture->desc.width,
+                     texture->desc.height, texture->desc.format, texture->desc.flags,
+                     texture->desc.levels, texture->desc.pool_serial, texture->desc.pool_offset,
+                     view_va, out.view.set_format, out.view.format, out.view.set_levels,
+                     out.view.set_layers);
+        }
+    }
     AddRef(cb, texture->serial);
     if (texture_out) {
         *texture_out = texture;

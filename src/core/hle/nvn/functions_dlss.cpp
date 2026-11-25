@@ -522,18 +522,21 @@ void nvnDlssNetworkBuilderGetStorageSize(Call& c) {
     c.ret.SetU64(StorageSizeFor(c, b));
 }
 
-/// (const builder, int* optimal_w, int* optimal_h, int* max_w, int* max_h, int* min_w, int* min_h)
-/// -> NVNboolean: the six pointers the SDK forwards to the backend (OoT sdk+0x659ae0). The sizes
-/// are the host's (RenderSizesFor: a known limitation); every pointer may be NULL. Refused, with
-/// nothing written, for an unknown method or an output size that is not positive.
+/// (const builder, int* optimal_w, int* optimal_h, int* min_w, int* min_h, int* max_w, int* max_h)
+/// -> NVNboolean: the six pointers the SDK forwards to the backend (OoT sdk+0x659ae0). The minimum
+/// comes before the maximum: Xenoblade Chronicles 2 keeps the third and fourth values as the lower
+/// bound of the input size it evaluates DLSS at (main+0x8ee0e0: min <= size <= max), so with the
+/// two swapped it never evaluated. The sizes are the host's (RenderSizesFor: a known limitation);
+/// every pointer may be NULL. Refused, with nothing written, for an unknown method or an output
+/// size that is not positive.
 void nvnDlssNetworkBuilderGetOptimalSettings(Call& c) {
     const Builder b = LoadBuilder(c, c.args.NextPointer(), c.runtime.device.GetDlssLayout());
     const u64 optimal_w = c.args.NextPointer();
     const u64 optimal_h = c.args.NextPointer();
-    const u64 max_w = c.args.NextPointer();
-    const u64 max_h = c.args.NextPointer();
     const u64 min_w = c.args.NextPointer();
     const u64 min_h = c.args.NextPointer();
+    const u64 max_w = c.args.NextPointer();
+    const u64 max_h = c.args.NextPointer();
 
     const std::optional<RenderSizes> sizes = RenderSizesFor(b.method, b.width, b.height);
     if (!sizes) {
@@ -594,9 +597,15 @@ void nvnDlssNetworkInitialize(Call& c) {
     const Builder b = LoadBuilder(c, builder, layout);
     const std::optional<RenderSizes> sizes = RenderSizesFor(b.method, b.width, b.height);
     if (b.device == 0 || b.storage == 0 || !sizes || b.storage_size < StorageSizeFor(c, b)) {
+        DLSS_WARN("[nvn] nvnDlssNetworkInitialize: network {:#x} refused: device {:#x} storage "
+                  "{:#x}+{:#x} (needs {:#x}) method {} output {}x{} sizes {}",
+                  network, b.device, b.storage, b.storage_size, StorageSizeFor(c, b), b.method,
+                  b.width, b.height, sizes.has_value() ? "known" : "none");
         c.ret.SetBool(false);
         return;
     }
+    LOG_INFO(Core, "[nvn] nvnDlssNetworkInitialize: network {:#x} method {} output {}x{} flags {:#x}",
+             network, b.method, b.width, b.height, b.flags);
     if (!c.Zero(b.storage, b.storage_size)) {
         // (host) Storage the guest does not map is no memory the backend could work in.
         LOG_WARNING(Core,
@@ -894,6 +903,14 @@ void nvnCommandBufferEvaluateDlss(Call& c) {
     const u64 cmd = c.args.NextPointer();
     const u64 network = c.args.NextPointer();
     const u64 params = c.args.NextPointer();
+    {
+        static std::atomic<u64> evaluate_calls{0};
+        const u64 n_calls = evaluate_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (std::has_single_bit(n_calls)) {
+            LOG_INFO(Core, "[nvn] nvnCommandBufferEvaluateDlss: {} call(s) (network {:#x})",
+                     n_calls, network);
+        }
+    }
     const DlssLayout layout = c.runtime.device.GetDlssLayout();
     if (layout.network == nullptr) {
         DLSS_WARN("[nvn] nvnCommandBufferEvaluateDlss: the game's SDK has a DLSS network of no "

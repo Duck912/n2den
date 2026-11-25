@@ -622,12 +622,92 @@ void nvnTexturePoolFinalize(Call& c) {
 
 /// 46,000 calls in a Donkey Kong Bananza run: the Recorder resolves the texture and the optional
 /// view (16 bytes of GuestTextureView) and stores the host serial in its descriptor table.
+u64 MemoryPoolVaOfSerial(u64 pool_serial);
+
+namespace {
+/// Debugging: EDEN_NX2_NVN_TRACE_TEX_IDS=<id>,<id> also watches those descriptors' 32 bytes in the
+/// texture pool's guest memory, logged at each present when they change (a game that writes
+/// descriptors itself instead of registering them).
+struct TracedDescriptor {
+    s32 id;
+    u64 va;
+    std::array<u8, 32> last;
+    bool seen;
+};
+std::mutex traced_descriptor_mutex;
+std::vector<TracedDescriptor> traced_descriptors;
+
+bool DescriptorIdTraced(s32 id) {
+    static const std::vector<s32> ids = [] {
+        std::vector<s32> out;
+        if (const char* list = std::getenv("EDEN_NX2_NVN_TRACE_TEX_IDS")) {
+            for (const char* p = list; *p != '\0';) {
+                char* end = nullptr;
+                const long value = std::strtol(p, &end, 10);
+                if (end == p) {
+                    break;
+                }
+                out.push_back(static_cast<s32>(value));
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+        return out;
+    }();
+    return std::find(ids.begin(), ids.end(), id) != ids.end();
+}
+
+void NoteTracedDescriptor(Call& c, u64 pool, s32 id) {
+    if (!DescriptorIdTraced(id)) {
+        return;
+    }
+    const auto info = c.rec.GetTexturePool(pool);
+    if (!info) {
+        return;
+    }
+    const u64 va = MemoryPoolVaOfSerial(info->pool_serial) + info->pool_offset + u64{32} * id;
+    std::scoped_lock lock{traced_descriptor_mutex};
+    for (const TracedDescriptor& traced : traced_descriptors) {
+        if (traced.va == va) {
+            return;
+        }
+    }
+    traced_descriptors.push_back({id, va, {}, false});
+}
+} // namespace
+
+} // namespace
+
+void CheckTracedDescriptors(Call& c) {
+    std::scoped_lock lock{traced_descriptor_mutex};
+    for (TracedDescriptor& traced : traced_descriptors) {
+        std::array<u8, 32> bytes{};
+        if (!c.mem.Read(traced.va, bytes.data(), bytes.size())) {
+            continue;
+        }
+        if (traced.seen && bytes == traced.last) {
+            continue;
+        }
+        traced.seen = true;
+        traced.last = bytes;
+        std::string hex;
+        for (size_t i = 0; i < bytes.size(); i += 4) {
+            u32 word{};
+            std::memcpy(&word, bytes.data() + i, sizeof(word));
+            hex += fmt::format("{:08x} ", word);
+        }
+        LOG_INFO(Core, "[nvn] descriptor id {} at {:#x}: {}", traced.id, traced.va, hex);
+    }
+}
+
+namespace {
+
 void nvnTexturePoolRegisterTexture(Call& c) {
     const u64 pool = c.args.NextPointer();
     const s32 id = c.args.NextS32();
     const u64 texture = c.args.NextPointer();
     const u64 view = c.args.NextPointer();
     c.rec.RegisterTexture(pool, id, texture, view);
+    NoteTracedDescriptor(c, pool, id);
 }
 
 /// Image descriptors share the texture pool's id space (nxnative: Hyrule Warriors registers the

@@ -584,9 +584,9 @@ struct Storage : std::enable_shared_from_this<Storage> {
 /// order: Xenoblade Chronicles 2 fills its colour-grading volumes (16x16x16 RGBA8, automatic
 /// layout) itself, and their bytes only form a smooth table that way. Packaged 3D textures use the
 /// Switch 2 order (Kirby and the Forgotten Land's grading volumes, packaged layout 40 .. c9 00 01).
-[[nodiscard]] inline bool UsesNativeGobOrder(const Storage& s) {
-    return s.type != VK_IMAGE_TYPE_3D || s.desc.pkg_block_h != 0;
-}
+/// Xenoblade Chronicles 2 (a Switch 1 engine that tiles its own textures) also keeps its
+/// non-packaged 2D textures in the classic order (its UI atlases and fonts); nvn_resources.cpp.
+[[nodiscard]] bool UsesNativeGobOrder(const Storage& s);
 
 struct Texture {
     u64 serial{};
@@ -2206,11 +2206,23 @@ struct Context::Impl {
     /// virtual pools, at ever new offsets) otherwise holds one image per placement for as long
     /// as it keeps the object. Called by the present's trim pass; replay thread only.
     void ReleaseSupersededImages(u64 presents);
+    /// Under device pressure: the images of textures uploaded from guest memory (CPU origin) that
+    /// live texture objects hold but no draw used for EDEN_NVN_RELEASE_IDLE_TEXTURE_PRESENTS
+    /// presents go, oldest first, until `shed` bytes are free; the next use uploads them again
+    /// from guest memory. A streaming game (Xenoblade Chronicles 2) keeps thousands of texture
+    /// objects alive, which costs nothing on the console but held one image each here.
+    void ReleaseIdleUploadedImages(u64 presents, u64 shed);
+    /// How many references texture objects, target aliases and texture views hold on each
+    /// storage: a storage held by the cache and these only is used by no submission.
+    [[nodiscard]] std::unordered_map<const Storage*, long> StorageTextureRefs() const;
     /// Releases the image and views of `s` after the submissions recorded so far (see above).
     void ReleaseStorageImage(Storage& s);
     u64 images_released{0};       ///< ReleaseSupersededImages: images released so far
     u64 images_released_bytes{0}; ///< ... and their bytes
     u64 images_released_logged_present{0};
+    u64 idle_released{0};       ///< ReleaseIdleUploadedImages: images released so far
+    u64 idle_released_bytes{0}; ///< ... and their bytes
+    u64 idle_released_logged_present{0};
     /// Logs where the device memory of the storages goes (every 900 presents): per kind, and the
     /// largest ones.
     void LogStorageCensus();

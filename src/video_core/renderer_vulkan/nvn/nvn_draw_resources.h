@@ -354,6 +354,7 @@ struct DrawCounters {
     std::atomic<u64> feedback_depth{}; ///< feedback copies of a depth/stencil target
     std::atomic<u64> feedback_color{}; ///< feedback copies of a color target
     std::atomic<u64> barriers_kept{}; ///< game barriers that left the pass open (no shader writes)
+    std::atomic<u64> barrier_write_breaks{}; ///< passes ended by a shader-writing draw after a kept barrier
     /// Game barriers outside a pass that order no compute work (no ORDER_PRIMITIVES /
     /// ORDER_INDIRECT_DATA) and so emitted nothing (EDEN_NX2_TRY_DISPATCH_ORDER).
     std::atomic<u64> barriers_without_wait{};

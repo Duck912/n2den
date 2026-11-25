@@ -184,6 +184,7 @@ void DrawContext::OnSegmentBegin() {
     pass_shader_writes = false;
     pass_buffer_writes = false;
     pass_reports_ordered = false;
+    pass_order_pending = false;
     pipeline_dirty = true;
     vertex_dirty = true;
     dynamic_dirty = ~0u;
@@ -393,6 +394,9 @@ bool DrawContext::Handle(const VC::RecordHeader* header) {
                 } else {
                     if (NvnBarrierOrders(bits) && host->HostReportsPending()) {
                         pass_reports_ordered = true;
+                    }
+                    if (NvnBarrierOrders(bits)) {
+                        pass_order_pending = true;
                     }
                     ++counters.barriers_kept;
                 }
@@ -1385,6 +1389,7 @@ void DrawContext::EndPass(BreakCause cause) {
         pass_buffer_writes = false;
         pass_shader_writes = false;
         pass_reports_ordered = false;
+        pass_order_pending = false;
         if (Debug::Tracing()) {
             DebugOnPassEnd();
         }
@@ -3158,6 +3163,7 @@ void DrawContext::DrawIndexed(const VC::DrawIndexedPayload& p) {
     HostIndex host_index;
     dbg_call = {p.count, p.instance_count != 0 ? p.instance_count : 1, p.base_vertex, true,
                 p.index_address};
+    dbg_call.index_type = p.index_type;
     if (impl.gpu_profiler) {
         prof_units = u64{p.count} * (p.instance_count != 0 ? p.instance_count : 1);
     }

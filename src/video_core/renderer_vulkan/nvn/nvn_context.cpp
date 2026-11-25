@@ -2584,6 +2584,7 @@ void Context::CollectStats(std::vector<VideoCommon::Nvn::SinkStat>& out) const {
         out.push_back({"set_render_targets", draw.render_targets_ops.load()});
         out.push_back({"set_render_targets: unchanged (pass kept)", draw.render_targets_same.load()});
         out.push_back({"barriers kept in a pass without shader writes", draw.barriers_kept.load()});
+        out.push_back({"passes ended by a writing draw after a kept barrier", draw.barrier_write_breaks.load()});
         out.push_back({"game barriers outside a pass without a wait for earlier work (no "
                        "ORDER_PRIMITIVES/ORDER_INDIRECT_DATA; EDEN_NX2_TRY_DISPATCH_ORDER)",
                        draw.barriers_without_wait.load()});

@@ -410,7 +410,8 @@ struct PipelineCache::Impl {
     bool Translate(const TranslateInput& in, TranslateOutput& out);
     Shader::RuntimeInfo MakeRuntimeInfo(u32 nvn_stage, const Shader::IR::Program& program,
                                         const Shader::IR::Program* previous,
-                                        const TranslationState* translation, bool has_geometry);
+                                        const TranslationState* translation, bool has_geometry,
+                                        const std::vector<u8>* control);
 
     // --- Vulkan objects -----------------------------------------------------------------------
     struct LayoutObjects {

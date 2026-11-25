@@ -659,8 +659,16 @@ VideoCore::Upscaler::Backend DrawContext::SelectedUpscaleBackend(
     const bool setting_allows_tensor =
         requested == Settings::Upscaler::Auto || requested == Settings::Upscaler::Game;
     // The game's own network needs cooperative matrices, which Eglantine's lowering does not
-    // use: the network is always replaced.
+    // use: the network is replaced. EDEN_NX2_NVN_GAME_NETWORK=1 (experiment) keeps the game's own
+    // network, translated with its tensor math emulated, whatever the upscaler setting.
     static_cast<void>(setting_allows_tensor);
+    static const bool game_network = [] {
+        const char* value = std::getenv("EDEN_NX2_NVN_GAME_NETWORK");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (game_network) {
+        return VideoCore::Upscaler::Backend::Game;
+    }
     constexpr bool tensor_supported = false;
     return VideoCore::Upscaler::SelectBackend(requested, tensor_supported);
 }

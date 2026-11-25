@@ -1393,6 +1393,94 @@ void Context::Impl::ReleaseStorageImage(Storage& s) {
     s.trim_checked_gen = ~u64{0};
 }
 
+std::unordered_map<const Storage*, long> Context::Impl::StorageTextureRefs() const {
+    std::unordered_map<const Storage*, long> texture_refs;
+    for (const auto& [serial, texture] : textures) {
+        if (texture && texture->storage) {
+            ++texture_refs[texture->storage.get()];
+        }
+    }
+    for (const auto& [key, texture] : target_aliases) {
+        if (texture && texture->storage) {
+            ++texture_refs[texture->storage.get()];
+        }
+    }
+    if (draw_resources) {
+        for (const auto& [serial, views] : draw_resources->texture_views) {
+            if (views.storage) {
+                ++texture_refs[views.storage.get()];
+            }
+        }
+    }
+    return texture_refs;
+}
+
+void Context::Impl::ReleaseIdleUploadedImages(u64 presents, u64 shed) {
+    static const u64 age = [] {
+        const char* const value = std::getenv("EDEN_NVN_RELEASE_IDLE_TEXTURE_PRESENTS");
+        return value != nullptr && value[0] != 0 ? std::strtoull(value, nullptr, 10) : u64{300};
+    }();
+    if (age == 0 || shed == 0) {
+        return;
+    }
+    struct Candidate {
+        Storage* storage;
+        long holders; ///< the cache's shared_ptr's use count
+    };
+    std::vector<Candidate> candidates;
+    for (const auto& [key, storage] : storage_cache) {
+        Storage& s = *storage;
+        // Held by more than the cache (the idle ones are TrimStorageCache's), uploaded from guest
+        // memory, with an ordinary image and no scaled twin.
+        if (storage.use_count() == 1 || !s.image || s.sparse || s.scaled ||
+            s.scale_owner != nullptr || s.origin != StorageOrigin::Cpu ||
+            presents < s.last_used_present || presents - s.last_used_present < age) {
+            continue;
+        }
+        candidates.push_back({&s, storage.use_count()});
+    }
+    if (candidates.empty()) {
+        return;
+    }
+    const std::unordered_map<const Storage*, long> texture_refs = StorageTextureRefs();
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        return a.storage->last_used_seq < b.storage->last_used_seq;
+    });
+    u64 released = 0;
+    u64 released_bytes = 0;
+    u64 busy = 0;
+    for (const Candidate& candidate : candidates) {
+        if (released_bytes >= shed) {
+            break;
+        }
+        Storage& s = *candidate.storage;
+        const auto refs = texture_refs.find(&s);
+        if (candidate.holders != 1 + (refs != texture_refs.end() ? refs->second : 0)) {
+            ++busy; // a submission being recorded or in flight may still name the image
+            continue;
+        }
+        released_bytes += s.vram_bytes;
+        ++released;
+        ReleaseStorageImage(s);
+    }
+    if (released == 0) {
+        return;
+    }
+    idle_released += released;
+    idle_released_bytes += released_bytes;
+    stats.storage_cache_bytes.store(storage_cache_bytes, std::memory_order_relaxed);
+    if (idle_released == released || presents >= idle_released_logged_present + 300) {
+        idle_released_logged_present = presents;
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] storage trim: present {}: device pressure, {} idle uploaded texture "
+                 "image(s) ({} MiB) that live textures hold released after {} presents without a "
+                 "use ({} busy, {} candidates); {} ({} MiB) so far "
+                 "(EDEN_NVN_RELEASE_IDLE_TEXTURE_PRESENTS, 0 off)",
+                 presents, released, released_bytes >> 20, age, busy, candidates.size(),
+                 idle_released, idle_released_bytes >> 20);
+    }
+}
+
 void Context::Impl::ReleaseSupersededImages(u64 presents) {
     const u64 age = ReleaseSupersededAge();
     if (age == 0) {
@@ -1421,24 +1509,7 @@ void Context::Impl::ReleaseSupersededImages(u64 presents) {
     // The references texture objects and their views hold. Any other holder (a submission being
     // recorded or in flight, a destroyed texture waiting for its last submission, a draw plan)
     // may still name the image: such a storage keeps it.
-    std::unordered_map<const Storage*, long> texture_refs;
-    for (const auto& [serial, texture] : textures) {
-        if (texture && texture->storage) {
-            ++texture_refs[texture->storage.get()];
-        }
-    }
-    for (const auto& [key, texture] : target_aliases) {
-        if (texture && texture->storage) {
-            ++texture_refs[texture->storage.get()];
-        }
-    }
-    if (draw_resources) {
-        for (const auto& [serial, views] : draw_resources->texture_views) {
-            if (views.storage) {
-                ++texture_refs[views.storage.get()];
-            }
-        }
-    }
+    const std::unordered_map<const Storage*, long> texture_refs = StorageTextureRefs();
     std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
         return a.storage->last_used_seq < b.storage->last_used_seq;
     });
@@ -1683,6 +1754,20 @@ void Context::Impl::TrimStorageCache(bool at_present) {
                 }
             }
             ReleaseSupersededImages(presents);
+        }
+        // Over the idle-release line (below the cache's pressure line, so that the game's
+        // streamed textures go before the driver pages or another program runs out): uploaded
+        // textures nothing drew lately give their images back (uploaded again when used).
+        static const u64 idle_percent = [] {
+            const char* env = std::getenv("EDEN_NVN_IDLE_RELEASE_PERCENT");
+            return std::clamp<u64>(env ? std::strtoull(env, nullptr, 10) : 70, 30, 100);
+        }();
+        if (const u64 budget = device.GetDeviceMemoryBudget(); budget != 0) {
+            const u64 line = budget / 100 * idle_percent;
+            const u64 used = device.GetDeviceMemoryUsage() + device.GetDeviceMemorySlack();
+            if (used > line) {
+                ReleaseIdleUploadedImages(presents, used - line + budget / 32);
+            }
         }
     }
     trim_floor_bytes = storage_cache_bytes + (std::max)(storage_cache_budget / 32, u64{1});

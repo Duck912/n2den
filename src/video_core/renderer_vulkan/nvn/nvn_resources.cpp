@@ -25,6 +25,30 @@
 #include "video_core/vulkan_common/vma.h"
 
 namespace Vulkan::Nvn {
+
+bool UsesNativeGobOrder(const Storage& s) {
+    if (s.desc.pkg_block_h != 0) {
+        return true; // a packaged layout is the Switch 2 tools'
+    }
+    if (s.type == VK_IMAGE_TYPE_3D) {
+        return false;
+    }
+    // Non-packaged 2D textures: the Switch 2 order, except for Xenoblade Chronicles 2, whose
+    // engine (from Switch 1) tiles its UI atlases and fonts itself in the classic order.
+    // EDEN_NX2_NVN_CLASSIC_GOB_2D=1 takes the classic order for every game, =0 for none.
+    static const int forced = [] {
+        const char* value = std::getenv("EDEN_NX2_NVN_CLASSIC_GOB_2D");
+        if (value == nullptr || *value == '\0') {
+            return -1;
+        }
+        return value[0] == '0' ? 0 : 1;
+    }();
+    if (forced >= 0) {
+        return forced == 0;
+    }
+    constexpr u64 Xenoblade2Switch2Edition = 0x0400E95004038000ULL;
+    return (Settings::GetCurrentProgramID() & ~u64{0xF}) != Xenoblade2Switch2Edition;
+}
 namespace {
 
 /// The import gate (GuestMemory::BeginImportGate) around the vkAllocateMemory of an import of

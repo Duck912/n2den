@@ -151,6 +151,37 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
                      trace_dispatch, p.x, p.y, p.z, p.indirect, p.caller);
         }
     }
+    if (dbg.selected && dbg.draw_log != 0) {
+        // A traced frame (nvn-frame request, EDEN_NX2_NVN_DRAWLOG): each dispatch with what it
+        // samples and what it writes.
+        const auto describe = [&](const auto& handles) {
+            std::string out;
+            for (const u64 handle : handles) {
+                if (handle == 0) {
+                    continue;
+                }
+                const u32 id = VideoCommon::Nvn::TextureIdOf(static_cast<u32>(handle));
+                const auto texture = TextureOfId(id);
+                if (!texture) {
+                    out += fmt::format("{}:missing ", id);
+                    continue;
+                }
+                const bool has_image = texture->storage && texture->storage->image;
+                const Storage* s = texture->storage.get();
+                out += fmt::format("{}:{:x}:{}x{}:f{}{}@{:x}+{:x}/{:x}:th{}:fl{:x}:st{:x} ", id,
+                                   texture->serial, texture->desc.width, texture->desc.height,
+                                   static_cast<u32>(texture->host.format),
+                                   has_image ? "" : ":noimage", s ? s->pool_serial : 0,
+                                   s ? s->pool_offset : 0, s ? s->layout.size : 0,
+                                   s ? s->layout.tile_h : 0, texture->desc.flags,
+                                   reinterpret_cast<uintptr_t>(s));
+            }
+            return out;
+        };
+        LOG_INFO(Render_Vulkan, "[nvn] dispatch f{} prog {:016x} groups {}x{}x{} tex=[{}] img=[{}]",
+                 dbg.frame, hash_it->second[STAGE_COMPUTE], p.x, p.y, p.z,
+                 describe(bound.combined), describe(bound.image));
+    }
     if (impl.checkpoint_current != nullptr) {
         impl.checkpoint_current->program = hash_it->second[STAGE_COMPUTE];
     }
