@@ -31,6 +31,7 @@ for n2den's own changes, not as what another machine will reach.
 | Orbitals Deluxe Edition | Not usable | In-game, slow | Not tested |
 | Donkey Kong Bananza | In-game | In-game | Not tested |
 | Xenoblade Chronicles 2 – Nintendo Switch 2 Edition | Not tested | In-game | Not tested |
+| Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition | Not tested | In-game | Not tested |
 
 "Prepared launch" means the game's CPU code and graphics pipelines are built before play starts, so that
 nothing has to be compiled while playing.
@@ -179,3 +180,14 @@ town in game.
   game's own upscaling network.
 - **Known issues:** with the Resolution setting above 1X a fine grid shows over the picture; use 1X. Video
   memory use is high (around 10 GB at 1X).
+
+## Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition
+
+Tested from a `.nup` container with the base game and add-on: boot to 3D gameplay.
+
+- **NVN-HLE (Vulkan):** in-game at full speed (60 fps) with a correct picture, the game's own DLSS network
+  running as on the console. It shares the Switch 2 system, NVN, DLSS and CUDA modules with Xenoblade
+  Chronicles 2, and the same engine habit: UI atlases and fonts tiled in the classic order.
+- **Emulated GPU:** not tested.
+- **Fixed on the way:** garbled menus and fonts (classic texture tiling order, as for Xenoblade Chronicles 2).
+

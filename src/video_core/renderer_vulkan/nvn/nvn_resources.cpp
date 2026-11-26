@@ -33,8 +33,9 @@ bool UsesNativeGobOrder(const Storage& s) {
     if (s.type == VK_IMAGE_TYPE_3D) {
         return false;
     }
-    // Non-packaged 2D textures: the Switch 2 order, except for Xenoblade Chronicles 2, whose
-    // engine (from Switch 1) tiles its UI atlases and fonts itself in the classic order.
+    // Non-packaged 2D textures: the Switch 2 order, except for Xenoblade Chronicles 2 and
+    // Xenoblade Chronicles: Definitive Edition, whose engine (from Switch 1) tiles its UI atlases
+    // and fonts itself in the classic order.
     // EDEN_NX2_NVN_CLASSIC_GOB_2D=1 takes the classic order for every game, =0 for none.
     static const int forced = [] {
         const char* value = std::getenv("EDEN_NX2_NVN_CLASSIC_GOB_2D");
@@ -47,7 +48,9 @@ bool UsesNativeGobOrder(const Storage& s) {
         return forced == 0;
     }
     constexpr u64 Xenoblade2Switch2Edition = 0x0400E95004038000ULL;
-    return (Settings::GetCurrentProgramID() & ~u64{0xF}) != Xenoblade2Switch2Edition;
+    constexpr u64 XenobladeDESwitch2Edition = 0x0400FF500E34A000ULL;
+    const u64 program = Settings::GetCurrentProgramID() & ~u64{0xF};
+    return program != Xenoblade2Switch2Edition && program != XenobladeDESwitch2Edition;
 }
 namespace {
 
