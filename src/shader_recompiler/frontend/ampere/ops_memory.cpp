@@ -281,16 +281,22 @@ void Visitor::LDS() {
     }
 }
 
-// STS: shared memory store.
+// STS: shared memory store. 0x988 adds a uniform register (64..69, flag 91) to the address, as
+// LDS does with bit 91 (Kirby Air Riders: @!P3 STS [UR6], R10).
 void Visitor::STS() {
+    const bool uniform_base = op == 0x988;
     const u32 reg = Take(24, 8);
     const u32 data = Take(32, 8);
     const u32 offset = Take(40, 24);
+    const u32 uniform = uniform_base ? Take(64, 6) : 63;
     const u32 type = Take(73, 3);
     const u32 stride = Take(78, 2);
-    Require(Take(91, 1) == 0, "native shared uniform address");
+    Require(Take(91, 1) == (uniform_base ? 1U : 0U), "native shared uniform address");
     Require(type <= 6, "native shared store type");
-    const IR::U32 address{SharedOffset(reg, stride, offset)};
+    IR::U32 address{SharedOffset(reg, stride, offset)};
+    if (uniform < 63) {
+        address = IR::U32{ir.IAdd(address, UR(uniform))};
+    }
     const auto word = [&](u32 k) -> IR::U32 { return data == 255 ? X(255) : X(data + k); };
     switch (static_cast<MemType>(type)) {
     case MemType::U8:
@@ -643,12 +649,20 @@ IR::U32 Visitor::LocalAddress(const IR::U32& address) {
 void Visitor::LDL() {
     const u32 dest = Take(16, 8);
     const u32 reg = Take(24, 8);
-    Require(Take(32, 6) == 0 && Take(91, 1) == 0, "native local uniform address");
+    // With bit 91 a uniform register (32..37, as LDS has it) is added to the address (Kirby Air
+    // Riders' geometry programs: LDL R51, [UR8+0x6c]).
+    const bool uniform_base = Take(91, 1) != 0;
+    const u32 uniform = Take(32, 6);
+    Require(uniform_base || uniform == 0, "native local uniform address");
     const u32 offset_field = Take(40, 24);
     const u32 type = Take(73, 3);
     Ignore(84, 3); // cache eviction priority
     Require(type <= 6, "native local load type");
-    const IR::U32 offset{LocalAddress(SharedOffset(reg, 0, offset_field))};
+    IR::U32 relative{SharedOffset(reg, 0, offset_field)};
+    if (uniform_base && uniform < 63) {
+        relative = IR::U32{ir.IAdd(relative, UR(uniform))};
+    }
+    const IR::U32 offset{LocalAddress(relative)};
     const IR::U32 limit{ir.Imm32(env.LocalMemorySize())};
     const auto load_word = [&](u32 k) -> IR::U32 {
         const IR::U32 byte_offset{k == 0 ? offset : IR::U32{ir.IAdd(offset, ir.Imm32(k * 4))}};
@@ -684,15 +698,23 @@ void Visitor::LDL() {
 }
 
 // STL: local memory store.
+// 0x987 adds a uniform register (64..69, flag 91) to the address (Kirby Air Riders:
+// STL.128 [UR8+0x40], R4).
 void Visitor::STL() {
+    const bool uniform_base = op == 0x987;
     const u32 reg = Take(24, 8);
     const u32 data = Take(32, 8);
     const u32 offset_field = Take(40, 24);
-    Require(Take(91, 1) == 0, "native local uniform address");
+    const u32 uniform = uniform_base ? Take(64, 6) : 63;
+    Require(Take(91, 1) == (uniform_base ? 1U : 0U), "native local uniform address");
     const u32 type = Take(73, 3);
     Ignore(84, 3); // cache eviction priority
     Require(type <= 6, "native local store type");
-    const IR::U32 offset{LocalAddress(SharedOffset(reg, 0, offset_field))};
+    IR::U32 relative{SharedOffset(reg, 0, offset_field)};
+    if (uniform < 63) {
+        relative = IR::U32{ir.IAdd(relative, UR(uniform))};
+    }
+    const IR::U32 offset{LocalAddress(relative)};
     const IR::U32 word_offset{ir.ShiftRightArithmetic(offset, ir.Imm32(2))};
     // As LDL reads zero there, a store outside the program's local memory is dropped: the host array
     // has local_memory_size bytes, and an index past it is undefined behaviour in SPIR-V (a GPU fault

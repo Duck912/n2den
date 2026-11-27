@@ -299,13 +299,18 @@ void Visitor::TEX() {
 
 void Visitor::TLD() {
     const bool bindless = op == 0xf66; // handle in a uniform register instead of a constant buffer slot
+    // 0x367 (TLD.B): the handle is a general register in the operand list, as for TEX.B (0x361).
+    // Kirby Air Riders: TLD.SCR.B.LZ R2, R2, R34, ARRAY_2D, 0x8.
+    const bool register_handle = op == 0x367;
     const u32 dest = Take(16, 8);
     const u32 source_a = Take(24, 8);
     const u32 source_b = Take(32, 8);
     u32 cbuf_offset = 0;
     u32 cbuf_index = 0;
     u32 handle_register = 0;
-    if (bindless) {
+    if (register_handle) {
+        Require(Take(59, 1) == 1, "native bindless texture handle");
+    } else if (bindless) {
         handle_register = Take(40, 6);
         Require(Take(91, 1) == 1 && handle_register < 63, "native bindless texture handle");
     } else {
@@ -330,13 +335,35 @@ void Visitor::TLD() {
     Ignore(90, 1);
     Require(lod_mode == 1 || lod_mode == 3, "native texel fetch lod mode");
     Require(mask != 0, "native empty texture channel mask");
-    if (!bindless) {
+    if (!bindless && !register_handle) {
         UseDescriptorBuffer(cbuf_index);
     }
     const bool has_lod = lod_mode == 3;
     const u32 count = dim.coordinates + (has_lod ? 1 : 0);
     std::array<u32, 8> regs{};
-    if (texel_offset) {
+    u32 gpr_handle = 0;
+    if (register_handle) {
+        // One operand list, as TEX.B reads it: array index and coordinates, the handle, then the
+        // lod. Up to four values are split in halves over A and B (scalar layout); with more the
+        // coordinates keep A.
+        Require(!texel_offset, "native bindless texel fetch offset");
+        const u32 values = count + 1;
+        const u32 in_a = values > 4 ? dim.coordinates : (values + 1) / 2;
+        const auto value_register = [&](u32 index) {
+            const u32 reg = index < in_a ? source_a + index : source_b + (index - in_a);
+            Require(reg < 255, "native texture operand register");
+            return reg;
+        };
+        u32 position = 0;
+        u32 next_operand = 0;
+        for (; next_operand < dim.coordinates; ++next_operand) {
+            regs[next_operand] = value_register(position++);
+        }
+        gpr_handle = value_register(position++);
+        if (has_lod) {
+            regs[next_operand++] = value_register(position++);
+        }
+    } else if (texel_offset) {
         Require(dim.type == Shader::TextureType::Color2D && lod_mode == 1 && source_a % 2 == 0 &&
                     source_a + 1 < 255 && source_b < 255,
                 "native texel fetch offset");
@@ -398,7 +425,9 @@ void Visitor::TLD() {
     }
     IR::TextureInstInfo info{};
     info.type.Assign(dim.type);
-    const IR::U32 handle = bindless ? UR(handle_register) : DescriptorHandle(cbuf_offset);
+    const IR::U32 handle = register_handle ? X(gpr_handle)
+                           : bindless      ? UR(handle_register)
+                                           : DescriptorHandle(cbuf_offset);
     const IR::Value sample{ir.ImageFetch(handle, coords, offset, lod, {}, info)};
     const u32 outputs = static_cast<u32>(std::popcount(mask));
     Require(outputs <= 2 ? dest_b == 255 : dest_b != 255, "native texture result layout");
@@ -812,7 +841,10 @@ void Visitor::TXQ() {
         Require(Take(59, 3) == 0, "native texture query handle mode");
     }
     Require(Take(62, 2) == 0, "native texture query kind");
-    Require(Take(64, 8) == 255, "native texture query extra register");
+    // A second destination at 64..71 takes the channels after the first two, as TEX's results are
+    // laid out (Kirby Air Riders: TXQ R36, R36, TEX_HEADER_DIMENSION, 0x7 with R38 there puts width
+    // and height in R36, R37 and depth in R38). Without it the channels stay consecutive at dest.
+    const u32 dest_b = Take(64, 8);
     const u32 mask = Take(72, 4);
     Ignore(90, 1);
     Require(mask != 0, "native empty texture query mask");
@@ -824,8 +856,9 @@ void Visitor::TXQ() {
         if (((mask >> element) & 1) == 0) {
             continue;
         }
-        Require(dest + stored < 255, "native texture query result register");
-        X(dest + stored, IR::U32{ir.CompositeExtract(query, element)});
+        const u32 target = dest_b == 255 || stored < 2 ? dest + stored : dest_b + (stored - 2);
+        Require(target < 255, "native texture query result register");
+        X(target, IR::U32{ir.CompositeExtract(query, element)});
         ++stored;
     }
 }
@@ -898,8 +931,18 @@ void Visitor::TMML() {
     const u32 dest = Take(16, 8);
     const u32 coord_reg = Take(24, 8);
     Require(Take(32, 8) == 255, "native mipmap query extra register");
-    const u32 cbuf_offset = Take(40, 14) * 4;
-    UseDescriptorBuffer(Take(54, 5));
+    // 0xf69: the handle is a uniform register (40..45, flag 91), as in TEX and TLD's 0xf6x forms.
+    // Kirby Air Riders: TMML.LOD RZ, R36, R32, UR4, 0x0, CUBE, 0x2.
+    const bool bindless = op == 0xf69;
+    u32 cbuf_offset = 0;
+    u32 handle_register = 0;
+    if (bindless) {
+        handle_register = Take(40, 6);
+        Require(Take(91, 1) == 1 && handle_register < 63, "native bindless texture handle");
+    } else {
+        cbuf_offset = Take(40, 14) * 4;
+        UseDescriptorBuffer(Take(54, 5));
+    }
     Require(Take(59, 2) == 0, "native mipmap query handle mode");
     const Dimension dim = DimensionOf(Take(61, 3));
     Require(dim.coordinates != 0, "native texture dimension");
@@ -933,7 +976,8 @@ void Visitor::TMML() {
     }
     IR::TextureInstInfo info{};
     info.type.Assign(dim.type);
-    const IR::Value lod{ir.ImageQueryLod(DescriptorHandle(cbuf_offset), coords, info)};
+    const IR::U32 handle = bindless ? UR(handle_register) : DescriptorHandle(cbuf_offset);
+    const IR::Value lod{ir.ImageQueryLod(handle, coords, info)};
     u32 stored = 0;
     for (u32 element = 0; element < 2; ++element) {
         if (((mask >> element) & 1) == 0) {

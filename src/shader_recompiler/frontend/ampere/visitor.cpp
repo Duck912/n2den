@@ -465,6 +465,7 @@ void Visitor::Run() {
         break;
     case 0xb66:
     case 0xf66:
+    case 0x367:
         TLD();
         break;
     case 0xb6c:
@@ -472,6 +473,7 @@ void Visitor::Run() {
         TXD();
         break;
     case 0xb69:
+    case 0xf69:
         TMML();
         break;
     case 0x822:
@@ -524,6 +526,7 @@ void Visitor::Run() {
         LDL();
         break;
     case 0x387:
+    case 0x987:
         STL();
         break;
     case 0x226:
@@ -568,6 +571,7 @@ void Visitor::Run() {
         LDS();
         break;
     case 0x388:
+    case 0x988:
         STS();
         break;
     case 0x3c2:
