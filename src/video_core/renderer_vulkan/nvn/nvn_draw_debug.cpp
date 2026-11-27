@@ -438,6 +438,32 @@ void DrawContext::DebugOnDraw(u32 mode) {
         line += fmt::format(":o{}v{} ", static_cast<int>(s.origin), s.contents_valid ? 1 : 0);
     }
     line += fmt::format("] inline_updates={} fallbacks=[{}]", inline_updates.size(), dbg_notes);
+    // EDEN_NX2_NVN_PEEK_FS=<fragment program hash>: the first 16 words (as floats) of each bound
+    // fragment-stage uniform buffer slot (guest memory at record time).
+    static const u64 peek_fs = [] {
+        const char* env = std::getenv("EDEN_NX2_NVN_PEEK_FS");
+        return env != nullptr ? std::strtoull(env, nullptr, 16) : 0ull;
+    }();
+    if (peek_fs != 0 && ProfStageHash(1) == peek_fs) {
+        if (VC::GuestMemory* const memory = impl.guest.load(std::memory_order_acquire)) {
+            for (u32 slot = 0; slot < stages[1].uniform.size(); ++slot) {
+                const BufferBinding& b = stages[1].uniform[slot];
+                if (b.address == 0) {
+                    continue;
+                }
+                if (slot == 0 && Debug::Get().watch_address == 3) {
+                    peek_address = b.address; // GPU view after the draw (EDEN_NX2_NVN_WATCH=peek)
+                }
+                std::array<float, 16> words{};
+                memory->Read(b.address, words.data(), (std::min)(u64{b.size}, u64{sizeof(words)}));
+                line += fmt::format(" fsubo{}@{:#x}=[", slot, b.address);
+                for (u32 i = 0; i < 16; ++i) {
+                    line += fmt::format("{}{:.4g}", i ? " " : "", words[i]);
+                }
+                line += "]";
+            }
+        }
+    }
     // EDEN_NX2_NVN_PEEK_VS=<vertex program hash>: words 72..74, 126 and 155 (byte offsets 288,
     // 504, 620) of every vertex-stage storage binding of the draw (Kirby Air Riders' ambient).
     static const u64 peek_vs = [] {

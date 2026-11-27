@@ -142,6 +142,17 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
         host->HostUnsupported("Dispatch", "no compute program is bound");
         return;
     }
+    // Experiment: EDEN_NX2_NVN_TOGGLE_DISPATCH=<hex hash>: that program's dispatches are skipped
+    // in every other window of 300 presents (A/B within one run).
+    static const u64 toggle_dispatch = [] {
+        const char* env = std::getenv("EDEN_NX2_NVN_TOGGLE_DISPATCH");
+        return env ? std::strtoull(env, nullptr, 16) : u64{0};
+    }();
+    if (toggle_dispatch != 0 && hash_it->second[STAGE_COMPUTE] == toggle_dispatch &&
+        ((impl.presents_recorded / 300) & 1) != 0) [[unlikely]] {
+        skipped();
+        return;
+    }
     // Debugging: EDEN_NX2_NVN_TRACE_DISPATCH=<hex hash> logs the group counts of the first 64
     // dispatches of that compute program (indirect ones log the argument address).
     static const u64 trace_dispatch = [] {

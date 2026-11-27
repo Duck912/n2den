@@ -7069,6 +7069,17 @@ void Recorder::RecordPresent(Texture& texture, Frame& frame, std::vector<Frame*>
     bool through_passes = false;
     const VkFormat texture_format = texture.host.format;
     const VkFormat raw_format = UnormOfSrgb(texture_format);
+    {
+        static u64 logged_present_format = ~u64{0};
+        if (logged_present_format != (static_cast<u64>(static_cast<u32>(texture.desc.format)) << 32 | static_cast<u32>(texture_format))) {
+            logged_present_format = static_cast<u64>(static_cast<u32>(texture.desc.format)) << 32 | static_cast<u32>(texture_format);
+            LOG_INFO(Render_Vulkan,
+                     "[nvn] present texture {}x{} guest format {:#x} host view {} storage {} frame {}",
+                     guest.extent.width, guest.extent.height, texture.desc.format,
+                     static_cast<int>(texture_format), static_cast<int>(s.host.format),
+                     static_cast<int>(frame.format));
+        }
+    }
     const VkFormat frame_format = frame.format;
     const bool raw_copy = raw_format != s.host.format && UnormOfSrgb(frame_format) == frame_format;
     // Sample encoded values into UNORM frames; sRGB attachments require a decoding source

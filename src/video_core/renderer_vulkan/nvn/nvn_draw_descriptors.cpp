@@ -2023,6 +2023,17 @@ void DrawContext::ResolveTexturePool(TexturePoolSet& pool) {
             continue;
         }
         pool.NoteResolvedTexture(texture->serial);
+        if (s.origin == StorageOrigin::None) [[unlikely]] {
+            static std::atomic<u32> logged_empty{0};
+            if (logged_empty.fetch_add(1, std::memory_order_relaxed) < 64) {
+                LOG_INFO(Render_Vulkan,
+                         "[nvn] texture pool resolves a texture with no contents yet: id {} {}x{}x{} "
+                         "fmt {:#x} image {} layout {}",
+                         index, texture->desc.width, texture->desc.height, texture->desc.depth,
+                         texture->desc.format, s.image ? "yes" : "no",
+                         static_cast<int>(s.current_layout));
+            }
+        }
         if (image_index != pool_images.size()) {
             continue;
         }
@@ -2108,6 +2119,17 @@ VkDescriptorSet DrawContext::FinishTexturePool(DrawPlan& plan) {
                                          : VK_NULL_HANDLE;
             if (view == VK_NULL_HANDLE) {
                 continue; // null until the next resolve (EndResolve)
+            }
+            if (storage.origin == StorageOrigin::None) [[unlikely]] {
+                static std::atomic<u32> logged_bound_empty{0};
+                if (logged_bound_empty.fetch_add(1, std::memory_order_relaxed) < 64) {
+                    LOG_INFO(Render_Vulkan,
+                             "[nvn] texture pool binds a view of an image with no contents: id {} "
+                             "{}x{}x{} fmt {:#x} layout {}",
+                             entry.index, entry.texture->desc.width, entry.texture->desc.height,
+                             entry.texture->desc.depth, entry.texture->desc.format,
+                             static_cast<int>(storage.current_layout));
+                }
             }
             pool->SetView(entry.index, entry.slot, view, pool_images[entry.image].set_layout,
                           entry.serial);
