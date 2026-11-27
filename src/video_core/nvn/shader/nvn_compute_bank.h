@@ -39,6 +39,9 @@ struct ComputeBankInputs {
     /// of each 8-byte table entry are written.
     std::span<const u64> textures;
     std::span<const u64> images;
+    /// Separate texture handles (texture id) and separate sampler handles (sampler id << 20).
+    std::span<const u64> separate_textures;
+    std::span<const u64> separate_samplers;
     /// Group counts of a direct dispatch; zero for an indirect one (the GPU reads those, the CPU
     /// does not know them).
     std::array<u32, 3> group_counts{};

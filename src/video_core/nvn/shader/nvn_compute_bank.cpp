@@ -65,6 +65,10 @@ void FillComputeDriverBank(const ComputeDriverLayout& layout, const ComputeBankI
         }
     };
     fill_handles(layout.texture_offset, layout.texture_count, inputs.textures);
+    fill_handles(layout.separate_texture_offset, layout.separate_texture_count,
+                 inputs.separate_textures);
+    fill_handles(layout.separate_sampler_offset, layout.separate_sampler_count,
+                 inputs.separate_samplers);
     fill_handles(layout.image_offset, layout.image_count, inputs.images);
 }
 

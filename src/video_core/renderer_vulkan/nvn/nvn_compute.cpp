@@ -101,6 +101,8 @@ void DrawContext::FillComputeBank(const VC::ComputeDriverLayout& layout, u8* out
         .push_constants = push_constants[1],
         .textures = bound.combined,
         .images = bound.image,
+        .separate_textures = bound.separate_texture,
+        .separate_samplers = bound.separate_sampler,
         .group_counts = compute_groups,
     };
     VC::FillComputeDriverBank(layout, inputs, std::span<u8>{out, DRIVER_BANK_SIZE});

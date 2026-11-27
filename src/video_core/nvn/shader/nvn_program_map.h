@@ -87,8 +87,8 @@ struct ComputeDriverLayout {
     u32 texture_count{};
     u32 image_offset{};
     u32 image_count{};
-    /// Separate texture / sampler tables of the per-shader driver bank: none measured so far (the
-    /// +0xb4 / +0xb5 counts are image slots, see ParseControl); kept empty.
+    /// Separate texture (+0xb4) / sampler (+0xb5) tables of the per-shader driver bank, between
+    /// the combined texture table and the image table (see ParseControl).
     u32 separate_texture_offset{};
     u32 separate_texture_count{};
     u32 separate_sampler_offset{};

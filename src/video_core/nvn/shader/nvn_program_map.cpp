@@ -99,22 +99,29 @@ std::optional<NvnControl> ParseControl(std::span<const u8> control, std::string&
         layout.uniform_count = control[0xb1];
         layout.storage_count = control[0xb2];
         layout.texture_count = control[0xb3];
-        // The image table holds the handles counted at +0xb6, +0xb4 and +0xb5 (8 bytes each),
-        // one after another: Kirby Air Riders' compute programs read storage images at the
-        // slots after the +0xb6 count (1 UBO, +0xb6 4, +0xb4 1, +0xb5 1: total 0x50, image
-        // loads/stores at c0+0x40 and 0x48) and texture fetches through them.
-        layout.image_count = u32{control[0xb6]} + control[0xb4] + control[0xb5];
+        // After the combined texture handles (+0xb3) the bank holds the separate texture handles
+        // (+0xb4), the separate sampler handles (+0xb5) and the image handles (+0xb6), 8 bytes
+        // each, in that order. Kirby Air Riders' compute programs agree on it: 486cf22f (+0xb6 2)
+        // stores its colour-grading LUTs through c0+0x20 and +0x28; 71e27c3c (1/1/1) samples
+        // through c0[0x20] | c0[0x28] and stores through c0+0x30; the per-model light bake
+        // 873cb776 (+0xb5 1, +0xb6 1) ORs the sampler at c0[0x90] into its texture handles and
+        // stores its 64xN light table through c0+0x98; b2c9789a (+0xb4 1) fetches through c0+0x50.
+        // (Read as one image table of +0xb6, +0xb4 and +0xb5 slots, the bake wrote another image
+        // and sampled through an image id: the levels' baked light stayed black.)
+        layout.separate_texture_count = control[0xb4];
+        layout.separate_sampler_count = control[0xb5];
+        layout.image_count = control[0xb6];
         layout.declared_total = ReadU16(control, 0xba);
         layout.uniform_offset = Common::AlignUp(
             layout.push_constant_offset + layout.push_constant_words * 4, ComputeEntryTableAlign);
         layout.storage_offset = layout.uniform_offset + layout.uniform_count * 0x10;
         layout.texture_offset = layout.storage_offset + layout.storage_count * 0x10;
-        layout.image_offset = layout.texture_offset + layout.texture_count * HandleStride;
-        layout.separate_texture_offset = layout.image_offset + layout.image_count * HandleStride;
+        layout.separate_texture_offset = layout.texture_offset + layout.texture_count * HandleStride;
         layout.separate_sampler_offset =
             layout.separate_texture_offset + layout.separate_texture_count * HandleStride;
-        layout.end_offset =
+        layout.image_offset =
             layout.separate_sampler_offset + layout.separate_sampler_count * HandleStride;
+        layout.end_offset = layout.image_offset + layout.image_count * HandleStride;
         layout.total_matches = layout.end_offset == layout.declared_total;
     }
     if (result.stage_byte == static_cast<u32>(ShaderStage::Task) ||

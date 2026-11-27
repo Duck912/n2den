@@ -395,6 +395,42 @@ std::optional<u32> DrawContext::ReadBindingHandleWord(const VC::DescriptorLayout
                     }
                     v = texture_id | sampler_id << 20;
                 }
+            } else if (bank == VC::DriverBank && stage == STAGE_COMPUTE &&
+                       building_compute_layout != nullptr) {
+                // A compute program's handle table is inside its driver bank (c0): the word the
+                // dispatch fills there (FillComputeBank) from what the game bound, read as the
+                // handle bank's words are (Kirby Air Riders' per-model light bake reads
+                // c0[0x20] | c0[0x28] and c0[0xe0] | c0[0xf8]; read as 0, it sampled nothing).
+                const VC::ComputeHandleTables tables = building_compute_layout->HandleTables();
+                const VC::HandleClassification classified =
+                    VC::ClassifyHandleWord(bank, offset, VC::HandleWant::Texture, &tables);
+                if (classified.source != VC::HandleSource::Unsupported) {
+                    const VC::HandleRef ref{classified.source, classified.slot, bank, offset};
+                    const u32 global = ReadHandleWord(stage, ref).value_or(0);
+                    u32 texture_id = global & 0xFFFFF;
+                    u32 sampler_id = global >> 20;
+                    if (texture_id != 0) {
+                        texture_id -= texture_pool_base;
+                    }
+                    if (sampler_id != 0) {
+                        sampler_id -= sampler_pool_base;
+                    }
+                    v = texture_id | sampler_id << 20;
+                    if (hp_trace) {
+                        const StageBindings& cb = stages[STAGE_COMPUTE];
+                        const auto at = [](const auto& a, u32 i) -> u64 { return i < a.size() ? static_cast<u64>(a[i]) : ~u64{0}; };
+                        const VC::ComputeDriverLayout& cl = *building_compute_layout;
+                        hp_log += fmt::format(" (layout tex {:#x}+{} img {:#x}+{} total {:#x}/{:#x})",
+                                              cl.texture_offset, cl.texture_count, cl.image_offset,
+                                              cl.image_count, cl.end_offset, cl.declared_total);
+                        hp_log += fmt::format(" (c0 src {} slot {} global {:#x}; tex {:#x} img {:#x} septex {:#x} sepsmp {:#x})",
+                                              static_cast<int>(classified.source), classified.slot, global,
+                                              at(cb.combined, classified.slot), at(cb.image, classified.slot),
+                                              at(cb.separate_texture, classified.slot), at(cb.separate_sampler, classified.slot));
+                    }
+                } else if (hp_trace) {
+                    hp_log += fmt::format(" (c0 unclassified: {})", classified.reason);
+                }
             }
             if (hp_trace) hp_log += fmt::format(" c{}[{:#x}]={:#x}", bank, offset, v);
             return v;
@@ -954,6 +990,7 @@ std::shared_ptr<Texture> DrawContext::ScaledTextureFor(Texture& texture, bool gr
 
 bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool graphics) {
     plan.graphics = graphics;
+    building_compute_layout = graphics ? nullptr : &pipe.compute_layout;
     ReplayPhases::Scope pre_phase{ReplayPhases::Phase::DescPre};
     const VC::DescriptorLayout& layout = pipe.descriptors;
     scratch_writes.clear();
@@ -1751,6 +1788,26 @@ bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool grap
                                           VC::TextureIdOf(texture_word))
                             : std::string{};
                     if (!texture) {
+                        static std::atomic<u32> logged_no_handle[2]{};
+                        if (texture_word != 0 &&
+                            logged_no_handle[graphics ? 0 : 1].fetch_add(1, std::memory_order_relaxed) < 40) {
+                            u64 program = 0;
+                            if (stage < VC::ShaderStageCount) {
+                                if (const auto it = resources.program_hashes.find(stages[stage].program_serial);
+                                    it != resources.program_hashes.end()) {
+                                    program = it->second[stage];
+                                }
+                            }
+                            LOG_WARNING(Render_Vulkan,
+                                        "[nvn] texture handle names no texture ({}): program {:016x} "
+                                        "stage {} word {:#x} id {} sampler {} src {} slot {} bank {} "
+                                        "off {:#x} shader type {} pool base {}",
+                                        graphics ? "graphics" : "compute", program, stage,
+                                        texture_word, VC::TextureIdOf(texture_word),
+                                        texture_word >> 20, static_cast<int>(texture_ref.source),
+                                        texture_ref.slot, texture_ref.bank, texture_ref.byte_offset,
+                                        static_cast<int>(binding.type), texture_pool_base);
+                        }
                         NoteFallback(graphics, DescReason::TextureNoHandle, detail);
                     } else if (!texture->storage || texture->storage->image_failed) {
                         NoteFallback(graphics, DescReason::TextureNoStorage, detail);

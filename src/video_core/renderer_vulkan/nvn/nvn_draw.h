@@ -862,6 +862,9 @@ private:
                                                            const VC::DescriptorBinding& binding,
                                                            const VC::HandleRef& ref,
                                                            VC::HandleWordKind kind) const;
+    /// The compute pipeline whose descriptors BuildDescriptors is building (null for graphics):
+    /// a compute handle program's reads of the driver bank (c0) name its handle tables.
+    const VC::ComputeDriverLayout* building_compute_layout{};
     /// The {address, size} the game bound for element `element` of a storage buffer binding
     /// (address 0: nothing bound or the source word is unreadable).
     [[nodiscard]] BufferBinding ResolveStorageBinding(const VC::DescriptorBinding& binding,

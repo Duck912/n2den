@@ -423,7 +423,9 @@ bool DecodeGraphics(std::span<const u8> payload, GraphicsPipelineRecord& out) {
 void WriteComputeLayout(Writer& w, const VC::ComputeDriverLayout& c) {
     for (const u32 v : {c.push_constant_offset, c.push_constant_words, c.uniform_offset,
                         c.uniform_count, c.storage_offset, c.storage_count, c.texture_offset,
-                        c.texture_count, c.image_offset, c.image_count, c.end_offset,
+                        c.texture_count, c.image_offset, c.image_count,
+                        c.separate_texture_offset, c.separate_texture_count,
+                        c.separate_sampler_offset, c.separate_sampler_count, c.end_offset,
                         c.declared_total}) {
         w.U32(v);
     }
@@ -442,6 +444,10 @@ VC::ComputeDriverLayout ReadComputeLayout(Reader& r) {
     c.texture_count = r.U32();
     c.image_offset = r.U32();
     c.image_count = r.U32();
+    c.separate_texture_offset = r.U32();
+    c.separate_texture_count = r.U32();
+    c.separate_sampler_offset = r.U32();
+    c.separate_sampler_count = r.U32();
     c.end_offset = r.U32();
     c.declared_total = r.U32();
     c.total_matches = r.U8() != 0;
