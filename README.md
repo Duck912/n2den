@@ -12,7 +12,7 @@
   n2den
 </h1>
 
-<h4 align="center">An experimental Nintendo Switch 2 recompulator, built on Eden.<br>
+<h4 align="center">An experimental Nintendo Switch 2 emulator, built on Eden.<br>
 The focus is on Switch 2 games.</h4>
 
 > **Development build.** n2den is a work in progress: expect missing graphics, crashes and games that need
