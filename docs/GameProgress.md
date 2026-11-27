@@ -20,19 +20,21 @@ for n2den's own changes, not as what another machine will reach.
 
 ## Summary
 
-| Game | Emulated GPU | NVN-HLE (Vulkan) | Prepared launch |
-|---|---|---|---|
-| The Legend of Zelda: Ocarina of Time (Switch 2) | In-game | In-game | Works |
-| Fire Emblem: Fortune's Weave | In-game | In-game | CPU code only |
-| Mario Kart World | Not tested | Unstable | Not usable |
-| Fast Fusion | Playable | Playable | Works |
-| Kirby and the Forgotten Land – Nintendo Switch 2 Edition + Star-Crossed World | Playable | Playable | Works |
-| Nintendo Switch Sports Resort | Not tested | Boots | Not tested |
-| Orbitals Deluxe Edition | Not usable | In-game, slow | Not tested |
-| Donkey Kong Bananza | In-game | In-game | Not tested |
-| Xenoblade Chronicles 2 – Nintendo Switch 2 Edition | Not tested | In-game | Not tested |
-| Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition | Not tested | In-game | Not tested |
-| Kirby Air Riders | Boots | Playable | Not tested |
+## Tested games
+
+| Game | Emulated GPU | NVN-HLE (Vulkan) |
+|---|---|---|
+| The Legend of Zelda: Ocarina of Time (Switch 2) | In-game | In-game |
+| Fire Emblem: Fortune's Weave | Playable | Playable |
+| Fast Fusion | Playable | Playable |
+| Kirby and the Forgotten Land – Nintendo Switch 2 Edition + Star-Crossed World | Playable | Playable |
+| Donkey Kong Bananza | In-game | In-game |
+| Kirby Air Riders | Boots | Playable |
+| Orbitals Deluxe Edition | Not usable | In-game, slow |
+| Xenoblade Chronicles 2 – Nintendo Switch 2 Edition | Playable | Playable |
+| Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition | Playable | Playable |
+| Nintendo Switch Sports Resort | Not tested | Boots |
+| Mario Kart World | Not tested | Unstable |
 
 "Prepared launch" means the game's CPU code and graphics pipelines are built before play starts, so that
 nothing has to be compiled while playing.
