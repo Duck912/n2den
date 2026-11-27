@@ -920,7 +920,8 @@ TextureInst MakeInst(Environment& env, IR::Program& program, IR::Block* block, I
         // the shader then looks it up in the texture pool, as the hardware does.
         const bool pool_candidate = host_info.texture_pool_mode != TexturePoolMode::Off &&
                                     IsPoolOperation(inst) &&
-                                    BufferTexture::ContainsLoadedHandle(inst.Arg(0));
+                                    BufferTexture::ContainsLoadedHandle(
+                                        inst.Arg(0), program.stage == Stage::Compute);
         const auto pool_lookup = [&] {
             ConstBufferAddr pool{};
             pool.count = 1;

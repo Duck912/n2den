@@ -350,7 +350,7 @@ private:
     std::unordered_set<const IR::Inst*> active;
 };
 
-inline bool ContainsLoadedHandle(IR::Value value) {
+inline bool ContainsLoadedHandle(IR::Value value, bool dynamic_cbuf = false) {
     std::vector<IR::Value> pending{value};
     std::unordered_set<const IR::Inst*> visited;
     while (!pending.empty()) {
@@ -363,7 +363,7 @@ inline bool ContainsLoadedHandle(IR::Value value) {
             // Air Riders' ambient-probe compute 701e7438 takes its texture-array handles from
             // c4[R45], a 32 KiB handle table): looked up in the texture pool like a loaded
             // handle. A word at a fixed offset is the same for the whole draw.
-            if (!inst->Arg(1).IsImmediate()) return true;
+            if (dynamic_cbuf && !inst->Arg(1).IsImmediate()) return true;
             break;
         case IR::Opcode::LoadStorageU8: case IR::Opcode::LoadStorageS8:
         case IR::Opcode::LoadStorageU16: case IR::Opcode::LoadStorageS16:
