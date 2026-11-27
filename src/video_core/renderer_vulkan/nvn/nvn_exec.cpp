@@ -6500,6 +6500,15 @@ bool Recorder::RecordList(std::span<const u64> list, size_t start, size_t& stop,
                     op == VC::Op::SetRenderTargets)) {
             WatchSnapshot(
                 fmt::format("f{} before op #{}", impl.presents_recorded + 1, op_log_count));
+        } else if (Debug::Get().watch_address > 4 && op == VC::Op::Dispatch) [[unlikely]] {
+            // EDEN_NX2_NVN_WATCH=<addr>:<size> + EDEN_NX2_NVN_WATCH_CHANGES=1: the range after
+            // every dispatch of every frame; completion logs only snapshots that differ.
+            static const bool changes = std::getenv("EDEN_NX2_NVN_WATCH_CHANGES") != nullptr;
+            if (changes) {
+                WatchSnapshot(fmt::format("f{} after dispatch prog {:016x} (changes)",
+                                          impl.presents_recorded + 1,
+                                          draw.DebugProgramHash(STAGE_COMPUTE)));
+            }
         }
         if (!impl.checkpoint_ring.empty() && !segments.empty()) [[unlikely]] {
             const u64 frame = impl.presents_recorded + 1;

@@ -205,6 +205,10 @@ bool DrawContext::DebugDrawAllowed() const {
                config.only_draws.end();
 }
 
+u64 DrawContext::DebugProgramHash(u32 stage) const {
+    return ProfStageHash(stage);
+}
+
 void DrawContext::DebugOnDraw(u32 mode) {
     const bool indexed = dbg_call.indexed;
     DebugSync();

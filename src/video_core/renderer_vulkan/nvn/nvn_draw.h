@@ -427,6 +427,8 @@ public:
     /// dispatch that bound that range as storage slot 9 (its program, 0 once taken); the replay
     /// copies the range back after it and scans it for self-linked 320-byte nodes.
     u64 linkscan_program{0};
+    /// The program hash of a stage's current pipeline (diagnostics).
+    [[nodiscard]] u64 DebugProgramHash(u32 stage) const;
     [[nodiscard]] static std::pair<u64, u64> LinkScanRange() {
         static const std::pair<u64, u64> range = [] {
             const char* env = std::getenv("EDEN_NX2_NVN_LINKSCAN");

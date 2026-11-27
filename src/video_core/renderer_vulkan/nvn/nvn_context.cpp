@@ -1629,6 +1629,13 @@ void Context::Impl::CompleteMain() {
                 std::memcpy(&value, bytes.data() + i, 4);
                 words += fmt::format(" {:x}", value);
             }
+            if (watch.tag.ends_with("(changes)")) {
+                static std::string last_words;
+                if (words == last_words) {
+                    continue;
+                }
+                last_words = words;
+            }
             LOG_INFO(Render_Vulkan, "[nvn] watch {}:{}", watch.tag, words);
         }
         flight->watches.clear();
