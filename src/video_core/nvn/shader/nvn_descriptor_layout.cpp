@@ -112,7 +112,11 @@ HandleResult ResolveHandles(bool has_secondary, u32 index, u32 offset, u32 shift
     } else {
         switch (primary.source) {
         case HandleSource::SeparateTexture:
-            return fail("separate texture handle without a sampler word (constant sampler id?)");
+            // A separate texture word alone: a size query or texel fetch, which needs no sampler
+            // (Kirby Air Riders: textureSize of c2[0x178] in ~700 fragment programs). The
+            // texture is bound with the default sampler; a sample through a constant sampler id
+            // would get default filtering instead of the dummy texture it got before.
+            break;
         case HandleSource::SeparateSampler:
         case HandleSource::ComputeSeparateSampler:
             return fail("sampler word without a texture word");

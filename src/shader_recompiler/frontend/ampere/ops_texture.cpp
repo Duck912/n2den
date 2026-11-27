@@ -930,20 +930,24 @@ void Visitor::TXD() {
 void Visitor::TMML() {
     const u32 dest = Take(16, 8);
     const u32 coord_reg = Take(24, 8);
-    Require(Take(32, 8) == 255, "native mipmap query extra register");
     // 0xf69: the handle is a uniform register (40..45, flag 91), as in TEX and TLD's 0xf6x forms.
     // Kirby Air Riders: TMML.LOD RZ, R36, R32, UR4, 0x0, CUBE, 0x2.
+    // 0x36a (TMML.B): the handle is general register B (32..39, flag 59); the coordinates stay
+    // at A. Kirby Air Riders: TMML.B.LOD RZ, R37, R32, R36, CUBE, 0x2.
     const bool bindless = op == 0xf69;
+    const bool register_handle = op == 0x36a;
+    const u32 source_b = Take(32, 8);
+    Require(register_handle ? source_b < 255 : source_b == 255, "native mipmap query extra register");
     u32 cbuf_offset = 0;
     u32 handle_register = 0;
     if (bindless) {
         handle_register = Take(40, 6);
         Require(Take(91, 1) == 1 && handle_register < 63, "native bindless texture handle");
-    } else {
+    } else if (!register_handle) {
         cbuf_offset = Take(40, 14) * 4;
         UseDescriptorBuffer(Take(54, 5));
     }
-    Require(Take(59, 2) == 0, "native mipmap query handle mode");
+    Require(Take(59, 2) == (register_handle ? 1U : 0U), "native mipmap query handle mode");
     const Dimension dim = DimensionOf(Take(61, 3));
     Require(dim.coordinates != 0, "native texture dimension");
     Require(Take(64, 8) == 255, "native mipmap query extra register");
@@ -976,7 +980,9 @@ void Visitor::TMML() {
     }
     IR::TextureInstInfo info{};
     info.type.Assign(dim.type);
-    const IR::U32 handle = bindless ? UR(handle_register) : DescriptorHandle(cbuf_offset);
+    const IR::U32 handle = register_handle ? X(source_b)
+                           : bindless      ? UR(handle_register)
+                                           : DescriptorHandle(cbuf_offset);
     const IR::Value lod{ir.ImageQueryLod(handle, coords, info)};
     u32 stored = 0;
     for (u32 element = 0; element < 2; ++element) {

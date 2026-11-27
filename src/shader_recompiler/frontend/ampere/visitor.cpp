@@ -474,6 +474,7 @@ void Visitor::Run() {
         break;
     case 0xb69:
     case 0xf69:
+    case 0x36a:
         TMML();
         break;
     case 0x822:
