@@ -103,6 +103,11 @@ std::string DrawContext::DebugTargetKey() const {
     if (depth_target.texture && depth_target.texture->storage) {
         const Storage& s = *depth_target.texture->storage;
         key += fmt::format("z:{}x{}:f{}", s.extent.width, s.extent.height, static_cast<int>(s.host.format));
+        if (const auto pool = impl.pools.find(s.pool_serial); pool != impl.pools.end()) {
+            key += fmt::format("@{:#x}+{:#x}:L{}:layer{}:lv{}x{}", pool->second->address, s.pool_offset,
+                               depth_target.ref.texture.level, depth_target.ref.texture.layer, s.levels,
+                               s.layers);
+        }
     }
     return key;
 }
@@ -429,6 +434,61 @@ void DrawContext::DebugOnDraw(u32 mode) {
         line += fmt::format(":o{}v{} ", static_cast<int>(s.origin), s.contents_valid ? 1 : 0);
     }
     line += fmt::format("] inline_updates={} fallbacks=[{}]", inline_updates.size(), dbg_notes);
+    // EDEN_NX2_NVN_PEEK_VS=<vertex program hash>: words 72..74, 126 and 155 (byte offsets 288,
+    // 504, 620) of every vertex-stage storage binding of the draw (Kirby Air Riders' ambient).
+    static const u64 peek_vs = [] {
+        const char* env = std::getenv("EDEN_NX2_NVN_PEEK_VS");
+        return env != nullptr ? std::strtoull(env, nullptr, 16) : 0ull;
+    }();
+    if (peek_vs != 0 && ProfStageHash(0) == peek_vs) {
+        if (VC::GuestMemory* const memory = impl.guest.load(std::memory_order_acquire)) {
+            for (u32 slot = 0; slot < stages[0].storage.size(); ++slot) {
+                const BufferBinding& b = stages[0].storage[slot];
+                if (b.address == 0 || b.size < 640) {
+                    continue;
+                }
+                std::array<u32, 3> rgb{};
+                u32 w504 = 0;
+                u32 w620 = 0;
+                memory->Read(b.address + 288, rgb.data(), sizeof(rgb));
+                memory->Read(b.address + 504, &w504, 4);
+                memory->Read(b.address + 620, &w620, 4);
+                float f[3];
+                std::memcpy(f, rgb.data(), sizeof(f));
+                float g504;
+                float g620;
+                std::memcpy(&g504, &w504, 4);
+                std::memcpy(&g620, &w620, 4);
+                line += fmt::format(" vsssbo{}@{:#x}[288]=({:.4g},{:.4g},{:.4g}) [504]={:.4g} [620]={:.4g}",
+                                    slot, b.address, f[0], f[1], f[2], g504, g620);
+            }
+        }
+    }
+    // Small textures the GPU wrote last: the guest bytes behind them (does the CPU fill them?).
+    if (VC::GuestMemory* const memory = impl.guest.load(std::memory_order_acquire)) {
+        for (const DrawPlan::ImageBinding& b : draw_plan.bindings) {
+            const Storage& s = *b.texture->storage;
+            if (s.extent.width * s.extent.height > 4096 || s.extent.width < 8) {
+                continue;
+            }
+            const auto pool = impl.pools.find(s.pool_serial);
+            if (pool == impl.pools.end()) {
+                continue;
+            }
+            std::array<u32, 32> words{};
+            if (!memory->Read(pool->second->address + s.pool_offset, words.data(), sizeof(words))) {
+                continue;
+            }
+            std::string bytes;
+            u32 nonzero = 0;
+            for (const u32 w : words) {
+                bytes += fmt::format(" {:x}", w);
+                nonzero += w != 0 ? 1 : 0;
+            }
+            line += fmt::format(" guest[{:x} {}x{} o{} nz{}]:{}", b.texture->serial, s.extent.width,
+                                s.extent.height, static_cast<int>(s.origin), nonzero, bytes);
+        }
+    }
     emit(line);
     if (dump_this_draw) {
         // EDEN_NX2_NVN_DUMP_DRAW: the CPU view of the draw's vertex and uniform buffers.

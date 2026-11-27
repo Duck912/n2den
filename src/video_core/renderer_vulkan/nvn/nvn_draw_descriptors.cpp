@@ -5,6 +5,7 @@
 // Descriptor resolution of the draw path: handle words -> textures/samplers, buffer bindings,
 // the driver/handle constant banks, and pushing/allocating the descriptor set.
 
+#include <unordered_set>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -807,6 +808,18 @@ bool DrawContext::ViewKeyOf(const Texture& texture, const Storage& s, Shader::Te
     // A BC stand-in is viewed in its storage's BC format (each storage chooses its own), with the
     // texture object's sRGB-ness.
     key.format = s.host.bc_standin ? StandinViewFormat(texture.host, s.host) : texture.host.format;
+    if (TracedStorageWidth() != 0 && s.extent.width == TracedStorageWidth()) [[unlikely]] {
+        static std::unordered_set<u64> logged;
+        if (logged.insert(texture.serial).second) {
+            LOG_INFO(Render_Vulkan,
+                     "[nvn] trace view tex {:x} {}x{} desc fmt {:#x} storage desc fmt {:#x} "
+                     "texture host vk {} storage host vk {} standin {} view vk {} pool {:x}+{:#x}",
+                     texture.serial, s.extent.width, s.extent.height, texture.desc.format,
+                     s.desc.format, static_cast<int>(texture.host.format),
+                     static_cast<int>(s.host.format), s.host.bc_standin,
+                     static_cast<int>(key.format), s.pool_serial, s.pool_offset);
+        }
+    }
     key.aspect = s.aspect;
     if (s.host.depth && s.host.stencil) {
         const bool want_stencil = texture.desc.stencil ||

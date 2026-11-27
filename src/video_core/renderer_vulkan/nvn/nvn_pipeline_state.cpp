@@ -990,8 +990,15 @@ Shader::HostTranslateInfo MakeHostInfo(const Device& device, const Shader::Profi
         // light records) is looked up in the replay's texture pool set (nvn_texture_pool.h).
         // Without it (device limits, EDEN_NVN_NO_TEXTURE_POOL=1) such a handle gets the
         // placeholder below and the draw samples the dummy.
-        .texture_pool_mode = TexturePoolEnabled(device) ? Shader::TexturePoolMode::Fallback
-                                                        : Shader::TexturePoolMode::Off,
+        // EDEN_NX2_TEXTURE_POOL_ALL=1: every handle read from memory is looked up at run time,
+        // also those a per-draw handle program could express.
+        .texture_pool_mode = !TexturePoolEnabled(device) ? Shader::TexturePoolMode::Off
+                             : [] {
+                                   const char* all = std::getenv("EDEN_NX2_TEXTURE_POOL_ALL");
+                                   return all != nullptr && all[0] == '1';
+                               }()
+                                 ? Shader::TexturePoolMode::All
+                                 : Shader::TexturePoolMode::Fallback,
         .unresolved_handle_placeholder = true,
         .nvn_raw_global_memory = profile.support_raw_global_memory,
         .raw_coverage = profile.support_raw_global_memory && VideoCommon::RawCoverageEnabled(),

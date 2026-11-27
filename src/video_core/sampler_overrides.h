@@ -85,6 +85,13 @@ inline bool ApplyFilters(VkFilter& mag, VkFilter& min, VkSamplerMipmapMode& mip,
 /// `EDEN_NX2_FORCE_FILTER`: the guest's LOD clamp is dropped for every forced sampler (tests whether
 /// it is what leaves minified art on mip 0). Returns whether the range was replaced.
 inline bool ApplyLod(f32& min_lod, f32& max_lod) {
+    // EDEN_NX2_FORCE_LOD0=1: every sampler reads mip level 0 only (diagnostic: bad lower mips).
+    static const bool lod0 = std::getenv("EDEN_NX2_FORCE_LOD0") != nullptr;
+    if (lod0) {
+        min_lod = 0.0f;
+        max_lod = 0.0f;
+        return true;
+    }
     if (Get().filter == ForcedFilter::None) {
         return false;
     }

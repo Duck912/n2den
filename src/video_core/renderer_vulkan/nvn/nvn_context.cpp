@@ -1448,6 +1448,13 @@ void Context::Impl::CompleteMain() {
         for (InFlight::Watch& watch : flight->watches) {
             watch.buffer.Invalidate();
             const std::span<u8> bytes = watch.buffer.Mapped();
+            if (!watch.file.empty()) {
+                if (std::FILE* f = std::fopen(watch.file.c_str(), "wb")) {
+                    std::fwrite(bytes.data(), 1, watch.size, f);
+                    std::fclose(f);
+                }
+                continue;
+            }
             if (watch.link_scan) {
                 // Nodes of 320 bytes, next at +16, prev at +20; log when the set of self-linked
                 // nodes changes (completions arrive in submission order).

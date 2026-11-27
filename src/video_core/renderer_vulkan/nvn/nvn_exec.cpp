@@ -694,8 +694,14 @@ public:
             DiagTextures::Skip(job, "stencil-only: not captured");
             return;
         }
-        const u32 width = storage.extent.width;
-        const u32 height = storage.extent.height;
+        // EDEN_NX2_DIAG_TEX_LEVEL=<n>: capture mip level n (clamped to the storage's last level).
+        static const u32 wanted_level = [] {
+            const char* env = std::getenv("EDEN_NX2_DIAG_TEX_LEVEL");
+            return env != nullptr ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 0u;
+        }();
+        const u32 capture_level = (std::min)(wanted_level, storage.levels > 0 ? storage.levels - 1 : 0u);
+        const u32 width = (std::max)(storage.extent.width >> capture_level, 1u);
+        const u32 height = (std::max)(storage.extent.height >> capture_level, 1u);
         DiagTextures::Readback readback{};
         readback.epoch = job.epoch;
         readback.slot = job.slot;
@@ -760,7 +766,7 @@ public:
             .bufferOffset = 0,
             .bufferRowLength = 0,
             .bufferImageHeight = 0,
-            .imageSubresource = {aspect, 0, 0, 1},
+            .imageSubresource = {aspect, capture_level, 0, 1},
             .imageOffset = {0, 0, 0},
             .imageExtent = {width, height, 1},
         };
@@ -977,6 +983,7 @@ private:
                            const Rescale::CopyRegion& region, bool dst_covered);
     /// The GPU writes the storage (PrepareImages calls it for the layouts that write).
     void NoteGpuWrite(Storage& s);
+    u32 trace_op{}; ///< the op being replayed (EDEN_NX2_NVN_GPUWRITE_LOG traces)
     /// GPU-written linear textures in CPU-readable pools noted this submission: Finish copies them
     /// back into guest memory (RecordTexWriteBacks; EDEN_NX2_TRY_TEX_WRITEBACK=0 turns it off).
     std::vector<std::shared_ptr<Storage>> tex_writeback_pending;
@@ -1450,6 +1457,16 @@ void Recorder::PrepareImagesSpan(std::span<const std::pair<Storage*, VkImageLayo
                              layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
                              layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
                              layout == VK_IMAGE_LAYOUT_GENERAL)) {
+            if (TracedStorageWidth() != 0 && storage->extent.width == TracedStorageWidth())
+                [[unlikely]] {
+                LOG_INFO(Render_Vulkan, "[nvn] trace f{} op {} gpu write {}x{} fmt {} pool {:x}+{:#x}: layout {} "
+                                        "(from {}) origin {} valid {}",
+                         impl.presents_recorded + 1, trace_op, storage->extent.width, storage->extent.height,
+                         storage->desc.format,
+                         storage->pool_serial, storage->pool_offset, static_cast<int>(layout),
+                         static_cast<int>(storage->current_layout),
+                         static_cast<int>(storage->origin), storage->contents_valid);
+            }
             NoteGpuWrite(*storage);
         }
         if (storage->current_layout == layout) {
@@ -2395,6 +2412,14 @@ bool Recorder::EnsureContents(Storage& s, bool will_overwrite, bool keep_scaled)
     if (s.sparse) {
         SyncSparse(s, will_overwrite);
         return true;
+    }
+    if (TracedStorageWidth() != 0 && s.extent.width == TracedStorageWidth()) [[unlikely]] {
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] trace f{} ensure {}x{} pool {:x}+{:#x}: valid {} origin {} overwrite {} "
+                 "force_upload {} watch {}",
+                 impl.presents_recorded + 1, s.extent.width, s.extent.height, s.pool_serial,
+                 s.pool_offset, s.contents_valid, static_cast<int>(s.origin), will_overwrite,
+                 s.force_upload, s.watch_valid);
     }
     if (!s.contents_valid) {
         s.contents_valid = true;
@@ -3728,6 +3753,34 @@ bool Recorder::RecordBcUpload(Storage& s, std::span<const BcChunk> chunks, bool 
         };
         Cmd().CopyBufferToImage(*scratch->blocks, *s.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                 region);
+        // EDEN_NX2_NVN_DUMP_STANDIN=<dir>: the encoded blocks of every level of 512x512 stand-ins
+        // (diagnostic: compare the levels of a mip chain).
+        static const char* const standin_dir = std::getenv("EDEN_NX2_NVN_DUMP_STANDIN");
+        static u32 standin_dumps = 0;
+        if (standin_dir != nullptr && s.extent.width == 512 && s.extent.height == 512 &&
+            chunk.first_layer == 0 && standin_dumps < 2000) {
+            ++standin_dumps;
+            const VkMemoryBarrier copy_read{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            };
+            Cmd().PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, copy_read);
+            const u64 one_layer = BcBlocksSize(chunk.width, chunk.height, 1, block_bytes);
+            InFlight::Watch entry;
+            entry.size = static_cast<u32>(one_layer);
+            entry.file = fmt::format("{}/standin_{:x}_{:x}_k{}_l{}_{}x{}.bin", standin_dir,
+                                     s.pool_serial, s.pool_offset, static_cast<int>(kind),
+                                     chunk.level, chunk.width, chunk.height);
+            entry.buffer = impl.CreateHostBuffer(one_layer, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                 MemoryUsage::Download);
+            const VkBufferCopy copy{.srcOffset = 0, .dstOffset = 0, .size = one_layer};
+            Cmd().CopyBuffer(*scratch->blocks, *entry.buffer, copy);
+            host_barrier_needed = true;
+            flight.watches.push_back(std::move(entry));
+        }
         recorded = true;
     }
     if (times) {
@@ -4539,6 +4592,19 @@ void Recorder::ClearTexture(const VC::ClearTexturePayload& p) {
     const bool full_level = x == 0 && y == 0 && width == extent.width && height == extent.height &&
                             (!is_3d || (z == 0 && depth == extent.depth));
     const bool everything = full_level && s.levels == 1 && layer_count == s.layers;
+    if (TracedStorageWidth() != 0 && s.extent.width == TracedStorageWidth()) [[unlikely]] {
+        u32 words[4];
+        std::memcpy(words, p.color, sizeof(words));
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] trace f{} clear {}x{} fmt {} host {} pool {:x}+{:#x}: integer {} color "
+                 "{:#x} {:#x} {:#x} {:#x} region {},{} {}x{} z {} depth {} layer_count {} ref_layer {} "
+                 "layers {} type {}",
+                 impl.presents_recorded + 1, s.extent.width, s.extent.height, s.desc.format,
+                 static_cast<int>(s.host.format), s.pool_serial, s.pool_offset, p.is_integer,
+                 words[0], words[1], words[2], words[3], p.region.x, p.region.y, p.region.width,
+                 p.region.height, p.region.z, p.region.depth, p.layer_count, ref_layer, s.layers,
+                 static_cast<int>(s.type));
+    }
     EnsureContents(s, everything);
     if (full_level) {
         PrepareImages({{&s, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
@@ -6272,6 +6338,7 @@ bool Recorder::RecordList(std::span<const u64> list, size_t start, size_t& stop,
             }
             return true;
         };
+        trace_op = static_cast<u32>(op);
         if (Debug::Get().op_log && Debug::FrameSelected(impl.presents_recorded + 1) &&
             !(resuming && index == start)) {
             LogOp(op, payload, payload_size);

@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <cstdlib>
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -368,6 +370,16 @@ inline void MirrorMemoDropCleared(Pool& pool, u64 first, u64 end, bool mario_kar
 }
 
 /// Where a storage's bytes came from last, which decides how it is kept coherent.
+/// EDEN_NX2_NVN_GPUWRITE_LOG=<width>: storages that wide are traced (uploads, GPU writes, guest
+/// change checks) in the log (diagnostic).
+[[nodiscard]] inline u32 TracedStorageWidth() {
+    static const u32 width = [] {
+        const char* env = std::getenv("EDEN_NX2_NVN_GPUWRITE_LOG");
+        return env != nullptr ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 0u;
+    }();
+    return width;
+}
+
 enum class StorageOrigin : u8 {
     None, ///< Never uploaded or written.
     Cpu,  ///< Holds the guest bytes of `guest_hash`; the replay checks the guest memory for changes.
@@ -718,6 +730,7 @@ struct InFlight {
         std::string tag;
         u32 size{};
         u32 total{}; ///< link scan: bytes copied (node array, then LinkScanExtra ranges)
+        std::string file; ///< non-empty: write the bytes to this file instead of logging them
         bool link_scan{}; ///< diagnostic (EDEN_NX2_NVN_LINKSCAN): scan for self-linked 320-byte nodes, log changes
     };
     std::vector<Watch> watches;

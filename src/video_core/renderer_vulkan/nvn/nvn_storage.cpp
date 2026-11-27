@@ -437,6 +437,12 @@ void Context::Impl::DetectGuestChange(Storage& s, u64 seq) {
                  pool.IsVirtual() ? "virtual" : (pool.HasHost() ? "host" : "nohost"), full, forced,
                  changed, check_ns / 1e6, guest_ns / 1e6);
     }
+    if (TracedStorageWidth() != 0 && s.extent.width == TracedStorageWidth()) [[unlikely]] {
+        LOG_INFO(Render_Vulkan, "[nvn] trace check {}x{} pool {:x}+{:#x}: origin {} watching {} "
+                                "changed {} sample {:x}",
+                 s.extent.width, s.extent.height, s.pool_serial, s.pool_offset,
+                 static_cast<int>(s.origin), watching, changed, s.sample_hash);
+    }
     if (!changed) {
         ++s.unchanged_checks;
         u64 backoff = CheckBackoff(s.unchanged_checks);
