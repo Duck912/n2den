@@ -4823,6 +4823,15 @@ void Recorder::CopyBufferToTexture(const VC::CopyBufferTexturePayload& p) {
         return;
     }
     Storage& s = *storage;
+    if (TracedStorageWidth() != 0 && s.extent.width == TracedStorageWidth()) [[unlikely]] {
+        LOG_INFO(Render_Vulkan,
+                 "[nvn] trace f{} copy-to-texture {}x{} layers {} type {} levels {} pool {:x}+{:#x}: "
+                 "level {} layer {} region {},{},{} {}x{}x{} row {} image {}",
+                 impl.presents_recorded + 1, s.extent.width, s.extent.height, s.layers,
+                 static_cast<int>(s.type), s.levels, s.pool_serial, s.pool_offset, level, layer,
+                 p.region.x, p.region.y, p.region.z, p.region.width, p.region.height,
+                 p.region.depth, p.row_stride, p.image_stride);
+    }
     if (s.host.guest_layout_differs) {
         impl.stats.depth_upload_unsupported.fetch_add(1, std::memory_order_relaxed);
         Unsupported("CopyBufferToTexture",
