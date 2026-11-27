@@ -366,12 +366,12 @@ struct Values {
 #endif
         "backend", Category::Renderer};
     SwitchableSetting<u32> vulkan_device{linkage, 0, "vulkan_device", Category::Renderer, Specialization::RuntimeList};
-    // Which GPU path runs a Switch 2 game's NVN graphics: the emulated GPU (the default, for the
-    // widest compatibility) or nvn-hle, the NVN high-level emulation. Read when the game boots (the
-    // NVN hooks and the Vulkan device features depend on it), so it is not runtime modifiable. See
-    // ResolveNvnHle().
+    // Which GPU path runs a Switch 2 game's NVN graphics: nvn-hle, the NVN high-level emulation
+    // (the default), or the emulated GPU. Switch 1 programs always use the emulated GPU. Read when
+    // the game boots (the NVN hooks and the Vulkan device features depend on it), so it is not
+    // runtime modifiable. See ResolveNvnHle().
     SwitchableSetting<GraphicsPath> graphics_path{linkage,
-                                                  GraphicsPath::Emulated,
+                                                  GraphicsPath::Hle,
                                                   "graphics_path",
                                                   Category::Renderer,
                                                   Specialization::Default,

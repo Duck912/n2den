@@ -45,7 +45,7 @@ Encrypted content is not supported.
 |---|---|
 | **CPU** | **Dynarmic NX2**, extended for the Switch 2's Cortex-A78C instructions, with a persistent JIT disk cache: Off, Translations, or Translations + x64 code. Compatible x64 blocks can be reused across runs on Windows. [CPU details](docs/dynarmic/A78C.md). |
 | **Shaders** | A **native Ampere (SM86) front end** decodes the Switch 2 GPU's own instructions straight into the shader recompiler's IR, including task and mesh shaders. |
-| **Graphics backend** | Two backends, chosen per game in the settings. **Emulated GPU** (default): the game's own NVN driver code runs unchanged and n2den emulates the hardware it talks to (native command channels and their semaphores, compute QMDs, GPU-written command lists, the Switch 2 graphics supervisor service). **NVN-HLE** (experimental): the game's NVN calls are recorded and replayed on Vulkan by a reimplementation of the driver, which removes the emulated hardware from the frame. |
+| **Graphics backend** | Two backends, chosen per game in the settings. **NVN-HLE** (default for Switch 2 games): the game's NVN calls are recorded and replayed on Vulkan by a reimplementation of the driver, which removes the emulated hardware from the frame. **Emulated GPU**: the game's own NVN driver code runs unchanged and n2den emulates the hardware it talks to (native command channels and their semaphores, compute QMDs, GPU-written command lists, the Switch 2 graphics supervisor service). |
 | **Prepared launch** | Work that normally causes stutter during play is done before the game starts: the CPU code of the whole game can be compiled into the JIT disk cache at boot ("Precompile CPU code"), and under NVN-HLE the graphics pipelines a game is known to use are built at boot from a per-game state list, with the shaders taken from the game's own files. |
 | **Bindless textures** | A run-time **texture pool** resolves texture handles that shaders load from storage buffers. |
 | **GPU threading** | The GPU command stream is split over two host threads, with per-binding caches to keep the per-draw cost low for games that issue ~100,000 draws a second. |
@@ -66,9 +66,9 @@ Which games boot, how far they get on each graphics backend and what is still wr
 No launch switches are needed: the native shader front end, the texture pool and the other settings Switch 2
 games rely on are on by default, so a plain launch of the executable runs them.
 
-- **Graphics backend:** set per game in the game's properties. Emulated GPU is the default; NVN-HLE is
-  faster in some games and is the backend most of the listed games have been tested on (see
-  [Game progress](docs/GameProgress.md)).
+- **Graphics backend:** set per game in the game's properties. NVN-HLE is the default for Switch 2 games: it
+  is faster in most games and is the backend most of the listed games have been tested on (see
+  [Game progress](docs/GameProgress.md)). The Emulated GPU stays available per game.
 - **Precompile CPU code:** compiles a game's CPU code into the JIT disk cache at boot, so play does not stop to
   translate it. The first boot takes longer; later boots reuse the cache.
 - **Ocarina of Time:** built-in Dynamic FPS and Max Resolution patches are on by default for the build they fit
