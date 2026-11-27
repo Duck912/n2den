@@ -81,9 +81,11 @@ HostImporter::AllocateHook ImportGateHook(VC::GuestMemory* memory, u64 va, u64 s
 
 /// Alias import: a CPU-visible pool whose guest storage is several host runs is imported through
 /// a contiguous alias view of them (Pool::alias) instead of becoming a split pool with a
-/// device-local mirror. On by default for Donkey Kong Bananza only (its 450 MiB pool lands on a
-/// 1 GiB heap block seam in most boots: 5 fps mirrored, 24-25 fps imported); untested elsewhere
-/// (one Kirby boot crashed with it on, cause unknown). EDEN_NVN_ALIAS_IMPORT=1 turns it on for
+/// device-local mirror. On by default for Donkey Kong Bananza (its 450 MiB pool lands on a
+/// 1 GiB heap block seam in most boots: 5 fps mirrored, 24-25 fps imported) and Kirby Air Riders
+/// (79 of its 80 pools are split; mirrored, the replay hashes the 40-115 MiB the CPU rewrites in
+/// them every frame; imported, nothing is hashed); untested elsewhere (one Kirby and the
+/// Forgotten Land boot crashed with it on, cause unknown). EDEN_NVN_ALIAS_IMPORT=1 turns it on for
 /// every game, =0 off. EDEN_NVN_ALIAS_IMPORT_MAX_MB (default 1024): larger pools keep the split
 /// path (an import pins every page; Ocarina of Time's 2.4 GiB pool stays sparse).
 bool AliasImportOn() {
@@ -98,7 +100,9 @@ bool AliasImportOn() {
         return forced == 1;
     }
     constexpr u64 DonkeyKongBananza = 0x040074A01BF12000ULL;
-    return Settings::GetCurrentProgramID() == DonkeyKongBananza;
+    constexpr u64 KirbyAirRiders = 0x040077201BE50000ULL;
+    const u64 program = Settings::GetCurrentProgramID();
+    return program == DonkeyKongBananza || program == KirbyAirRiders;
 }
 u64 AliasImportMaxBytes() {
     static const u64 bytes = [] {
