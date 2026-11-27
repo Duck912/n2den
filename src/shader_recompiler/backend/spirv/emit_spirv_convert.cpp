@@ -6,6 +6,7 @@
 
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+#include "shader_recompiler/frontend/ir/modifiers.h"
 
 namespace Shader::Backend::SPIRV {
 namespace {
@@ -212,11 +213,32 @@ Id EmitConvertF32S16(EmitContext& ctx, Id value) {
     return ctx.OpConvertSToF(ctx.F32[1], ExtractS16(ctx, value));
 }
 
-Id EmitConvertF32S32(EmitContext& ctx, Id value) {
+// I2F.RZ: the conversion rounds to nearest; above 2^24 the nearest float may be larger in
+// magnitude than the integer, and toward zero takes it one step back. The float is integral, so
+// converting it back compares exactly (2^31 and 2^32 themselves are out of the integer range).
+Id EmitConvertF32S32(EmitContext& ctx, IR::Inst* inst, Id value) {
     if (ctx.profile.has_broken_signed_operations) {
         value = ctx.OpBitcast(ctx.S32[1], value);
     }
-    return ctx.OpConvertSToF(ctx.F32[1], value);
+    const Id r{ctx.OpConvertSToF(ctx.F32[1], value)};
+    if (inst->Flags<IR::FpControl>().rounding != IR::FpRounding::RZ) {
+        return r;
+    }
+    const Id s{ctx.OpBitcast(ctx.U32[1], value)};
+    const Id two31{ctx.Const(2147483648.0f)};
+    const Id at_limit{ctx.OpFOrdGreaterThanEqual(ctx.U1, ctx.OpFAbs(ctx.F32[1], r), two31)};
+    const Id back{ctx.OpConvertFToS(ctx.U32[1], ctx.OpFMin(ctx.F32[1], ctx.OpFMax(ctx.F32[1], r,
+                      ctx.Const(-2147483520.0f)), ctx.Const(2147483520.0f)))};
+    const Id negative{ctx.OpSLessThan(ctx.U1, s, ctx.u32_zero_value)};
+    const Id beyond{ctx.OpSelect(ctx.U1, negative, ctx.OpSLessThan(ctx.U1, back, s),
+                                 ctx.OpSGreaterThan(ctx.U1, back, s))};
+    // -2^31 is exactly a float: only +2^31 (from 2^31 - 63 and up) needs the step at the limit.
+    const Id step{ctx.OpLogicalOr(ctx.U1, ctx.OpLogicalAnd(ctx.U1, at_limit,
+                                                           ctx.OpLogicalNot(ctx.U1, negative)),
+                                  ctx.OpLogicalAnd(ctx.U1, ctx.OpLogicalNot(ctx.U1, at_limit), beyond))};
+    const Id stepped{ctx.OpBitcast(ctx.F32[1],
+                                   ctx.OpISub(ctx.U32[1], ctx.OpBitcast(ctx.U32[1], r), ctx.Const(1u)))};
+    return ctx.OpSelect(ctx.F32[1], step, stepped, r);
 }
 
 Id EmitConvertF32S64(EmitContext& ctx, Id value) {
@@ -231,8 +253,18 @@ Id EmitConvertF32U16(EmitContext& ctx, Id value) {
     return ctx.OpConvertUToF(ctx.F32[1], ExtractU16(ctx, value));
 }
 
-Id EmitConvertF32U32(EmitContext& ctx, Id value) {
-    return ctx.OpConvertUToF(ctx.F32[1], value);
+Id EmitConvertF32U32(EmitContext& ctx, IR::Inst* inst, Id value) {
+    const Id r{ctx.OpConvertUToF(ctx.F32[1], value)};
+    if (inst->Flags<IR::FpControl>().rounding != IR::FpRounding::RZ) {
+        return r;
+    }
+    const Id at_limit{ctx.OpFOrdGreaterThanEqual(ctx.U1, r, ctx.Const(4294967296.0f))};
+    const Id back{ctx.OpConvertFToU(ctx.U32[1], ctx.OpFMin(ctx.F32[1], r, ctx.Const(4294967040.0f)))};
+    const Id beyond{ctx.OpUGreaterThan(ctx.U1, back, value)};
+    const Id step{ctx.OpLogicalOr(ctx.U1, at_limit, beyond)};
+    const Id stepped{ctx.OpBitcast(ctx.F32[1],
+                                   ctx.OpISub(ctx.U32[1], ctx.OpBitcast(ctx.U32[1], r), ctx.Const(1u)))};
+    return ctx.OpSelect(ctx.F32[1], step, stepped, r);
 }
 
 Id EmitConvertF32U64(EmitContext& ctx, Id value) {

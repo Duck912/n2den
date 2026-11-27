@@ -69,6 +69,13 @@ struct OpInfo {
     case 0x803: // P2R
     case 0x804: // R2P
     case 0x81c: // PLOP3
+    // LDS: a guarded shared load is read unconditionally (from offset 0 when the guard is false,
+    // Visitor::LDS) and selected. As a conditional block NVIDIA's compiler (RTX 50, driver of
+    // 2026-11) merges `@!P LDS Rd, [0x1c]` into an earlier load of the same word and then selects
+    // a stale register for the guarded value: Kirby Air Riders' work-list programs took the float
+    // reciprocal next to it as the next node of a freed list head, so the unlink store fell out of
+    // bounds and was dropped (double frees, self-linked nodes, the race-start GPU freeze).
+    case 0x984: // LDS
         return {OpKind::Plain, true};
     // Uniform datapath: exact opcodes
     case 0x882: // UMOV imm

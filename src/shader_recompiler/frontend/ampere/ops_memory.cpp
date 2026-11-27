@@ -255,6 +255,12 @@ void Visitor::LDS() {
     if (uniform < 63) {
         address = IR::U32{ir.IAdd(address, UR(uniform))};
     }
+    if (guard_select) {
+        // Guarded (classify.h: LDS is modelled as a select): the load always runs, from offset 0
+        // when the guard is false, so a lane whose address is not valid reads nothing outside the
+        // shared window; X() keeps the old register value for it.
+        address = IR::U32{ir.Select(*guard_select, address, ir.Imm32(0U))};
+    }
     const bool is_signed = type == 1 || type == 3;
     switch (static_cast<MemType>(type)) {
     case MemType::U8:

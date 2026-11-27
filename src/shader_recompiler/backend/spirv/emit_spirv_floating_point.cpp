@@ -46,6 +46,35 @@ Id FPUnordCompare(Id (EmitContext::*comp_func)(Id, Id, Id), EmitContext& ctx, Id
         return (ctx.*comp_func)(ctx.U1, lhs, rhs);
     }
 }
+
+// Round toward zero (FMUL.RZ / FFMA.RZ). SPIR-V arithmetic rounds to nearest, so the nearest
+// result is taken back one step in magnitude when it lies beyond the exact result: the residual
+// fma(a, b, c - r) is exact, and a residual of the other sign than r means |r| > |exact|. The
+// guest's integer division by a reciprocal (I2F.RZ, FMUL.RZ by rcp(d) - 2 ulp, F2I.TRUNC) relies on
+// the quotient never coming out one too large (Kirby Air Riders' work-list ring indices).
+Id TowardZero(EmitContext& ctx, Id r, Id residual, Id finite_inputs) {
+    const Id zero{ctx.Const(0.0f)};
+    const Id r_pos{ctx.OpFOrdGreaterThan(ctx.U1, r, zero)};
+    const Id r_neg{ctx.OpFOrdLessThan(ctx.U1, r, zero)};
+    const Id e_pos{ctx.OpFOrdGreaterThan(ctx.U1, residual, zero)};
+    const Id e_neg{ctx.OpFOrdLessThan(ctx.U1, residual, zero)};
+    const Id beyond{ctx.OpLogicalOr(ctx.U1, ctx.OpLogicalAnd(ctx.U1, r_pos, e_neg),
+                                    ctx.OpLogicalAnd(ctx.U1, r_neg, e_pos))};
+    // Overflow to infinity from finite inputs: toward zero it is the largest finite value.
+    const Id overflow{ctx.OpLogicalAnd(ctx.U1, ctx.OpIsInf(ctx.U1, r), finite_inputs)};
+    const Id step{ctx.OpLogicalOr(ctx.U1, beyond, overflow)};
+    const Id bits{ctx.OpBitcast(ctx.U32[1], r)};
+    const Id stepped{ctx.OpBitcast(ctx.F32[1], ctx.OpISub(ctx.U32[1], bits, ctx.Const(1u)))};
+    return ctx.OpSelect(ctx.F32[1], step, stepped, r);
+}
+
+Id NotInf(EmitContext& ctx, Id v) {
+    return ctx.OpLogicalNot(ctx.U1, ctx.OpIsInf(ctx.U1, v));
+}
+
+bool RoundsTowardZero(IR::Inst* inst) {
+    return inst->Flags<IR::FpControl>().rounding == IR::FpRounding::RZ;
+}
 } // Anonymous namespace
 
 Id EmitFPAbs16(EmitContext& ctx, Id value) {
@@ -77,7 +106,18 @@ Id EmitFPFma16(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {
 }
 
 Id EmitFPFma32(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {
-    return Decorate(ctx, inst, ctx.OpFma(ctx.F32[1], a, b, c));
+    if (!RoundsTowardZero(inst)) {
+        return Decorate(ctx, inst, ctx.OpFma(ctx.F32[1], a, b, c));
+    }
+    // fma(a, b, c - r) is exact only when c - r is; it is whenever r is near a * b + c (the
+    // usual case), and its sign still tells the side otherwise.
+    const Id r{ctx.OpFma(ctx.F32[1], a, b, c)};
+    const Id c_minus_r{ctx.OpFSub(ctx.F32[1], c, r)};
+    ctx.Decorate(c_minus_r, spv::Decoration::NoContraction);
+    const Id residual{ctx.OpFma(ctx.F32[1], a, b, c_minus_r)};
+    const Id finite{ctx.OpLogicalAnd(ctx.U1, ctx.OpLogicalAnd(ctx.U1, NotInf(ctx, a), NotInf(ctx, b)),
+                                     NotInf(ctx, c))};
+    return TowardZero(ctx, r, residual, finite);
 }
 
 Id EmitFPFma64(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {
@@ -105,7 +145,13 @@ Id EmitFPMul16(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
 }
 
 Id EmitFPMul32(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
-    return Decorate(ctx, inst, ctx.OpFMul(ctx.F32[1], a, b));
+    if (!RoundsTowardZero(inst)) {
+        return Decorate(ctx, inst, ctx.OpFMul(ctx.F32[1], a, b));
+    }
+    const Id r{ctx.OpFMul(ctx.F32[1], a, b)};
+    ctx.Decorate(r, spv::Decoration::NoContraction);
+    const Id residual{ctx.OpFma(ctx.F32[1], a, b, ctx.OpFNegate(ctx.F32[1], r))};
+    return TowardZero(ctx, r, residual, ctx.OpLogicalAnd(ctx.U1, NotInf(ctx, a), NotInf(ctx, b)));
 }
 
 Id EmitFPMul64(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
