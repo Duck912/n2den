@@ -388,12 +388,12 @@ struct ComputeRequest {
 struct ComputePipeline : PipelineBase {};
 
 struct PipelineCacheOptions {
-    /// Directory of the per-title files (`nvn_pipelines.k<key>.bin`, `nvn_pipelines.vkcache`);
+    /// Directory of the per-title files (`nvn_pipelines.k<key>.bin`, `nvn_pipelines.k<key>.vkcache`);
     /// empty disables the disk cache (the use_disk_shader_cache setting: the renderer gives no
     /// directory when it is off).
     std::filesystem::path directory;
     /// The use_vulkan_driver_pipeline_cache setting: the driver's pipeline cache is loaded from
-    /// and saved to `nvn_pipelines.vkcache` in `directory`. Off: that file is never read,
+    /// and saved to `nvn_pipelines.k<key>.vkcache` in `directory`. Off: that file is never read,
     /// written or created (the driver's cache still serves this run in memory, and the
     /// translated shaders and pipeline records go to their own file as before).
     bool driver_cache_file{true};

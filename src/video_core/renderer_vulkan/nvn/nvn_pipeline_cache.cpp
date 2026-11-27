@@ -521,7 +521,12 @@ PipelineCache::Impl::Impl(const Device& device_, PipelineCacheOptions options_)
         LOG_INFO(Render_Vulkan, "[nvn] pipeline cache file {} for {}", disk_path.filename().string(),
                  disk_header.translation_key);
         if (options.driver_cache_file) {
-            vk_cache_path = options.directory / VK_CACHE_FILE_NAME;
+            // One driver cache per translation key, beside its pipeline file
+            // (nvn_pipelines.k<key>.vkcache): a single shared file kept every earlier key's
+            // pipelines, was read whole at boot and handed to the driver (Kirby Air Riders: 1 GiB
+            // after a day of builds, ~3 GiB more process commit), and never dropped any.
+            vk_cache_path = disk_path;
+            vk_cache_path.replace_extension(".vkcache");
             blob = ReadVkCacheBlob();
         } else {
             LOG_INFO(Render_Vulkan,
