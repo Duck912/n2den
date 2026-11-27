@@ -494,6 +494,10 @@ void DrawContext::DebugOnDraw(u32 mode) {
                     }
                     line += fmt::format("{}{:.3g}/{:.3g}", rec == 0 ? "" : " ", max_rgb, sum_w);
                 }
+                line += "] rec0=[";
+                for (u64 i = 0; i < (std::min)(bytes / 4, u64{32}); ++i) {
+                    line += fmt::format("{}{:.4g}", i == 0 ? "" : " ", words[i]);
+                }
                 line += "]";
                 // The object's record index (vertex stage: slot 0 word at +460 past the object).
                 if (stages[0].storage[0].address != 0) {

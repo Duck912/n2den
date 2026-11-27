@@ -11,6 +11,7 @@
 //   * the shader's texture handle words live in that bank, so the pipeline cache's texture oracle
 //     classifies them with the program's tables (ComputeOracle).
 
+#include <cmath>
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -643,6 +644,57 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
                     // range before the dispatch runs (imported pools only: the GPU reads it).
                     std::memcpy(const_cast<u8*>(bytes) + u64{config.poke_index} * 4,
                                 &config.poke_value, 4);
+                }
+                if (std::getenv("EDEN_NX2_NVN_PEEK_HANDLES") != nullptr) {
+                    // The peeked words as texture handles (a handle table in a uniform buffer):
+                    // the texture each names.
+                    std::string handles;
+                    for (u32 i = 0; i < (std::min)(config.peek_words, 128u); ++i) {
+                        u32 word;
+                        std::memcpy(&word, bytes + u64{i} * 4, 4);
+                        if (word == 0) {
+                            continue;
+                        }
+                        const auto& texture = TextureOfId(VideoCommon::Nvn::TextureIdOf(word));
+                        handles += fmt::format(" {}:{:x}", i, word);
+                        if (texture) {
+                            handles += fmt::format("->{}x{}x{}/fmt{:#x}/tgt{}/lv{}", texture->desc.width,
+                                                   texture->desc.height, texture->desc.depth,
+                                                   texture->desc.format, texture->desc.target,
+                                                   texture->desc.levels);
+                            if (texture->storage) {
+                                const Storage& st = *texture->storage;
+                                const auto pool = impl.pools.find(st.pool_serial);
+                                if (pool != impl.pools.end()) {
+                                    const u64 at = pool->second->address + st.pool_offset;
+                                    handles += fmt::format("@{:#x}/o{}", at, static_cast<int>(st.origin));
+                                    if (const u8* texels = impl.GuestPointer(at, 32)) {
+                                        if (texture->desc.format == 0x29) {
+                                            // RGBA16F: the first two texels.
+                                            handles += "[";
+                                            for (u32 h = 0; h < 8; ++h) {
+                                                u16 half;
+                                                std::memcpy(&half, texels + h * 2, 2);
+                                                handles += fmt::format("{}{:.3g}", h ? " " : "",
+                                                                       [](u16 v) {
+                                                                           const u32 e = (v >> 10) & 31, m = v & 1023;
+                                                                           const float mag = e == 0 ? std::ldexp(float(m), -24)
+                                                                                           : e == 31 ? INFINITY
+                                                                                           : std::ldexp(float(m | 1024), int(e) - 25);
+                                                                           return (v & 0x8000) ? -mag : mag;
+                                                                       }(half));
+                                            }
+                                            handles += "]";
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            handles += "->none";
+                        }
+                    }
+                    LOG_INFO(Render_Vulkan, "[nvn] peek handles f{}:{}", impl.presents_recorded + 1,
+                             handles);
                 }
                 float lo = values[0];
                 float hi = values[0];

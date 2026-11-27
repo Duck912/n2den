@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/ir/modifiers.h"
@@ -73,7 +74,9 @@ Id NotInf(EmitContext& ctx, Id v) {
 }
 
 bool RoundsTowardZero(IR::Inst* inst) {
-    return inst->Flags<IR::FpControl>().rounding == IR::FpRounding::RZ;
+    // Experiment: EDEN_NX2_NO_RZ_EMULATION=1 rounds .RZ operations to nearest as before.
+    static const bool off = std::getenv("EDEN_NX2_NO_RZ_EMULATION") != nullptr;
+    return !off && inst->Flags<IR::FpControl>().rounding == IR::FpRounding::RZ;
 }
 } // Anonymous namespace
 

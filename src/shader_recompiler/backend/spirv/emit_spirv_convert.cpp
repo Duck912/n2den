@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/ir/modifiers.h"
@@ -221,7 +222,8 @@ Id EmitConvertF32S32(EmitContext& ctx, IR::Inst* inst, Id value) {
         value = ctx.OpBitcast(ctx.S32[1], value);
     }
     const Id r{ctx.OpConvertSToF(ctx.F32[1], value)};
-    if (inst->Flags<IR::FpControl>().rounding != IR::FpRounding::RZ) {
+    if (inst->Flags<IR::FpControl>().rounding != IR::FpRounding::RZ ||
+        std::getenv("EDEN_NX2_NO_RZ_EMULATION") != nullptr) {
         return r;
     }
     const Id s{ctx.OpBitcast(ctx.U32[1], value)};
@@ -255,7 +257,8 @@ Id EmitConvertF32U16(EmitContext& ctx, Id value) {
 
 Id EmitConvertF32U32(EmitContext& ctx, IR::Inst* inst, Id value) {
     const Id r{ctx.OpConvertUToF(ctx.F32[1], value)};
-    if (inst->Flags<IR::FpControl>().rounding != IR::FpRounding::RZ) {
+    if (inst->Flags<IR::FpControl>().rounding != IR::FpRounding::RZ ||
+        std::getenv("EDEN_NX2_NO_RZ_EMULATION") != nullptr) {
         return r;
     }
     const Id at_limit{ctx.OpFOrdGreaterThanEqual(ctx.U1, r, ctx.Const(4294967296.0f))};
