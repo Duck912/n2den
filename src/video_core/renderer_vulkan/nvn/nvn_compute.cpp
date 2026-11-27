@@ -457,6 +457,49 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
     // lookup waits for a compile in flight, as the emulated path's ComputePipeline::Configure
     // waits for its build. A skipped dispatch leaves the buffers and images it writes stale for
     // every later draw (one-time setup, GPU-driven culling), not one frame of geometry.
+    if (first_dispatch) {
+        // Lookahead: the compute programs this command list binds further on and has not
+        // dispatched yet get their compiles queued first on the workers now, so a burst of new
+        // programs (Kirby Air Riders' first 3D scene: dozens, 0.3-1 s each in the driver)
+        // compiles in parallel while this thread compiles the one it needs, instead of one
+        // after another at each first dispatch.
+        const std::span<const u64> ahead = host->HostRecordsAhead();
+        constexpr size_t MAX_RECORDS = 8192;
+        constexpr u32 MAX_PREFETCH = 64;
+        u32 prefetched = 0;
+        size_t index = 0;
+        for (size_t records = 0; records < MAX_RECORDS && index < ahead.size() &&
+                                 prefetched < MAX_PREFETCH;
+             ++records) {
+            const auto* header = reinterpret_cast<const VC::RecordHeader*>(&ahead[index]);
+            if (header->size < sizeof(VC::RecordHeader) || header->size % 8 != 0 ||
+                index + header->size / 8 > ahead.size()) {
+                break;
+            }
+            if (static_cast<VC::Op>(header->op) == VC::Op::BindProgram &&
+                header->size - sizeof(VC::RecordHeader) >= sizeof(VC::BindProgramPayload)) {
+                const auto& bind = *VC::RecordPayload<VC::BindProgramPayload>(header);
+                if (((bind.stages >> STAGE_COMPUTE) & 1) != 0 && bind.program_serial != 0) {
+                    const auto next_program = impl.programs.find(bind.program_serial);
+                    const auto next_hash = resources.program_hashes.find(bind.program_serial);
+                    if (next_program != impl.programs.end() &&
+                        next_hash != resources.program_hashes.end()) {
+                        const u64 hash = next_hash->second[STAGE_COMPUTE];
+                        if (hash != 0 && hash != request.program.hash &&
+                            !resources.compute_programs.contains(hash)) {
+                            const VC::ProgramDesc& desc = *next_program->second;
+                            const StageProgram stage{hash, &desc.control[STAGE_COMPUTE],
+                                                     &desc.code[STAGE_COMPUTE]};
+                            if (resources.Cache().PrefetchCompute(stage, next_program->second)) {
+                                ++prefetched;
+                            }
+                        }
+                    }
+                }
+            }
+            index += header->size / 8;
+        }
+    }
     const std::shared_ptr<ComputePipeline> compute = resources.Cache().GetCompute(request);
     if (first_dispatch) {
         const auto compile_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

@@ -2062,6 +2062,49 @@ void PipelineCache::Impl::PrepareCompute(const StageProgram& program,
     QueueBuild(BuildPriority::CreationCompute, [this, job] { RunIdleCompute(*job); });
 }
 
+bool PipelineCache::Impl::PrefetchCompute(const StageProgram& program,
+                                          std::shared_ptr<const void> owner) {
+    if (program.hash == 0 || program.control == nullptr || program.code == nullptr ||
+        stopping.load() || (!workers && !async_workers) ||
+        !loader_queued.load(std::memory_order_acquire)) {
+        return false;
+    }
+    // The key PrepareCompute and a dispatch without environment overrides use.
+    ComputeKey key;
+    key.try_switch_hash = TrySwitchesHash();
+    key.hash = program.hash;
+    std::shared_ptr<PendingKey> claim;
+    {
+        std::scoped_lock lock{pipeline_mutex};
+        if (compute.contains(key)) {
+            return false;
+        }
+        if (const auto it = pending_compute.find(key); it != pending_compute.end()) {
+            // In flight already, or a list build: nothing to move. A creation-time compile that
+            // has not started gets a second job here; whichever runs first takes the claim and
+            // the other returns (RunIdleCompute).
+            if (!it->second->at_creation || it->second->taken.load()) {
+                return false;
+            }
+            claim = it->second;
+        } else {
+            claim = std::make_shared<PendingKey>();
+            claim->outstanding = 1;
+            claim->at_creation = true;
+            pending_compute.emplace(key, claim);
+        }
+    }
+    const u64 queued = ++prefetched_compute;
+    if (queued <= 16 || queued % 256 == 0) {
+        LOG_INFO(Render_Vulkan, "[nvn] compute program {:016x}: compile queued ahead of its dispatch (#{})",
+                 key.hash, queued);
+    }
+    auto job = std::make_shared<IdleCompute>(
+        IdleCompute{key, program, std::move(owner), std::move(claim)});
+    QueueBuild(BuildPriority::Lookahead, [this, job] { RunIdleCompute(*job); });
+    return true;
+}
+
 void PipelineCache::Impl::KickIdle() {
     // Under idle_mutex: the destructor sets `stopping`, then takes the mutex once before it
     // resets the workers, so no runner is queued on a pool that is going away.
@@ -2317,6 +2360,11 @@ void PipelineCache::PrepareProgram(const std::array<StageProgram, STAGE_COUNT>& 
 void PipelineCache::PrepareCompute(const StageProgram& program, std::shared_ptr<const void> owner,
                                    bool idle) {
     impl->PrepareCompute(program, std::move(owner), idle);
+}
+
+bool PipelineCache::PrefetchCompute(const StageProgram& program,
+                                    std::shared_ptr<const void> owner) {
+    return impl->PrefetchCompute(program, std::move(owner));
 }
 
 void PipelineCache::NoteReplacedDispatch(u64 hash) {

@@ -543,6 +543,10 @@ struct PipelineCache::Impl {
     /// Queues the compile of a compute program's pipeline when the game creates it (see
     /// PipelineCache::PrepareCompute).
     void PrepareCompute(const StageProgram& program, std::shared_ptr<const void> owner, bool idle);
+    /// Queues the compile of a compute pipeline a submission is about to dispatch, ahead of the
+    /// other queued builds (see PipelineCache::PrefetchCompute). True when a job was queued.
+    bool PrefetchCompute(const StageProgram& program, std::shared_ptr<const void> owner);
+    std::atomic<u64> prefetched_compute{};
     /// A creation-time compute compile waiting in the idle queue.
     struct IdleCompute {
         ComputeKey key;
@@ -732,11 +736,18 @@ struct PipelineCache::Impl {
     // (nvn_pipeline_cache_disk.cpp; the file formats are in nvn_pipeline_disk.h)
     /// Builds of the preload workers in priority order: a queued runner takes the most urgent job
     /// when it starts, so a state list build never waits behind creation-time compiles.
-    enum class BuildPriority : u32 { ListCompute = 0, ListGraphics = 1, CreationCompute = 2 };
+    /// Lookahead: compute pipelines a submission is about to dispatch (PrefetchCompute), ahead
+    /// of everything else queued.
+    enum class BuildPriority : u32 {
+        Lookahead = 0,
+        ListCompute = 1,
+        ListGraphics = 2,
+        CreationCompute = 3,
+    };
     void QueueBuild(BuildPriority priority, std::function<void()> job);
     void RunNextBuild();
     std::mutex build_mutex;
-    std::array<std::deque<std::function<void()>>, 3> build_queues;
+    std::array<std::deque<std::function<void()>>, 4> build_queues;
     /// Program bytes a state list build owns (from the store or copied at program creation).
     using SharedProgram = std::shared_ptr<const OwnedProgram>;
     /// Where a state list build was decided (counters only).

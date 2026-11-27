@@ -521,6 +521,13 @@ public:
     /// A program recognised as a game's upscaling network is never skipped by either set.
     void PrepareCompute(const StageProgram& program, std::shared_ptr<const void> owner,
                         bool idle = false);
+    /// Replay thread, lookahead: a compute program the current command list dispatches further
+    /// on and whose pipeline is not built yet. Its compile goes ahead of every other queued
+    /// build on the workers, whatever the never-dispatched sets say (it is about to be
+    /// dispatched); a creation-time compile not started yet is moved forward the same way.
+    /// The dispatch then finds it built or in flight instead of compiling it on the replay
+    /// thread after the one before it. True when a compile was queued.
+    bool PrefetchCompute(const StageProgram& program, std::shared_ptr<const void> owner);
     /// Replay thread: the game dispatched compute program `hash` but the host replaced the
     /// dispatch (HLE upscale stage), so the program itself did not run. Counts as dispatched for
     /// the never-dispatched set and the state list's creation records.
