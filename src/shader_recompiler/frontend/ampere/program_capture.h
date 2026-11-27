@@ -158,6 +158,11 @@ inline bool CaptureBranchLandsIn(std::span<const Instruction> code, u32 first, u
 // that spelling writing the register. On the uniform side the nearest earlier writer of the register of any
 // kind must be that instruction, so a selector that is modified in between is not tracked. A branch that does
 // not match is simply not tracked (the direct front end then refuses the program).
+// Largest clamp N accepted (N + 1 table entries). The entries are read from the program's own constant
+// segment and only targets inside the capture are kept, so the bound is a sanity limit: Kirby Air Riders'
+// compute programs clamp a selector at 30 (IMNMX.U32 R2, R2, 0x1e, PT; 31 entries).
+inline constexpr u32 MaximumTableClamp = 255;
+
 inline std::vector<CaptureIndirectBranch> TrackCaptureIndirectBranches(std::span<const Instruction> code) {
     std::vector<CaptureIndirectBranch> result;
     const auto unguarded = [](const Instruction& instruction, u32 opcode) {
@@ -219,7 +224,8 @@ inline std::vector<CaptureIndirectBranch> TrackCaptureIndirectBranches(std::span
             const u32 condition = select.Bits(87, 3);
             const u32 maximum = select.words[1];
             if (!unguarded(select, 0x887) || select.Bits(16, 8) != bounded_selector || select.Bits(24, 8) >= 63 ||
-                condition == 7 || maximum < 1 || maximum > 15 || select.words[2] != (0x08000000U | (condition << 23)))
+                condition == 7 || maximum < 1 || maximum > MaximumTableClamp ||
+                select.words[2] != (0x08000000U | (condition << 23)))
                 continue;
             const auto is_compare = [&](const Instruction& instruction) {
                 return instruction.words[0] == (0x0000788cU | (select.Bits(24, 8) << 24)) &&
@@ -271,7 +277,8 @@ inline std::vector<CaptureIndirectBranch> TrackCaptureIndirectBranches(std::span
         // IMNMX.U32 Rc, Rx, N, PT
         const auto clamp_index = nearest(*shift_index, [&](const Instruction& instruction) {
             return unguarded(instruction, 0x817) && instruction.Bits(16, 8) == bounded_selector &&
-                   instruction.words[1] >= 1 && instruction.words[1] <= 15 && instruction.words[2] == 0x03800000;
+                   instruction.words[1] >= 1 && instruction.words[1] <= MaximumTableClamp &&
+                   instruction.words[2] == 0x03800000;
         });
         if (!clamp_index)
             continue;
