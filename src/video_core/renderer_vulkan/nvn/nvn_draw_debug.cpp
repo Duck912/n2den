@@ -440,7 +440,12 @@ void DrawContext::DebugOnDraw(u32 mode) {
         const char* env = std::getenv("EDEN_NX2_NVN_PEEK_VS");
         return env != nullptr ? std::strtoull(env, nullptr, 16) : 0ull;
     }();
-    if (peek_vs != 0 && ProfStageHash(0) == peek_vs) {
+    // EDEN_NX2_NVN_PEEK_VS=1: every draw whose vertex stage binds one buffer as storage slots 6
+    // and 7 (the per-object ambient records).
+    const bool records_draw = peek_vs == 1 && stages[0].storage.size() > 7 &&
+                              stages[0].storage[7].address != 0 &&
+                              stages[0].storage[7].address == stages[0].storage[6].address;
+    if (peek_vs != 0 && (ProfStageHash(0) == peek_vs || records_draw)) {
         if (VC::GuestMemory* const memory = impl.guest.load(std::memory_order_acquire)) {
             for (u32 slot = 0; slot < stages[0].storage.size(); ++slot) {
                 const BufferBinding& b = stages[0].storage[slot];
@@ -461,6 +466,37 @@ void DrawContext::DebugOnDraw(u32 mode) {
                 std::memcpy(&g620, &w620, 4);
                 line += fmt::format(" vsssbo{}@{:#x}[288]=({:.4g},{:.4g},{:.4g}) [504]={:.4g} [620]={:.4g}",
                                     slot, b.address, f[0], f[1], f[2], g504, g620);
+            }
+            // Slot 7 holds the per-object ambient cubes (8 x vec4 per object) the vertex stage
+            // blends: its first 256 bytes.
+            if (stages[0].storage.size() > 7 && stages[0].storage[7].address != 0) {
+                const BufferBinding& b = stages[0].storage[7];
+                if (Debug::Get().watch_address == 3) {
+                    // EDEN_NX2_NVN_WATCH=peek (+ EDEN_NX2_NVN_PEEK=0:0:0:<words>): the GPU view
+                    // of these records right after this draw.
+                    peek_address = b.address;
+                }
+                std::array<float, 1024> words{};
+                const u64 bytes = (std::min)(u64{b.size}, u64{sizeof(words)});
+                memory->Read(b.address, words.data(), bytes);
+                line += fmt::format(" amb7@{:#x}/{:#x}=[", b.address, b.size);
+                for (u64 rec = 0; rec < bytes / 128; ++rec) {
+                    float max_rgb = 0.0f;
+                    float sum_w = 0.0f;
+                    for (u64 v = 0; v < 8; ++v) {
+                        const float* f = &words[rec * 32 + v * 4];
+                        max_rgb = (std::max)({max_rgb, f[0], f[1], f[2]});
+                        sum_w += f[3];
+                    }
+                    line += fmt::format("{}{:.3g}/{:.3g}", rec == 0 ? "" : " ", max_rgb, sum_w);
+                }
+                line += "]";
+                // The object's record index (vertex stage: slot 0 word at +460 past the object).
+                if (stages[0].storage[0].address != 0) {
+                    std::array<u32, 8> idx{};
+                    memory->Read(stages[0].storage[0].address + 456, idx.data(), sizeof(idx));
+                    line += fmt::format(" s0[456..]={} {} {} {}", idx[0], idx[1], idx[2], idx[3]);
+                }
             }
         }
     }

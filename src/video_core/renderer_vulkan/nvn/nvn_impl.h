@@ -510,6 +510,7 @@ struct Storage : std::enable_shared_from_this<Storage> {
     /// exists for the CPU to read). Guest-byte changes are then ours: the sampled watch does not
     /// treat them as CPU rewrites (the page tracker still sees real CPU writes).
     bool cpu_writeback{false};
+    bool writeback_logged{false}; ///< its first write-back was logged (RecordTexWriteBacks)
     /// The storage's pages were armed in its pool's `takeover_track` when the GPU took it over:
     /// GuestMemory::AnyWritten over them tells whether the CPU wrote them since (any bytes, also
     /// the same ones again, which the signature cannot see).
@@ -716,6 +717,14 @@ struct InFlight {
         u64 pitch{};
         u64 row_bytes{};
         u32 rows{};
+        /// Block-linear (EDEN_NX2_TRY_TEX_WRITEBACK=2): the guest bytes the swizzled level spans
+        /// (0: linear rows at `pitch`), and its tiling.
+        u64 swizzled_size{};
+        u32 tile_h{};
+        u32 tile_d{};
+        u32 cols{};
+        u32 block_bytes{};
+        bool native_gob{};
     };
     std::vector<TexWriteBack> tex_writebacks;
     /// Render target dumps (EDEN_NX2_NVN_DUMP_TARGETS), written at completion.

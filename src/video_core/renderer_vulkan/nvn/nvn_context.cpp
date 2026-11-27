@@ -31,6 +31,7 @@
 #include "video_core/nvn/prerec_probe.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/framebuffer_layout.h"
+#include "video_core/textures/decoders.h"
 #include "video_core/renderer_base.h"
 #include "video_core/upscaler.h"
 #include "video_core/renderer_vulkan/nvn/nvn_draw.h"
@@ -1401,6 +1402,18 @@ void Context::Impl::CompleteMain() {
                 const std::span<const u8> mapped = wb.buffer.Mapped();
                 const bool host = wb.pool->HasHost();
                 if (!host && memory == nullptr) {
+                    continue;
+                }
+                if (wb.swizzled_size != 0) {
+                    if (host) {
+                        Tegra::Texture::SwizzleTexture(
+                            std::span<u8>{wb.pool->HostRaw() + wb.pool_offset,
+                                          static_cast<size_t>(wb.swizzled_size)},
+                            mapped.first(static_cast<size_t>(wb.row_bytes) * wb.rows),
+                            wb.block_bytes, wb.cols, wb.rows, 1, wb.tile_h, wb.tile_d, 0,
+                            wb.native_gob);
+                    }
+                    written.fetch_add(1, std::memory_order_relaxed);
                     continue;
                 }
                 for (u32 row = 0; row < wb.rows; ++row) {

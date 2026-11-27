@@ -2624,6 +2624,9 @@ namespace {
 /// EDEN_NX2_TRY_TEX_WRITEBACK (default 1) and EDEN_NX2_NVN_TEX_WRITEBACK_MAX_KIB (default 1024).
 struct TexWriteBackConfig {
     bool on{true};
+    /// EDEN_NX2_TRY_TEX_WRITEBACK=2 (experiment): block-linear textures too (one 2D level and
+    /// layer), swizzled into the guest bytes at completion.
+    bool block_linear{false};
     u64 max_bytes{u64{1024} << 10};
 };
 const TexWriteBackConfig& TexWriteBackSettings() {
@@ -2631,6 +2634,7 @@ const TexWriteBackConfig& TexWriteBackSettings() {
         TexWriteBackConfig c;
         if (const char* v = std::getenv("EDEN_NX2_TRY_TEX_WRITEBACK"); v != nullptr && *v != '\0') {
             c.on = v[0] != '0';
+            c.block_linear = v[0] == '2';
         }
         if (const char* v = std::getenv("EDEN_NX2_NVN_TEX_WRITEBACK_MAX_KIB"); v != nullptr && *v) {
             c.max_bytes = std::strtoull(v, nullptr, 10) << 10;
@@ -2649,7 +2653,8 @@ const TexWriteBackConfig& TexWriteBackSettings() {
 /// map's exposure), one 2D level and layer, a plain colour format, guest-sized, small.
 bool TexWriteBackEligible(Context::Impl& impl, const Storage& s) {
     const TexWriteBackConfig& config = TexWriteBackSettings();
-    if (!config.on || !IsLinearStorage(s.desc) || s.scaled || s.type != VK_IMAGE_TYPE_2D ||
+    if (!config.on || (!IsLinearStorage(s.desc) && !config.block_linear) || s.scaled ||
+        s.type != VK_IMAGE_TYPE_2D ||
         s.levels != 1 || s.layers != 1 || s.layout.size == 0 || s.layout.size > config.max_bytes) {
         return false;
     }
@@ -2679,11 +2684,30 @@ void Recorder::RecordTexWriteBacks() {
         const u64 cols = (width + bw - 1) / bw;
         const u32 rows = (height + bh - 1) / bh;
         const u64 row_bytes = cols * block.bytes;
+        const bool linear = IsLinearStorage(s.desc);
         const u64 pitch = s.layout.layer_size / rows;
-        if (pitch < row_bytes || s.pool_offset + pitch * (rows - 1) + row_bytes > pool->size) {
-            continue;
+        u32 tile_h = 0;
+        u32 tile_d = 0;
+        u64 swizzled_size = 0;
+        if (linear) {
+            if (pitch < row_bytes || s.pool_offset + pitch * (rows - 1) + row_bytes > pool->size) {
+                continue;
+            }
+        } else {
+            TextureLevelTiles(s.desc, 0, tile_h, tile_d);
+            swizzled_size = Tegra::Texture::CalculateSize(true, block.bytes, static_cast<u32>(cols),
+                                                          rows, 1, tile_h, tile_d);
+            if (!pool->HasHost() || s.pool_offset + swizzled_size > pool->size) {
+                continue;
+            }
         }
         InFlight::TexWriteBack entry;
+        entry.swizzled_size = swizzled_size;
+        entry.tile_h = tile_h;
+        entry.tile_d = tile_d;
+        entry.cols = static_cast<u32>(cols);
+        entry.block_bytes = block.bytes;
+        entry.native_gob = UsesNativeGobOrder(s);
         entry.buffer = impl.CreateHostBuffer(row_bytes * rows, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                              MemoryUsage::Download);
         entry.pool = pool_it->second;
@@ -2706,6 +2730,11 @@ void Recorder::RecordTexWriteBacks() {
         barrier_pending = true;
         host_barrier_needed = true;
         // From now on its guest bytes follow its GPU contents: not CPU rewrites (Storage).
+        if (!s.writeback_logged) {
+            s.writeback_logged = true;
+            LOG_INFO(Render_Vulkan, "[nvn] texture write-back: {}x{} fmt {:#x} pool {:x}+{:#x} ({} B)",
+                     width, height, s.desc.format, s.pool_serial, s.pool_offset, row_bytes * rows);
+        }
         s.cpu_writeback = true;
         s.gpu_guest_sig_valid = false;
         flight.tex_writebacks.push_back(std::move(entry));
@@ -4604,6 +4633,19 @@ void Recorder::ClearTexture(const VC::ClearTexturePayload& p) {
                  words[0], words[1], words[2], words[3], p.region.x, p.region.y, p.region.width,
                  p.region.height, p.region.z, p.region.depth, p.layer_count, ref_layer, s.layers,
                  static_cast<int>(s.type));
+    }
+    // Experiment: EDEN_NX2_NVN_SKIP_CLEAR=<width>x<height> drops the clears of textures that size,
+    // so they keep the guest bytes (and stay CPU-written).
+    static const std::pair<u32, u32> skip_clear = [] {
+        std::pair<u32, u32> r{0, 0};
+        if (const char* env = std::getenv("EDEN_NX2_NVN_SKIP_CLEAR")) {
+            std::sscanf(env, "%ux%u", &r.first, &r.second);
+        }
+        return r;
+    }();
+    if (skip_clear.first != 0 && s.extent.width == skip_clear.first &&
+        (skip_clear.second == 0 || s.extent.height == skip_clear.second)) [[unlikely]] {
+        return;
     }
     EnsureContents(s, everything);
     if (full_level) {
