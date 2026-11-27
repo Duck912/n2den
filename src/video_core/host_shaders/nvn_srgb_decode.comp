@@ -1,0 +1,35 @@
+// SPDX-FileCopyrightText: Copyright 2026 n2den contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+
+// NVN HLE (Vulkan::Nvn::SinkDlss): the sRGB decode a replaced upscaling network ends with. Kirby
+// Air Riders' network reads display-encoded colour (its last post pass applied the sRGB curve)
+// and stores linear colour, which the game's final pass encodes again (sqrt). DLSS keeps the
+// input's encoding, so its output is decoded here, in place, with the network's own curve:
+// c < 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055)^2.4.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, rgba16f) uniform image2D picture;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 size;
+} pc;
+
+vec3 Decode(vec3 c) {
+    c = max(c, vec3(0.0));
+    const vec3 low = c * (1.0 / 12.92);
+    const vec3 high = pow(c * (1.0 / 1.055) + vec3(0.055 / 1.055), vec3(2.4));
+    return mix(low, high, greaterThanEqual(c, vec3(0.04045)));
+}
+
+void main() {
+    const uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(pixel, pc.size))) {
+        return;
+    }
+    vec4 value = imageLoad(picture, ivec2(pixel));
+    value.rgb = Decode(value.rgb);
+    imageStore(picture, ivec2(pixel), value);
+}

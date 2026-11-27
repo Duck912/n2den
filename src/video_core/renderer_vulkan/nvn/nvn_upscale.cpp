@@ -14,6 +14,7 @@
 // evaluate; FSR1 or bilinear otherwise, a failed DLSS evaluation included, so a texture the game
 // expects to be written never stays unwritten.
 
+#include <cstring>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -313,6 +314,7 @@ bool DrawContext::EvaluateDlss(const UpscaleJob& job, bool dlaa,
     // game's own DLSS keeps its flags (an exposure image is not tagged: auto exposure instead).
     const bool hdr = job.host_inputs ? IsFloatColour(in.color.format) : job.hdr_color;
     in.hdr = Overridden(hdr_env, hdr);
+    in.decode_srgb_output = job.decode_srgb_output && !in.hdr;
     in.auto_exposure = Overridden(
         auto_exposure_env, job.host_inputs
                                ? in.hdr
@@ -827,6 +829,27 @@ bool DrawContext::UpscaleNetwork(const VideoCore::Upscaler::Rect& input_rect,
     job.input_rect = input_rect;
     job.output_rect = output_rect;
     job.host_inputs = true;
+    // The network's own input (no packing prepass) in a non-float format is display-encoded
+    // colour. A network whose code holds the sRGB decode's constants (x / 12.92 and
+    // ((x + 0.055) / 1.055)^2.4: 0.0773994, 0.947867, 2.4) stores linear colour (Kirby Air
+    // Riders: its final pass encodes it again with sqrt), so DLSS's output is decoded too.
+    if (colour->serial == network_input->serial && !IsFloatColour(colour->host.format)) {
+        if (const auto program = impl.programs.find(bound.program_serial);
+            program != impl.programs.end() && program->second) {
+            const std::vector<u8>& code = program->second->code[STAGE_COMPUTE];
+            const auto holds = [&code](u32 value) {
+                for (size_t at = 0; at + 4 <= code.size(); at += 4) {
+                    u32 word;
+                    std::memcpy(&word, code.data() + at, sizeof(word));
+                    if (word == value) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            job.decode_srgb_output = holds(0x3d9e8391u) && holds(0x3f72a76fu) && holds(0x4019999au);
+        }
+    }
     job.scene_depth_serial = depth ? depth->serial : 0;
     // The Resolution setting: the scene was drawn at the scaled size, and the upscaler is fed the
     // twin (and the depth twin) with the rectangle in its pixels; anything the twins cannot serve

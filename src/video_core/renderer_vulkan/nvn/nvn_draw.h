@@ -638,6 +638,9 @@ private:
         /// depth itself, because the game has no such inputs (NDSR binds colour only). Otherwise
         /// the evaluation needs the game's depth and motion vectors.
         bool host_inputs{};
+        /// A replaced network that reads display-encoded colour and stores linear colour (its
+        /// code ends with the sRGB decode): DLSS's output is decoded (SinkDlss).
+        bool decode_srgb_output{};
         float jitter[2]{}; ///< pixels
         /// Streamline's mvecScale: the game's motion vectors times it are normalized.
         float motion_scale[2]{1.0f, 1.0f};

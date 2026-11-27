@@ -60,6 +60,9 @@ public:
         bool motion_vectors_jittered{};
         bool depth_inverted{};
         bool hdr{};           ///< linear colour (colorBuffersHDR)
+        /// The colour is display-encoded (sRGB) and the replaced network stores linear colour:
+        /// the output is decoded with the sRGB curve after the evaluation (nvn_srgb_decode.comp).
+        bool decode_srgb_output{};
         bool auto_exposure{}; ///< DLSS computes the exposure (no exposure image is tagged)
         f32 pre_exposure{1.0f};
         /// The caller's history reset (the game's flag); the size/gap/feature rules add to it.
@@ -152,6 +155,8 @@ private:
     /// a game makes a new DLSS id per nvnDlss initialisation. Their flights retired long ago.
     void RetireIdleViewports(u64 present, u32 keep);
     void Fail(const char* what, int result);
+    /// The sRGB decode pass over the output (made on first use); false when it cannot run.
+    bool EnsureDecodePass();
 
     const Device& device;
     MemoryAllocator& allocator;
@@ -165,6 +170,11 @@ private:
     f32 far_depth_value{-1.0f};
     u64 evaluations{};
     bool failed{};
+    vk::DescriptorSetLayout decode_set_layout;
+    vk::PipelineLayout decode_layout;
+    vk::ShaderModule decode_module;
+    vk::Pipeline decode_pipeline;
+    bool decode_failed{};
 };
 
 } // namespace Vulkan::Nvn

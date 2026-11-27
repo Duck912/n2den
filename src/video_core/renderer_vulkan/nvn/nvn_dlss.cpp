@@ -14,6 +14,8 @@
 // so the two users can never share a DLSS history.
 
 #include <algorithm>
+#include <array>
+#include <span>
 #include <cstdlib>
 #include <mutex>
 #include <set>
@@ -28,6 +30,7 @@
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 
 #ifdef EGLANTINE_STREAMLINE
+#include "video_core/host_shaders/nvn_srgb_decode_comp_spv.h"
 #include "video_core/vulkan_common/streamline.h"
 #include "video_core/vulkan_common/streamline_api.h"
 #endif
@@ -750,12 +753,55 @@ bool SinkDlss::Evaluate(vk::CommandBuffer cmd, const Inputs& in,
         Fail("slEvaluateFeature (DLSS)", static_cast<int>(result));
         return false;
     }
-    // DLSS's writes (compute, or a clear) before the caller's transfer read of the output.
-    cmd.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                        ImageBarrier(output_image,
-                                     VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
-                                     VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
-                                     VK_IMAGE_LAYOUT_GENERAL));
+    if (in.decode_srgb_output && EnsureDecodePass()) {
+        // The replaced network stores linear colour from its display-encoded input: decode
+        // DLSS's output in place (nvn_srgb_decode.comp), then hand it to the transfer read.
+        cmd.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0,
+                            ImageBarrier(output_image,
+                                         VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                                         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL));
+        const VkDescriptorImageInfo picture_info{
+            .sampler = VK_NULL_HANDLE,
+            .imageView = *state.output->view,
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        const std::array<VkWriteDescriptorSet, 1> writes{{{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = nullptr,
+            .dstSet = VK_NULL_HANDLE,
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .pImageInfo = &picture_info,
+            .pBufferInfo = nullptr,
+            .pTexelBufferView = nullptr,
+        }}};
+        const std::array<u32, 2> size{in.output.width, in.output.height};
+        cmd.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *decode_pipeline);
+        cmd.PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_COMPUTE, *decode_layout, 0, writes);
+        cmd.PushConstants(*decode_layout, VK_SHADER_STAGE_COMPUTE_BIT, size);
+        cmd.Dispatch((in.output.width + 7) / 8, (in.output.height + 7) / 8, 1);
+        cmd.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                            ImageBarrier(output_image, VK_ACCESS_SHADER_WRITE_BIT,
+                                         VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                                         VK_IMAGE_LAYOUT_GENERAL));
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LOG_INFO(Render_Vulkan, "[nvn] dlss: the replaced network stores linear colour from "
+                                    "sRGB input: DLSS's output is decoded (sRGB curve)");
+        }
+    } else {
+        // DLSS's writes (compute, or a clear) before the caller's transfer read of the output.
+        cmd.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                            ImageBarrier(output_image,
+                                         VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                                         VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                                         VK_IMAGE_LAYOUT_GENERAL));
+    }
     state.evaluated = true;
     state.last_present = in.present;
     {
@@ -790,6 +836,85 @@ bool SinkDlss::Evaluate(vk::CommandBuffer cmd, const Inputs& in,
         LOG_INFO(Render_Vulkan, "[nvn] dlss: {} evaluations ({}x{} -> {}x{} mode {}{})",
                  evaluations, render.width, render.height, in.output.width, in.output.height,
                  ModeName(static_cast<sl::DLSSMode>(mode)), reset ? ", reset" : "");
+    }
+    return true;
+}
+
+bool SinkDlss::EnsureDecodePass() {
+    if (decode_pipeline) {
+        return true;
+    }
+    if (decode_failed) {
+        return false;
+    }
+    if (!device.IsKhrPushDescriptorSupported()) {
+        decode_failed = true;
+        LOG_WARNING(Render_Vulkan, "[nvn] dlss: no push descriptors: the output of a network "
+                                   "that stores linear colour is not decoded");
+        return false;
+    }
+    try {
+        const vk::Device& logical = device.GetLogical();
+        const VkDescriptorSetLayoutBinding binding{
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .pImmutableSamplers = nullptr,
+        };
+        decode_set_layout = logical.CreateDescriptorSetLayout({
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+            .bindingCount = 1,
+            .pBindings = &binding,
+        });
+        const VkPushConstantRange push_range{
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .offset = 0,
+            .size = 2 * sizeof(u32),
+        };
+        decode_layout = logical.CreatePipelineLayout({
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .setLayoutCount = 1,
+            .pSetLayouts = decode_set_layout.address(),
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &push_range,
+        });
+        const std::span<const u32> code = NVN_SRGB_DECODE_COMP_SPV;
+        decode_module = logical.CreateShaderModule({
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .codeSize = static_cast<u32>(code.size_bytes()),
+            .pCode = code.data(),
+        });
+        decode_pipeline = logical.CreateComputePipeline(
+            VkComputePipelineCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .module = *decode_module,
+                    .pName = "main",
+                    .pSpecializationInfo = nullptr,
+                },
+                .layout = *decode_layout,
+                .basePipelineHandle = {},
+                .basePipelineIndex = 0,
+            },
+            VK_NULL_HANDLE);
+    } catch (const vk::Exception& exception) {
+        decode_failed = true;
+        LOG_ERROR(Render_Vulkan, "[nvn] dlss: the sRGB decode pass could not be made ({})",
+                  exception.what());
+        return false;
     }
     return true;
 }

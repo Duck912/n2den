@@ -21,6 +21,7 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/nvn_bc_copy.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/nvn_counter.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/nvn_dlss_motion.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/nvn_srgb_decode.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/nvn_mesh_indirect.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/nvn_vertex_stage.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/nvn_wb_merge.comp
