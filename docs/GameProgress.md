@@ -1,6 +1,6 @@
 # Game progress
 
-Last updated: 2026-11-24.
+Last updated: 2026-11-27.
 
 This page tracks how far each tested Switch 2 game gets in n2den, per graphics backend, and what is known to
 be wrong. It only lists what has actually been run; a game that is not here has not been tested.
@@ -32,6 +32,7 @@ for n2den's own changes, not as what another machine will reach.
 | Donkey Kong Bananza | In-game | In-game | Not tested |
 | Xenoblade Chronicles 2 – Nintendo Switch 2 Edition | Not tested | In-game | Not tested |
 | Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition | Not tested | In-game | Not tested |
+| Kirby Air Riders | Boots | Playable | Not tested |
 
 "Prepared launch" means the game's CPU code and graphics pipelines are built before play starts, so that
 nothing has to be compiled while playing.
@@ -191,3 +192,22 @@ Tested from a `.nup` container with the base game and add-on: boot to 3D gamepla
 - **Emulated GPU:** not tested.
 - **Fixed on the way:** garbled menus and fonts (classic texture tiling order, as for Xenoblade Chronicles 2).
 
+## Kirby Air Riders
+
+Test scene: the title screen's attract demo (races and rider showcases) and gameplay.
+
+- **NVN-HLE (Vulkan):** playable. Races run at full speed once the shader cache is built; the first launch
+  stutters while shaders compile.
+- **Emulated GPU:** boots and reaches the attract race, slowly and with dark scenes.
+- **Upscaling:** the game's own upscaling network runs (Console native); NVIDIA DLSS can replace it.
+
+Fixed in 1.0.4:
+
+- The GPU stopped responding when a race started (a driver compiler bug on guarded shared-memory loads).
+- Areas in shadow were black: the per-model light bake and the light probes that light the riders read
+  wrong textures.
+- The picture was washed out when DLSS replaced the game's upscaling network.
+
+Known issues:
+
+- Some stutter while new scenes compile their shaders.
