@@ -355,28 +355,56 @@ std::optional<u32> DrawContext::ReadBindingHandleWord(const VC::DescriptorLayout
     // the same words. A word the game stored holds ids of the pools it bound, like a word read
     // from a uniform buffer.
     VC::GuestMemory* const memory = impl.guest.load(std::memory_order_acquire);
+    // With a draw log in a selected frame, each evaluation is logged with the words it read.
+    const bool hp_trace = dbg.selected && dbg.draw_log != 0;
+    std::string hp_log;
     const auto word = VC::EvaluateHandleProgram(
         binding.handle_program, impl.device.GetStorageBufferAlignment(),
         [&](u32 bank, u32 offset) -> u32 {
+            u32 v = 0;
             if (bank >= VC::FirstUniformBank) {
-                return ReadUniformWord(stage, bank - VC::FirstUniformBank, offset).value_or(0);
+                v = ReadUniformWord(stage, bank - VC::FirstUniformBank, offset).value_or(0);
+            } else if (bank == VC::HandleBank) {
+                // A word of the handle bank: what the game bound with bindTexture / bindSampler
+                // (Kirby Air Riders' programs OR the separate texture and sampler words,
+                // c2[0x168] | c2[0x568]). The bound words are kept in global ids; the program's
+                // result is rebased below, so the word goes back to the bound pools' ids first.
+                const VC::HandleClassification classified =
+                    VC::ClassifyHandleWord(bank, offset, VC::HandleWant::Texture);
+                if (classified.source != VC::HandleSource::Unsupported) {
+                    const VC::HandleRef ref{classified.source, classified.slot, bank, offset};
+                    const u32 global = ReadHandleWord(stage, ref).value_or(0);
+                    u32 texture_id = global & 0xFFFFF;
+                    u32 sampler_id = global >> 20;
+                    if (texture_id != 0) {
+                        texture_id -= texture_pool_base;
+                    }
+                    if (sampler_id != 0) {
+                        sampler_id -= sampler_pool_base;
+                    }
+                    v = texture_id | sampler_id << 20;
+                }
             }
-            return 0;
+            if (hp_trace) hp_log += fmt::format(" c{}[{:#x}]={:#x}", bank, offset, v);
+            return v;
         },
         [&](u32 index) -> VC::HandleProgramBuffer {
             for (const VC::DescriptorBinding& storage : layout.bindings) {
                 if (storage.role == VC::DescriptorRole::StorageBuffer &&
                     storage.stage == binding.stage && storage.storage_index == index) {
                     const BufferBinding resolved = ResolveStorageBinding(storage, 0);
+                    if (hp_trace) hp_log += fmt::format(" ssbo{}={:#x}/{:#x}", index, resolved.address, resolved.size);
                     return {resolved.address, resolved.size};
                 }
             }
+            if (hp_trace) hp_log += fmt::format(" ssbo{}=none", index);
             return {};
         },
         [&](u64 address) -> std::optional<u32> {
             u32 value = 0;
             VC::PreRec::NoteRead(VC::PreRec::Cls::HandleMem, address, sizeof(value));
             const bool ok = memory != nullptr && memory->Read(address, &value, sizeof(value));
+            if (hp_trace) hp_log += fmt::format(" m[{:#x}]={}", address, ok ? fmt::format("{:#x}", value) : std::string{"unreadable"});
             if (VC::PreRec::Detail::ra_ahead) [[unlikely]] {
                 impl.RaNoteHandleWord(address, ok ? value : 0, ok);
             }
@@ -385,6 +413,12 @@ std::optional<u32> DrawContext::ReadBindingHandleWord(const VC::DescriptorLayout
             }
             return value;
         });
+    if (hp_trace) {
+        std::string code;
+        for (const u32 w : binding.handle_program) code += fmt::format("{:x} ", w);
+        LOG_INFO(Render_Vulkan, "[hp] f{} #{} stage{} prog=[{}] reads:{} -> {}", dbg.frame, dbg.draw_index,
+                 stage, code, hp_log, word ? fmt::format("{:#x}", *word) : std::string{"none"});
+    }
     if (!word) {
         return std::nullopt;
     }
@@ -1679,10 +1713,13 @@ bool DrawContext::BuildDescriptors(PipelineBase& pipe, DrawPlan& plan, bool grap
                     ++counters.descriptors_unsupported;
                     const std::string detail =
                         Debug::Tracing()
-                            ? fmt::format("stage{} word={:#x} tex={:x} target={} shader_type={}", stage,
+                            ? fmt::format("stage{} word={:#x} tex={:x} target={} shader_type={} src={} slot={} bank={} off={:#x} id={}", stage,
                                           texture_word, texture ? texture->serial : 0,
                                           texture ? texture->desc.target : -1,
-                                          static_cast<int>(binding.type))
+                                          static_cast<int>(binding.type),
+                                          static_cast<int>(texture_ref.source), texture_ref.slot,
+                                          texture_ref.bank, texture_ref.byte_offset,
+                                          VC::TextureIdOf(texture_word))
                             : std::string{};
                     if (!texture) {
                         NoteFallback(graphics, DescReason::TextureNoHandle, detail);
