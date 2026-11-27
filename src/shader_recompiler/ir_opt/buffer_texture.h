@@ -358,7 +358,13 @@ inline bool ContainsLoadedHandle(IR::Value value) {
         const auto* inst = current.TryInstRecursive();
         if (!inst || !visited.insert(inst).second) continue;
         switch (inst->GetOpcode()) {
-        case IR::Opcode::GetCbufU32: case IR::Opcode::GetCbufU32x2: break;
+        case IR::Opcode::GetCbufU32: case IR::Opcode::GetCbufU32x2:
+            // A constant buffer word at a run-time offset is a table read per invocation (Kirby
+            // Air Riders' ambient-probe compute 701e7438 takes its texture-array handles from
+            // c4[R45], a 32 KiB handle table): looked up in the texture pool like a loaded
+            // handle. A word at a fixed offset is the same for the whole draw.
+            if (!inst->Arg(1).IsImmediate()) return true;
+            break;
         case IR::Opcode::LoadStorageU8: case IR::Opcode::LoadStorageS8:
         case IR::Opcode::LoadStorageU16: case IR::Opcode::LoadStorageS16:
         case IR::Opcode::LoadStorage32: case IR::Opcode::LoadStorage64: case IR::Opcode::LoadStorage128:
