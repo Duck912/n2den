@@ -1464,6 +1464,129 @@ void Context::Impl::CompleteMain() {
                     }
                 }
                 static u64 scans = 0;
+                // EDEN_NX2_NVN_LINKSCAN_DUMP=<dir>: write the previous scan (before) and this one
+                // (after) for the first few events: a node becoming self-linked, or (with the
+                // extra ranges counters 0x40 + free ring 0x4000 + headers) a node index that is in
+                // the free ring twice (a double free).
+                static std::vector<u8> previous;
+                static std::string previous_tag;
+                static u32 dumps = 0;
+                static u32 double_free_logs = 0;
+                static const char* const dump_dir = std::getenv("EDEN_NX2_NVN_LINKSCAN_DUMP");
+                const std::span<const u8> all{bytes.data(), watch.total != 0 ? watch.total : watch.size};
+                bool fresh = false;
+                for (const u32 node : self) {
+                    fresh |= std::find(last.begin(), last.end(), node) == last.end();
+                }
+                std::string why = fresh ? "self link" : "";
+                if (all.size() >= watch.size + 0x40 + 0x4000) {
+                    const auto word = [&](u64 at) {
+                        u32 v;
+                        std::memcpy(&v, all.data() + at, 4);
+                        return v;
+                    };
+                    const u64 counters = watch.size;
+                    const u64 ring = watch.size + 0x40;
+                    const u32 cap = word(counters + 4);
+                    const u32 alloc = word(counters + 0x18);
+                    const u32 freed = word(counters + 0x1c);
+                    if (cap == 0x1000) {
+                        // Available node indices: ring positions [alloc, freed + cap).
+                        std::vector<u32> seen(cap, 0xffffffffu);
+                        const u32 available = freed + cap - alloc;
+                        u32 dup_value = 0xffffffffu;
+                        u32 dup_a = 0;
+                        u32 dup_b = 0;
+                        for (u32 i = 0; i < available && i < cap; ++i) {
+                            const u32 pos = (alloc + i) % cap;
+                            const u32 value = word(ring + u64{pos} * 4);
+                            if (value < cap) {
+                                if (seen[value] != 0xffffffffu) {
+                                    dup_value = value;
+                                    dup_a = seen[value];
+                                    dup_b = pos;
+                                    break;
+                                }
+                                seen[value] = pos;
+                            }
+                        }
+                        static bool broken = false;
+                        if (!broken && (dup_value != 0xffffffffu || available > cap)) {
+                            broken = true;
+                            why = fmt::format("double free: alloc {} freed {} available {} node {} at "
+                                              "ring {} and {}",
+                                              alloc, freed, available, static_cast<s32>(dup_value),
+                                              dup_a, dup_b);
+                        }
+                        if (previous.size() >= counters + 0x20 && double_free_logs < 40) {
+                            u32 old_alloc;
+                            u32 old_freed;
+                            std::memcpy(&old_alloc, previous.data() + counters + 0x18, 4);
+                            std::memcpy(&old_freed, previous.data() + counters + 0x1c, 4);
+                            if (old_alloc != alloc || old_freed != freed) {
+                                std::string pushed;
+                                for (u32 f = old_freed; f != freed && pushed.size() < 200; ++f) {
+                                    pushed += fmt::format(" {}", word(ring + u64{f % cap} * 4));
+                                }
+                                std::string popped;
+                                for (u32 a = old_alloc; a != alloc && popped.size() < 200; ++a) {
+                                    popped += fmt::format(" {}", word(ring + u64{a % cap} * 4));
+                                }
+                                if (broken) {
+                                    ++double_free_logs;
+                                }
+                                LOG_INFO(Render_Vulkan,
+                                         "[nvn] linkscan alloc {} {}: alloc {}->{} [{}] freed {}->{} [{}]",
+                                         broken ? "AFTER" : "ok", watch.tag, old_alloc, alloc, popped,
+                                         old_freed, freed, pushed);
+                            }
+                        }
+                    }
+                }
+                // List invariant (headers 0xc000 bytes after counters + ring): a cell's head node
+                // has prev -1 and its tail node next -1.
+                if (all.size() >= watch.size + 0x40 + 0x4000 + 0xc000) {
+                    static bool invariant_broken = false;
+                    const u64 headers = watch.size + 0x40 + 0x4000;
+                    for (u32 cell = 0; cell < 0xc000 / 32 && !invariant_broken; ++cell) {
+                        u32 head;
+                        u32 tail;
+                        std::memcpy(&head, all.data() + headers + u64{cell} * 32, 4);
+                        std::memcpy(&tail, all.data() + headers + u64{cell} * 32 + 4, 4);
+                        u32 head_prev = 0xffffffffu;
+                        u32 tail_next = 0xffffffffu;
+                        if (head < nodes) {
+                            std::memcpy(&head_prev, all.data() + u64{head} * 320 + 20, 4);
+                        }
+                        if (tail < nodes) {
+                            std::memcpy(&tail_next, all.data() + u64{tail} * 320 + 16, 4);
+                        }
+                        if (head_prev != 0xffffffffu || tail_next != 0xffffffffu) {
+                            invariant_broken = true;
+                            why = fmt::format("list invariant: cell {} head {} (prev {}) tail {} (next {})",
+                                              cell, static_cast<s32>(head), static_cast<s32>(head_prev),
+                                              static_cast<s32>(tail), static_cast<s32>(tail_next));
+                        }
+                    }
+                }
+                if (!why.empty() && dump_dir != nullptr && dumps < 4 && previous.size() == all.size()) {
+                    ++dumps;
+                    const auto write = [&](const char* which, std::span<const u8> data) {
+                        const std::string path = fmt::format("{}/linkscan{}_{}.bin", dump_dir, dumps, which);
+                        if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
+                            std::fwrite(data.data(), 1, data.size(), f);
+                            std::fclose(f);
+                        }
+                    };
+                    write("before", previous);
+                    write("after", all);
+                    LOG_INFO(Render_Vulkan, "[nvn] linkscan dump {} ({}): before = after {}, after = {}",
+                             dumps, why, previous_tag, watch.tag);
+                } else if (!why.empty() && why != "self link") {
+                    LOG_INFO(Render_Vulkan, "[nvn] linkscan event ({}) at {}", why, watch.tag);
+                }
+                previous.assign(all.begin(), all.end());
+                previous_tag = watch.tag;
                 if (self != last || ++scans % 2000 == 0) {
                     std::string list;
                     for (size_t i = 0; i < self.size() && i < 16; ++i) {

@@ -758,14 +758,28 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
             }
         }
     }
+    bool describe_backing = false;
     if (const auto [scan_address, scan_size] = LinkScanRange();
         scan_address != 0 && bound.storage.size() > 9 &&
         bound.storage[9].address == scan_address) {
         linkscan_program = hash_it->second[STAGE_COMPUTE];
+        static std::unordered_set<u64> described;
+        if (described.insert(linkscan_program).second) {
+            describe_backing = true;
+            std::string line;
+            for (u32 slot = 0; slot < bound.storage.size(); ++slot) {
+                if (bound.storage[slot].address != 0) {
+                    line += fmt::format(" {}:{:#x}/{:#x}", slot, bound.storage[slot].address,
+                                        bound.storage[slot].size);
+                }
+            }
+            LOG_INFO(Render_Vulkan, "[nvn] linkscan program {:016x} {}x{}x{} ssbo{}",
+                     linkscan_program, p.x, p.y, p.z, line);
+        }
     }
     const Debug::Config& backing_config = Debug::Get();
-    if (backing_config.log_backing_program == hash_it->second[STAGE_COMPUTE] &&
-        log_backing_dispatches < backing_config.log_backing_max) {
+    if (describe_backing || (backing_config.log_backing_program == hash_it->second[STAGE_COMPUTE] &&
+                             log_backing_dispatches < backing_config.log_backing_max)) {
         ++log_backing_dispatches;
         for (u32 slot = 0; slot < bound.storage.size(); ++slot) {
             const BufferBinding& storage = bound.storage[slot];

@@ -6307,19 +6307,50 @@ bool Recorder::RecordList(std::span<const u64> list, size_t start, size_t& stop,
             u64 offset{};
             if (ResolvePoolRange(scan_address, scan_size, pool, offset, "LinkScan")) {
                 UploadRange(*pool, offset, scan_size);
+                const auto& extra = DrawContext::LinkScanExtra();
+                std::vector<std::pair<Pool*, u64>> extra_at;
+                u64 total = scan_size;
+                for (const auto& [address, size] : extra) {
+                    Pool* extra_pool{};
+                    u64 extra_offset{};
+                    if (!ResolvePoolRange(address, size, extra_pool, extra_offset, "LinkScan")) {
+                        extra_pool = nullptr;
+                    } else {
+                        UploadRange(*extra_pool, extra_offset, size);
+                    }
+                    extra_at.emplace_back(extra_pool, extra_offset);
+                    total += size;
+                }
                 FlushPending();
                 InFlight::Watch entry;
                 entry.size = static_cast<u32>(scan_size);
+                entry.total = static_cast<u32>(total);
                 entry.link_scan = true;
                 entry.tag = fmt::format("f{} rec {} prog {:016x}", impl.presents_recorded + 1,
                                         records_replayed, program);
-                entry.buffer = impl.CreateHostBuffer(scan_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                entry.buffer = impl.CreateHostBuffer(total, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                                      MemoryUsage::Download);
                 const VkBufferCopy region{.srcOffset = offset, .dstOffset = 0, .size = scan_size};
                 Cmd().CopyBuffer(pool->Handle(), *entry.buffer, region);
+                u64 at = scan_size;
+                for (size_t i = 0; i < extra.size(); ++i) {
+                    if (extra_at[i].first != nullptr) {
+                        const VkBufferCopy extra_region{.srcOffset = extra_at[i].second,
+                                                        .dstOffset = at,
+                                                        .size = extra[i].second};
+                        Cmd().CopyBuffer(extra_at[i].first->Handle(), *entry.buffer, extra_region);
+                    }
+                    at += extra[i].second;
+                }
                 barrier_pending = true;
                 host_barrier_needed = true;
                 flight.watches.push_back(std::move(entry));
+                if (Debug::Get().watch_address > 4 && !Debug::Get().op_log) {
+                    // EDEN_NX2_NVN_WATCH=<addr>:<size> with the link scan: that range after the
+                    // same dispatch (allocator counters next to the node array).
+                    WatchSnapshot(fmt::format("f{} rec {} prog {:016x}", impl.presents_recorded + 1,
+                                              records_replayed, program));
+                }
             }
         }
         if (Debug::Get().watch_address == 3) {

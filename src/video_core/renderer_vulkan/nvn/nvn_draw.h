@@ -440,6 +440,27 @@ public:
         }();
         return range;
     }
+    /// EDEN_NX2_NVN_LINKSCAN_EXTRA=<addr>:<size>[,<addr>:<size>...]: more ranges copied back with
+    /// the link scan, after the node array in the same buffer (allocator counters, free ring,
+    /// list headers).
+    [[nodiscard]] static const std::vector<std::pair<u64, u64>>& LinkScanExtra() {
+        static const std::vector<std::pair<u64, u64>> ranges = [] {
+            std::vector<std::pair<u64, u64>> out;
+            const char* env = std::getenv("EDEN_NX2_NVN_LINKSCAN_EXTRA");
+            while (env != nullptr && *env != 0) {
+                char* end = nullptr;
+                const u64 address = std::strtoull(env, &end, 16);
+                if (end == env || *end != ':') {
+                    break;
+                }
+                const u64 size = std::strtoull(end + 1, &end, 16);
+                out.emplace_back(address, size);
+                env = *end == ',' ? end + 1 : nullptr;
+            }
+            return out;
+        }();
+        return ranges;
+    }
 
 private:
     struct InlineUpdate {

@@ -826,8 +826,28 @@ LoweredEntry PipelineCache::Impl::GetLowered(const StageProgram& program, u32 nv
     }
     // Diagnostic (Kirby Air Riders list freeze investigation): EDEN_NX2_DUMP_PROGRAM=<hex stage hash>: the program's code and
     // control sections are written to nvn_program_<hash>.{code,control} in the working directory.
-    if (const char* dump = std::getenv("EDEN_NX2_DUMP_PROGRAM");
-        dump != nullptr && std::strtoull(dump, nullptr, 16) == program.hash) {
+    // A comma-separated list of hashes, or "all" (every compute program).
+    const auto dump_wanted = [&] {
+        const char* dump = std::getenv("EDEN_NX2_DUMP_PROGRAM");
+        if (dump == nullptr || *dump == 0) {
+            return false;
+        }
+        if (std::strcmp(dump, "all") == 0) {
+            return nvn_stage == STAGE_COMPUTE;
+        }
+        while (*dump != 0) {
+            char* end = nullptr;
+            if (std::strtoull(dump, &end, 16) == program.hash) {
+                return true;
+            }
+            if (end == dump || *end != ',') {
+                break;
+            }
+            dump = end + 1;
+        }
+        return false;
+    };
+    if (dump_wanted()) {
         const auto write = [&](const char* ext, const std::vector<u8>& bytes) {
             const std::string name = fmt::format("nvn_program_{:016x}.{}", program.hash, ext);
             if (std::FILE* f = std::fopen(name.c_str(), "wb")) {
