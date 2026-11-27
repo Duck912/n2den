@@ -59,7 +59,10 @@ Ampere programs are translated as Ampere.
 ## Game progress
 
 Which games boot, how far they get on each graphics backend and what is still wrong is tracked in
-[docs/GameProgress.md](docs/GameProgress.md).
+[docs/GameProgress.md](docs/GameProgress.md). Kirby and the Forgotten Land, Fast Fusion and Kirby Air Riders are
+playable on NVN-HLE; Ocarina of Time, Fire Emblem: Fortune's Weave, Donkey Kong Bananza and both Xenoblade
+Switch 2 Editions get in-game. What changed in each release is in the
+[release notes](https://github.com/Duck912/n2den/releases).
 
 ## Running Switch 2 games
 
