@@ -937,13 +937,39 @@ void PruneCacheFiles(const std::filesystem::path& directory,
             files.emplace_back(time, it->path());
         }
     }
-    if (files.size() < keep) {
-        return;
-    }
-    std::ranges::sort(files, std::greater<>{}, &decltype(files)::value_type::first);
-    for (size_t i = keep - 1; i < files.size(); ++i) {
+    // The driver cache files sit beside their pipeline files (nvn_pipelines.k<key>.vkcache) and
+    // go with them; the old shared file (nvn_pipelines.vkcache, every key in one) is no longer
+    // read, and a driver cache whose pipeline file is gone is never read again either.
+    const auto remove_driver_cache = [](fs::path pipeline_file) {
         std::error_code ignored;
-        fs::remove(files[i].second, ignored);
+        fs::remove(pipeline_file.replace_extension(".vkcache"), ignored);
+    };
+    if (files.size() >= keep) {
+        std::ranges::sort(files, std::greater<>{}, &decltype(files)::value_type::first);
+        for (size_t i = keep - 1; i < files.size(); ++i) {
+            std::error_code ignored;
+            fs::remove(files[i].second, ignored);
+            remove_driver_cache(files[i].second);
+        }
+    }
+    std::vector<fs::path> orphans;
+    for (fs::directory_iterator it{directory, error}, end; !error && it != end;
+         it.increment(error)) {
+        const fs::path& path = it->path();
+        const std::string name = path.filename().string();
+        if (!name.starts_with(stem) || !name.ends_with(".vkcache")) {
+            continue;
+        }
+        fs::path pipeline_file = path;
+        pipeline_file.replace_extension(".bin");
+        std::error_code exists_error;
+        if (name == stem + ".vkcache" || !fs::exists(pipeline_file, exists_error)) {
+            orphans.push_back(path);
+        }
+    }
+    for (const fs::path& orphan : orphans) {
+        std::error_code ignored;
+        fs::remove(orphan, ignored);
     }
 }
 

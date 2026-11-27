@@ -225,7 +225,22 @@ void PipelineCache::Impl::PreloadGraphics(
     key.state = record.state;
     key.targets = record.targets;
     key.Finalize();
+    if (lazy_pipelines) {
+        {
+            std::scoped_lock lock{pipeline_mutex};
+            deferred_graphics[key].push_back(DeferredGraphics{record, std::move(artifacts)});
+        }
+        ++stat_deferred;
+        NotePreloadStep();
+        return;
+    }
+    QueueGraphicsBuild(key, std::move(artifacts), record, true);
+}
 
+void PipelineCache::Impl::QueueGraphicsBuild(const GraphicsKey& key,
+                                             std::array<StageArtifact, GRAPHICS_STAGE_COUNT> artifacts,
+                                             const Disk::GraphicsPipelineRecord& record,
+                                             bool preload) {
     std::shared_ptr<PendingKey> pk;
     {
         std::scoped_lock lock{pipeline_mutex};
@@ -236,7 +251,7 @@ void PipelineCache::Impl::PreloadGraphics(
         pk = slot;
         ++pk->outstanding;
     }
-    workers->QueueWork([this, key, pk, artifacts = std::move(artifacts), record] {
+    workers->QueueWork([this, key, pk, artifacts = std::move(artifacts), record, preload] {
         std::shared_ptr<GraphicsPipeline> pipeline;
         if (!stopping.load()) {
             std::array<const StageArtifact*, GRAPHICS_STAGE_COUNT> stages{};
@@ -247,7 +262,9 @@ void PipelineCache::Impl::PreloadGraphics(
             }
             const auto start = std::chrono::steady_clock::now();
             pipeline = AssembleGraphics(record.state, record.targets, stages);
-            NotePreloadTime(start, false);
+            if (preload) {
+                NotePreloadTime(start, false);
+            }
         }
         {
             std::scoped_lock lock{pipeline_mutex};
@@ -268,9 +285,11 @@ void PipelineCache::Impl::PreloadGraphics(
         }
         pk->cv.notify_all();
         if (pipeline) {
-            ++stat_loaded;
+            ++(preload ? stat_loaded : stat_materialized);
         }
-        NotePreloadStep();
+        if (preload) {
+            NotePreloadStep();
+        }
     });
 }
 
@@ -288,6 +307,20 @@ void PipelineCache::Impl::PreloadCompute(
     key.environment_flags = record.environment_flags;
     key.local_memory_size = record.local_memory_size;
     key.shared_memory_size = record.shared_memory_size;
+    if (lazy_pipelines) {
+        {
+            std::scoped_lock lock{pipeline_mutex};
+            deferred_compute[key].push_back(DeferredCompute{it->second, record.compute_layout});
+        }
+        ++stat_deferred;
+        NotePreloadStep();
+        return;
+    }
+    QueueComputeBuild(key, it->second, record.compute_layout, true);
+}
+
+void PipelineCache::Impl::QueueComputeBuild(const ComputeKey& key, StageArtifact artifact,
+                                            VC::ComputeDriverLayout layout, bool preload) {
     std::shared_ptr<PendingKey> pk;
     {
         std::scoped_lock lock{pipeline_mutex};
@@ -298,12 +331,14 @@ void PipelineCache::Impl::PreloadCompute(
         pk = slot;
         ++pk->outstanding;
     }
-    workers->QueueWork([this, key, pk, artifact = it->second, layout = record.compute_layout] {
+    workers->QueueWork([this, key, pk, artifact = std::move(artifact), layout, preload] {
         std::shared_ptr<ComputePipeline> pipeline;
         if (!stopping.load()) {
             const auto start = std::chrono::steady_clock::now();
             pipeline = AssembleCompute(artifact, layout);
-            NotePreloadTime(start, true);
+            if (preload) {
+                NotePreloadTime(start, true);
+            }
         }
         {
             std::scoped_lock lock{pipeline_mutex};
@@ -324,10 +359,50 @@ void PipelineCache::Impl::PreloadCompute(
         }
         pk->cv.notify_all();
         if (pipeline) {
-            ++stat_loaded;
+            ++(preload ? stat_loaded : stat_materialized);
         }
-        NotePreloadStep();
+        if (preload) {
+            NotePreloadStep();
+        }
     });
+}
+
+void PipelineCache::Impl::MaterializeDeferredGraphics(const GraphicsKey& key) {
+    std::vector<DeferredGraphics> entries;
+    {
+        std::scoped_lock lock{pipeline_mutex};
+        if (deferred_graphics.empty()) {
+            return;
+        }
+        const auto it = deferred_graphics.find(key);
+        if (it == deferred_graphics.end()) {
+            return;
+        }
+        entries = std::move(it->second);
+        deferred_graphics.erase(it);
+    }
+    for (DeferredGraphics& entry : entries) {
+        QueueGraphicsBuild(key, std::move(entry.artifacts), entry.record, false);
+    }
+}
+
+void PipelineCache::Impl::MaterializeDeferredCompute(const ComputeKey& key) {
+    std::vector<DeferredCompute> entries;
+    {
+        std::scoped_lock lock{pipeline_mutex};
+        if (deferred_compute.empty()) {
+            return;
+        }
+        const auto it = deferred_compute.find(key);
+        if (it == deferred_compute.end()) {
+            return;
+        }
+        entries = std::move(it->second);
+        deferred_compute.erase(it);
+    }
+    for (DeferredCompute& entry : entries) {
+        QueueComputeBuild(key, std::move(entry.artifact), entry.layout, false);
+    }
 }
 
 void PipelineCache::Impl::RunLoader(std::stop_token stop) {
@@ -478,8 +553,9 @@ void PipelineCache::Impl::RunLoader(std::stop_token stop) {
             if (result.status == Disk::LoadStatus::Loaded) {
                 LOG_INFO(Render_Vulkan,
                          "[nvn] pipeline cache preload: {} shader, {} graphics, {} compute "
-                         "records read, {} ms",
+                         "records read, {} deferred to their first use (lazy pipelines {}), {} ms",
                          contents.shaders.size(), contents.graphics.size(), contents.compute.size(),
+                         stat_deferred.load(), lazy_pipelines ? "on" : "off",
                          std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - preload_start)
                              .count());
@@ -1033,6 +1109,10 @@ bool PipelineCache::Impl::QueueListGraphics(
     bool joined = false;
     {
         std::scoped_lock lock{pipeline_mutex};
+        if (deferred_graphics.contains(key)) {
+            ++list_covered; // a cached record of the key, built at its first use (lazy pipelines)
+            return true;
+        }
         if (const auto it = graphics.find(key); it != graphics.end()) {
             for (const auto& candidate : it->second) {
                 if (candidate->QueriesMatch(*oracle)) {
@@ -1126,6 +1206,10 @@ bool PipelineCache::Impl::QueueListCompute(const Disk::StateListCompute& entry,
     bool joined = false;
     {
         std::scoped_lock lock{pipeline_mutex};
+        if (deferred_compute.contains(key)) {
+            ++list_covered; // a cached record of the key, built at its first use (lazy pipelines)
+            return true;
+        }
         if (const auto it = compute.find(key); it != compute.end()) {
             for (const auto& candidate : it->second) {
                 if (candidate->QueriesMatch(*oracle)) {

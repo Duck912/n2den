@@ -520,7 +520,7 @@ public:
     /// only programs it saw created and left undispatched are skipped, unknown ones compile.
     /// A program recognised as a game's upscaling network is never skipped by either set.
     void PrepareCompute(const StageProgram& program, std::shared_ptr<const void> owner,
-                        bool idle = false);
+                        bool idle = false, bool network_only = false);
     /// Replay thread, lookahead: a compute program the current command list dispatches further
     /// on and whose pipeline is not built yet. Its compile goes ahead of every other queued
     /// build on the workers, whatever the never-dispatched sets say (it is about to be

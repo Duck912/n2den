@@ -542,7 +542,8 @@ struct PipelineCache::Impl {
                         std::shared_ptr<const void> owner);
     /// Queues the compile of a compute program's pipeline when the game creates it (see
     /// PipelineCache::PrepareCompute).
-    void PrepareCompute(const StageProgram& program, std::shared_ptr<const void> owner, bool idle);
+    void PrepareCompute(const StageProgram& program, std::shared_ptr<const void> owner, bool idle,
+                        bool network_only = false);
     /// Queues the compile of a compute pipeline a submission is about to dispatch, ahead of the
     /// other queued builds (see PipelineCache::PrefetchCompute). True when a job was queued.
     bool PrefetchCompute(const StageProgram& program, std::shared_ptr<const void> owner);
@@ -659,6 +660,36 @@ struct PipelineCache::Impl {
     void PreloadCompute(
         const Disk::ComputePipelineRecord& record,
         const std::unordered_map<Disk::ContentId, StageArtifact, Disk::ContentIdHash>& shaders);
+    /// Lazy pipelines (default; EDEN_NX2_NVN_LAZY_PIPELINES=0: every cached record is built at
+    /// boot, as before): the preload keeps each cached record's build inputs by key instead of
+    /// building it, and the first lookup of the key queues the build on the workers
+    /// (MaterializeDeferred*). A live pipeline costs the driver about 1 MiB of host memory, and
+    /// a title's cache holds every pipeline any session met (Kirby Air Riders: 3778 pipelines,
+    /// ~4 GiB, built at every boot); the driver's own cache makes a cached record's build quick.
+    struct DeferredGraphics {
+        Disk::GraphicsPipelineRecord record;
+        std::array<StageArtifact, GRAPHICS_STAGE_COUNT> artifacts;
+    };
+    struct DeferredCompute {
+        StageArtifact artifact;
+        VC::ComputeDriverLayout layout;
+    };
+    bool lazy_pipelines{true};
+    std::unordered_map<GraphicsKey, std::vector<DeferredGraphics>, GraphicsKeyHash, GraphicsKeyEqual>
+        deferred_graphics; ///< guarded by pipeline_mutex
+    std::unordered_map<ComputeKey, std::vector<DeferredCompute>, ComputeKeyHash>
+        deferred_compute; ///< guarded by pipeline_mutex
+    std::atomic<u64> stat_deferred{};
+    std::atomic<u64> stat_materialized{};
+    /// Queues the build of the records the preload deferred for `key` (nothing when there are
+    /// none); the lookup then finds the key pending, as for a preload build.
+    void MaterializeDeferredGraphics(const GraphicsKey& key);
+    void MaterializeDeferredCompute(const ComputeKey& key);
+    void QueueGraphicsBuild(const GraphicsKey& key,
+                            std::array<StageArtifact, GRAPHICS_STAGE_COUNT> artifacts,
+                            const Disk::GraphicsPipelineRecord& record, bool preload);
+    void QueueComputeBuild(const ComputeKey& key, StageArtifact artifact,
+                           VC::ComputeDriverLayout layout, bool preload);
     void WaitPending(const std::shared_ptr<PendingKey>& pending);
     /// Blocks while the loader is still registering the cached pipelines as pending (false
     /// without waiting when it is done or there is no loader): a draw that misses before that

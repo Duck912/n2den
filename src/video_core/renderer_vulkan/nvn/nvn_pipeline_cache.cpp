@@ -559,6 +559,7 @@ PipelineCache::Impl::Impl(const Device& device_, PipelineCacheOptions options_)
             return value == nullptr || *value == '\0' || std::strcmp(value, "0") != 0;
         };
         list_enabled = switch_on("EDEN_NX2_NVN_STATE_LIST");
+        lazy_pipelines = switch_on("EDEN_NX2_NVN_LAZY_PIPELINES");
         store_enabled = switch_on("EDEN_NX2_NVN_SHADER_STORE");
         unused_enabled = switch_on("EDEN_NX2_NVN_COMPUTE_UNUSED");
         list_path = options.directory / fmt::format("nvn_state_list.{:016x}.bin", options.title_id);
@@ -1457,6 +1458,14 @@ std::shared_ptr<GraphicsPipeline> PipelineCache::Impl::GetGraphics(const Graphic
     key.targets = request.targets;
     key.Finalize();
     key_hash = key.hash;
+    if (lazy_pipelines && workers) {
+        // A cached record of this key the preload deferred: its build is queued now, and the
+        // search below finds the key pending like a preload build.
+        GraphicsKey record_key = key;
+        record_key.try_switch_hash = 0; // the preload's keys never carry it (PreloadGraphics)
+        record_key.Finalize();
+        MaterializeDeferredGraphics(record_key);
+    }
 
     // A draw that may be skipped (`not_ready`) with asynchronous shaders on is compiled on the
     // workers, the GPL path included: translating, compiling the library parts and linking all
@@ -1860,6 +1869,11 @@ std::shared_ptr<ComputePipeline> PipelineCache::Impl::GetCompute(const ComputeRe
         key.environment_flags |= ENV_SHARED_MEMORY;
         key.shared_memory_size = *request.environment.compute_shared_memory_size;
     }
+    if (lazy_pipelines && workers) {
+        ComputeKey record_key = key;
+        record_key.try_switch_hash = 0; // the preload's keys never carry it (PreloadCompute)
+        MaterializeDeferredCompute(record_key);
+    }
     const bool async = AsyncEnabled(not_ready);
     const bool preload_registered = !async || loader_queued.load(std::memory_order_acquire);
     std::shared_ptr<PendingKey> pending;
@@ -1970,7 +1984,8 @@ std::shared_ptr<ComputePipeline> PipelineCache::Impl::GetCompute(const ComputeRe
 }
 
 void PipelineCache::Impl::PrepareCompute(const StageProgram& program,
-                                         std::shared_ptr<const void> owner, bool idle) {
+                                         std::shared_ptr<const void> owner, bool idle,
+                                         bool network_only) {
     if (program.hash == 0 || program.control == nullptr || program.code == nullptr ||
         stopping.load()) {
         return;
@@ -2003,6 +2018,9 @@ void PipelineCache::Impl::PrepareCompute(const StageProgram& program,
             control->thread_group, control->compute.texture_count, control->compute.image_count,
             {program.code->data(), bytes});
     }();
+    if (network_only && !network) {
+        return; // compiled at its first dispatch (EDEN_NX2_NVN_COMPUTE_AT_CREATE unset or 0)
+    }
     std::shared_ptr<PendingKey> claim;
     {
         std::scoped_lock lock{pipeline_mutex};
@@ -2363,8 +2381,8 @@ void PipelineCache::PrepareProgram(const std::array<StageProgram, STAGE_COUNT>& 
 }
 
 void PipelineCache::PrepareCompute(const StageProgram& program, std::shared_ptr<const void> owner,
-                                   bool idle) {
-    impl->PrepareCompute(program, std::move(owner), idle);
+                                   bool idle, bool network_only) {
+    impl->PrepareCompute(program, std::move(owner), idle, network_only);
 }
 
 bool PipelineCache::PrefetchCompute(const StageProgram& program,

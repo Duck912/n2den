@@ -347,34 +347,36 @@ void DrawResources::OnProgramCreated(const std::shared_ptr<const VC::ProgramDesc
         // (queued now, before PrepareCompute below would queue a default-answer compile).
         cache->NoteProgram(stages, program);
     }
-    // A compute pipeline depends on nothing a dispatch sets but its texture answers, so it is
-    // compiled now, off the replay thread, instead of at the first dispatch (which would stall
-    // the frame for the whole compile). EDEN_NX2_NVN_COMPUTE_AT_CREATE: unset or 1 = at once on
-    // the preload workers (eager), "idle" = at low priority while no asynchronous compile waits,
-    // 0 = at first dispatch.
+    // A compute pipeline depends on nothing a dispatch sets but its texture answers, so it can be
+    // compiled when the program is created instead of at its first dispatch.
+    // EDEN_NX2_NVN_COMPUTE_AT_CREATE: unset or 0 = at first dispatch (the default: a title may
+    // create far more programs than it dispatches, Kirby Air Riders ~5300, and every built
+    // pipeline holds ~1 MiB of driver memory: ~4 GiB there), 1 = at once on the preload workers
+    // (eager), "idle" = at low priority while no asynchronous compile waits. A game's upscaling
+    // network is compiled at creation in every mode (one of the costliest compiles).
     enum class ComputeAtCreation { Off, Eager, Idle };
     static const ComputeAtCreation compute_at_creation = [] {
         const char* value = std::getenv("EDEN_NX2_NVN_COMPUTE_AT_CREATE");
-        ComputeAtCreation mode = ComputeAtCreation::Eager;
-        if (value != nullptr && std::strcmp(value, "0") == 0) {
-            mode = ComputeAtCreation::Off;
+        ComputeAtCreation mode = ComputeAtCreation::Off;
+        if (value != nullptr && std::strcmp(value, "1") == 0) {
+            mode = ComputeAtCreation::Eager;
         } else if (value != nullptr && std::strcmp(value, "idle") == 0) {
             mode = ComputeAtCreation::Idle;
         }
         LOG_INFO(Render_Vulkan, "[nvn] compute pipelines compiled {}",
                  mode == ComputeAtCreation::Off
-                     ? "at first dispatch (EDEN_NX2_NVN_COMPUTE_AT_CREATE=0)"
+                     ? "at first dispatch, upscaling networks at creation "
+                       "(EDEN_NX2_NVN_COMPUTE_AT_CREATE=1: every program at creation)"
                  : mode == ComputeAtCreation::Idle
                      ? "when the program is created, at idle priority "
                        "(EDEN_NX2_NVN_COMPUTE_AT_CREATE=idle)"
-                     : "when the program is created (EDEN_NX2_NVN_COMPUTE_AT_CREATE=idle: at idle "
-                       "priority, 0: at first dispatch)");
+                     : "when the program is created (EDEN_NX2_NVN_COMPUTE_AT_CREATE=1)");
         return mode;
     }();
-    if (cache != nullptr && compute_at_creation != ComputeAtCreation::Off &&
-        stages[STAGE_COMPUTE].hash != 0) {
+    if (cache != nullptr && stages[STAGE_COMPUTE].hash != 0) {
         cache->PrepareCompute(stages[STAGE_COMPUTE], program,
-                              compute_at_creation == ComputeAtCreation::Idle);
+                              compute_at_creation == ComputeAtCreation::Idle,
+                              compute_at_creation == ComputeAtCreation::Off);
     }
 }
 
