@@ -85,6 +85,10 @@ std::string_view SourceName(VC::HandleSource source) {
         return "compute_image";
     case VC::HandleSource::Program:
         return "program";
+    case VC::HandleSource::ComputeSeparateTexture:
+        return "compute_separate_texture";
+    case VC::HandleSource::ComputeSeparateSampler:
+        return "compute_separate_sampler";
     default:
         return "unsupported";
     }

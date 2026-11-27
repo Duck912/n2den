@@ -39,6 +39,10 @@ u32 TableCapacity(HandleSource source, const ComputeHandleTables* compute) {
         return compute != nullptr ? compute->texture_count : 0;
     case HandleSource::ComputeImage:
         return compute != nullptr ? compute->image_count : 0;
+    case HandleSource::ComputeSeparateTexture:
+        return compute != nullptr ? compute->separate_texture_count : 0;
+    case HandleSource::ComputeSeparateSampler:
+        return compute != nullptr ? compute->separate_sampler_count : 0;
     default:
         return ~0U; // uniform buffer words: bounded by the bound buffer, checked at replay
     }
@@ -81,9 +85,15 @@ HandleResult ResolveHandles(bool has_secondary, u32 index, u32 offset, u32 shift
             return (primary.source == a && secondary.source == b) ||
                    (primary.source == b && secondary.source == a);
         };
-        const bool primary_sampler = primary.source == HandleSource::SeparateSampler;
+        const bool primary_sampler = primary.source == HandleSource::SeparateSampler ||
+                                     primary.source == HandleSource::ComputeSeparateSampler;
         if (is_pair(HandleSource::SeparateTexture, HandleSource::SeparateSampler) ||
-            is_pair(HandleSource::UniformBuffer, HandleSource::SeparateSampler)) {
+            is_pair(HandleSource::UniformBuffer, HandleSource::SeparateSampler) ||
+            is_pair(HandleSource::ComputeSeparateTexture, HandleSource::ComputeSeparateSampler) ||
+            is_pair(HandleSource::ComputeImage, HandleSource::ComputeSeparateSampler)) {
+            // Compute: the texture word from the separate texture table, or from the image table
+            // (an image word holds the texture id), the sampler word from the separate sampler
+            // table of the per-shader driver bank.
             result.texture = primary_sampler ? secondary_ref : primary_ref;
             result.sampler = primary_sampler ? primary_ref : secondary_ref;
         } else if (primary.source == HandleSource::UniformBuffer &&
@@ -104,6 +114,7 @@ HandleResult ResolveHandles(bool has_secondary, u32 index, u32 offset, u32 shift
         case HandleSource::SeparateTexture:
             return fail("separate texture handle without a sampler word (constant sampler id?)");
         case HandleSource::SeparateSampler:
+        case HandleSource::ComputeSeparateSampler:
             return fail("sampler word without a texture word");
         default:
             break;

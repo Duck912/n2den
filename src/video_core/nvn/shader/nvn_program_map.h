@@ -87,12 +87,20 @@ struct ComputeDriverLayout {
     u32 texture_count{};
     u32 image_offset{};
     u32 image_count{};
+    /// Separate texture / sampler tables of the per-shader driver bank: none measured so far (the
+    /// +0xb4 / +0xb5 counts are image slots, see ParseControl); kept empty.
+    u32 separate_texture_offset{};
+    u32 separate_texture_count{};
+    u32 separate_sampler_offset{};
+    u32 separate_sampler_count{};
     u32 end_offset{};     ///< derived end of the tables
     u32 declared_total{}; ///< u16 at control +0xba
     bool total_matches{}; ///< `end_offset == declared_total`
 
     [[nodiscard]] ComputeHandleTables HandleTables() const noexcept {
-        return {texture_offset, texture_count, image_offset, image_count};
+        return {texture_offset,          texture_count,          image_offset,
+                image_count,             separate_texture_offset, separate_texture_count,
+                separate_sampler_offset, separate_sampler_count};
     }
 };
 

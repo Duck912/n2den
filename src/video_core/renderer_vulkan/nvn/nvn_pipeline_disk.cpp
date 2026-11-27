@@ -166,7 +166,8 @@ void WriteHandleRef(Writer& w, const VC::HandleRef& ref) {
 
 VC::HandleRef ReadHandleRef(Reader& r) {
     VC::HandleRef ref;
-    ref.source = r.Enum<VC::HandleSource>(static_cast<u32>(VC::HandleSource::Unsupported));
+    ref.source =
+        r.Enum<VC::HandleSource>(static_cast<u32>(VC::HandleSource::ComputeSeparateSampler));
     ref.slot = r.U32();
     ref.bank = r.U32();
     ref.byte_offset = r.U32();

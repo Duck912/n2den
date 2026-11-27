@@ -244,6 +244,9 @@ enum class HandleSource : u8 {
     Program,          ///< computed per draw from words of uniform and storage buffers (slot = index
                       ///< in Shader::Info::handle_programs): a handle table the shader reads
     Unsupported,
+    // Added after Unsupported: stored layouts keep their values.
+    ComputeSeparateTexture, ///< compute: separate texture handle table of the driver bank
+    ComputeSeparateSampler, ///< compute: separate sampler handle table of the driver bank
 };
 
 [[nodiscard]] constexpr std::string_view HandleSourceName(HandleSource source) noexcept {
@@ -268,6 +271,10 @@ enum class HandleSource : u8 {
         return "program";
     case HandleSource::Unsupported:
         return "unsupported";
+    case HandleSource::ComputeSeparateTexture:
+        return "compute-separate-texture";
+    case HandleSource::ComputeSeparateSampler:
+        return "compute-separate-sampler";
     }
     return "?";
 }
@@ -283,6 +290,10 @@ struct ComputeHandleTables {
     u32 texture_count{};
     u32 image_offset{};
     u32 image_count{};
+    u32 separate_texture_offset{};
+    u32 separate_texture_count{};
+    u32 separate_sampler_offset{};
+    u32 separate_sampler_count{};
 };
 
 struct HandleClassification {
@@ -311,6 +322,35 @@ struct HandleClassification {
         };
         const bool in_texture = in_table(compute->texture_offset, compute->texture_count);
         const bool in_image = in_table(compute->image_offset, compute->image_count);
+        const bool in_separate_texture =
+            in_table(compute->separate_texture_offset, compute->separate_texture_count);
+        const bool in_separate_sampler =
+            in_table(compute->separate_sampler_offset, compute->separate_sampler_count);
+        const auto slot_in = [offset](u32 base) { return (offset - base) / HandleStride; };
+        if (want == HandleWant::Texture && in_separate_texture) {
+            if ((offset - compute->separate_texture_offset) % HandleStride != 0) {
+                return unsupported("misaligned compute handle offset");
+            }
+            return {HandleSource::ComputeSeparateTexture,
+                    slot_in(compute->separate_texture_offset), {}};
+        }
+        if (want == HandleWant::Texture && in_separate_sampler) {
+            // The sampler half of a separate pair (the texture word comes from the image or
+            // separate texture table).
+            if ((offset - compute->separate_sampler_offset) % HandleStride != 0) {
+                return unsupported("misaligned compute handle offset");
+            }
+            return {HandleSource::ComputeSeparateSampler,
+                    slot_in(compute->separate_sampler_offset), {}};
+        }
+        if (want == HandleWant::Texture && !in_texture && in_image) {
+            // A texture read through an image handle (the word holds the texture id): Kirby Air
+            // Riders' colour-grading LUT generator reads the LUT it writes (c0[0x20], image 0).
+            if ((offset - compute->image_offset) % HandleStride != 0) {
+                return unsupported("misaligned compute handle offset");
+            }
+            return {HandleSource::ComputeImage, slot_in(compute->image_offset), {}};
+        }
         if (want == HandleWant::Texture && in_texture) {
             if ((offset - compute->texture_offset) % HandleStride != 0) {
                 return unsupported("misaligned compute handle offset");
@@ -325,7 +365,15 @@ struct HandleClassification {
             return {HandleSource::ComputeImage, (offset - compute->image_offset) / HandleStride,
                     {}};
         }
-        return unsupported("compute handle outside the texture/image tables");
+        return unsupported("compute handle outside the texture/image tables (tex " +
+                           std::to_string(compute->texture_offset) + "+" +
+                           std::to_string(compute->texture_count) + ", img " +
+                           std::to_string(compute->image_offset) + "+" +
+                           std::to_string(compute->image_count) + ", sep tex " +
+                           std::to_string(compute->separate_texture_offset) + "+" +
+                           std::to_string(compute->separate_texture_count) + ", sep smp " +
+                           std::to_string(compute->separate_sampler_offset) + "+" +
+                           std::to_string(compute->separate_sampler_count) + ")");
     }
     if (bank == ProgramBank) {
         return unsupported("handle read from the program constant bank");

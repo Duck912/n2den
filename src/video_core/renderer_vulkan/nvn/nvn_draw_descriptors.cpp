@@ -301,6 +301,16 @@ std::optional<u32> DrawContext::ReadHandleWord(u32 stage, const VC::HandleRef& r
             return static_cast<u32>(stages[STAGE_COMPUTE].image[ref.slot]);
         }
         return std::nullopt;
+    case VC::HandleSource::ComputeSeparateTexture:
+        if (ref.slot < stages[STAGE_COMPUTE].separate_texture.size()) {
+            return static_cast<u32>(stages[STAGE_COMPUTE].separate_texture[ref.slot]);
+        }
+        return std::nullopt;
+    case VC::HandleSource::ComputeSeparateSampler:
+        if (ref.slot < stages[STAGE_COMPUTE].separate_sampler.size()) {
+            return static_cast<u32>(stages[STAGE_COMPUTE].separate_sampler[ref.slot]);
+        }
+        return std::nullopt;
     default:
         return std::nullopt;
     }
@@ -539,6 +549,12 @@ private:
             return slot < stages[STAGE_COMPUTE].image.size()
                        ? std::optional<u32>{stages[STAGE_COMPUTE].image[slot]}
                        : std::nullopt;
+        case VC::HandleSource::ComputeSeparateTexture:
+            return slot < stages[STAGE_COMPUTE].separate_texture.size()
+                       ? std::optional<u32>{stages[STAGE_COMPUTE].separate_texture[slot]}
+                       : std::nullopt;
+        case VC::HandleSource::ComputeSeparateSampler:
+            return std::nullopt; // a sampler word names no texture
         default:
             return std::nullopt;
         }

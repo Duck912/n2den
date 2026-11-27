@@ -338,14 +338,21 @@ VC::DescriptorLayout PipelineCache::Impl::MergeLayouts(
     }
     merged.raw_stores_written_through = merged.stores_raw_global_memory && !raw_stores_not_through;
     if (!merged.AllSupported()) {
+        // Each issue once per program stage, naming the program (NoteIssue logs a row once).
         std::set<std::string> issues;
-        for (const VC::DescriptorBinding& binding : merged.bindings) {
-            if (!binding.supported) {
-                issues.insert(binding.issue);
+        for (const StageArtifact* stage : stages) {
+            if (stage == nullptr) {
+                continue;
+            }
+            for (const VC::DescriptorBinding& binding : stage->record->layout.bindings) {
+                if (!binding.supported) {
+                    issues.insert(fmt::format("{} (program {:016x} stage {})", FirstLine(binding.issue),
+                                              stage->record->program_hash, stage->record->stage));
+                }
             }
         }
         for (const std::string& issue : issues) {
-            NoteIssue("layout: " + FirstLine(issue));
+            NoteIssue("layout: " + issue);
         }
     }
     return merged;

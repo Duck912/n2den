@@ -99,14 +99,22 @@ std::optional<NvnControl> ParseControl(std::span<const u8> control, std::string&
         layout.uniform_count = control[0xb1];
         layout.storage_count = control[0xb2];
         layout.texture_count = control[0xb3];
-        layout.image_count = control[0xb6];
+        // The image table holds the handles counted at +0xb6, +0xb4 and +0xb5 (8 bytes each),
+        // one after another: Kirby Air Riders' compute programs read storage images at the
+        // slots after the +0xb6 count (1 UBO, +0xb6 4, +0xb4 1, +0xb5 1: total 0x50, image
+        // loads/stores at c0+0x40 and 0x48) and texture fetches through them.
+        layout.image_count = u32{control[0xb6]} + control[0xb4] + control[0xb5];
         layout.declared_total = ReadU16(control, 0xba);
         layout.uniform_offset = Common::AlignUp(
             layout.push_constant_offset + layout.push_constant_words * 4, ComputeEntryTableAlign);
         layout.storage_offset = layout.uniform_offset + layout.uniform_count * 0x10;
         layout.texture_offset = layout.storage_offset + layout.storage_count * 0x10;
         layout.image_offset = layout.texture_offset + layout.texture_count * HandleStride;
-        layout.end_offset = layout.image_offset + layout.image_count * HandleStride;
+        layout.separate_texture_offset = layout.image_offset + layout.image_count * HandleStride;
+        layout.separate_sampler_offset =
+            layout.separate_texture_offset + layout.separate_texture_count * HandleStride;
+        layout.end_offset =
+            layout.separate_sampler_offset + layout.separate_sampler_count * HandleStride;
         layout.total_matches = layout.end_offset == layout.declared_total;
     }
     if (result.stage_byte == static_cast<u32>(ShaderStage::Task) ||
