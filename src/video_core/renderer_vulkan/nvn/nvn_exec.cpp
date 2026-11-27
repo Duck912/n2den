@@ -6300,6 +6300,28 @@ bool Recorder::RecordList(std::span<const u64> list, size_t start, size_t& stop,
                 break;
             }
         }
+        if (draw.linkscan_program != 0) {
+            const u64 program = std::exchange(draw.linkscan_program, 0);
+            const auto [scan_address, scan_size] = DrawContext::LinkScanRange();
+            Pool* pool{};
+            u64 offset{};
+            if (ResolvePoolRange(scan_address, scan_size, pool, offset, "LinkScan")) {
+                UploadRange(*pool, offset, scan_size);
+                FlushPending();
+                InFlight::Watch entry;
+                entry.size = static_cast<u32>(scan_size);
+                entry.link_scan = true;
+                entry.tag = fmt::format("f{} rec {} prog {:016x}", impl.presents_recorded + 1,
+                                        records_replayed, program);
+                entry.buffer = impl.CreateHostBuffer(scan_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                     MemoryUsage::Download);
+                const VkBufferCopy region{.srcOffset = offset, .dstOffset = 0, .size = scan_size};
+                Cmd().CopyBuffer(pool->Handle(), *entry.buffer, region);
+                barrier_pending = true;
+                host_barrier_needed = true;
+                flight.watches.push_back(std::move(entry));
+            }
+        }
         if (Debug::Get().watch_address == 3) {
             // The GPU view of the peeked range, after the peeked dispatch and before what follows.
             if (const u64 peek = draw.TakePeekAddress(); peek != 0) {

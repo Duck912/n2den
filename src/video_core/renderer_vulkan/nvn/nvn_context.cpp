@@ -1448,6 +1448,38 @@ void Context::Impl::CompleteMain() {
         for (InFlight::Watch& watch : flight->watches) {
             watch.buffer.Invalidate();
             const std::span<u8> bytes = watch.buffer.Mapped();
+            if (watch.link_scan) {
+                // Nodes of 320 bytes, next at +16, prev at +20; log when the set of self-linked
+                // nodes changes (completions arrive in submission order).
+                static std::vector<u32> last;
+                std::vector<u32> self;
+                const u32 nodes = watch.size / 320;
+                for (u32 node = 0; node < nodes; ++node) {
+                    u32 next;
+                    u32 prev;
+                    std::memcpy(&next, bytes.data() + u64{node} * 320 + 16, 4);
+                    std::memcpy(&prev, bytes.data() + u64{node} * 320 + 20, 4);
+                    if (next == node || prev == node) {
+                        self.push_back(node);
+                    }
+                }
+                static u64 scans = 0;
+                if (self != last || ++scans % 2000 == 0) {
+                    std::string list;
+                    for (size_t i = 0; i < self.size() && i < 16; ++i) {
+                        u32 next;
+                        u32 prev;
+                        std::memcpy(&next, bytes.data() + u64{self[i]} * 320 + 16, 4);
+                        std::memcpy(&prev, bytes.data() + u64{self[i]} * 320 + 20, 4);
+                        list += fmt::format(" {}(n{} p{})", self[i], static_cast<s32>(next),
+                                            static_cast<s32>(prev));
+                    }
+                    LOG_INFO(Render_Vulkan, "[nvn] linkscan {}: {} self-linked nodes{}", watch.tag,
+                             self.size(), list);
+                    last = std::move(self);
+                }
+                continue;
+            }
             std::string words;
             for (u32 i = 0; i + 4 <= watch.size; i += 4) {
                 u32 value;

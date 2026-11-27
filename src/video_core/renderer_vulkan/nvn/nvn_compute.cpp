@@ -683,6 +683,86 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
                               program_hash, probe_skip);
         }
     }
+    // Diagnostic (Kirby Air Riders list freeze investigation): EDEN_NX2_NVN_LISTWALK=<prog> walks the guest-memory node list the
+    // Kirby Air Riders list-walking compute programs read (head = slot8[slot0@564 * 32], node =
+    // slot 9 + index * 320, next at +16, item count at +4, end = 0xffffffff).
+    static const u64 listwalk_program = [] {
+        const char* env = std::getenv("EDEN_NX2_NVN_LISTWALK");
+        return env ? std::strtoull(env, nullptr, 16) : u64{0};
+    }();
+    if (listwalk_program != 0 && (listwalk_program == 1 ||
+                                  listwalk_program == hash_it->second[STAGE_COMPUTE]) &&
+        bound.storage.size() > 9 && bound.storage[0].address != 0 &&
+        bound.storage[8].address != 0 && bound.storage[9].address != 0) {
+        static std::atomic<u32> walks{0};
+        const u32 walk = walks.fetch_add(1, std::memory_order_relaxed);
+        const auto read32 = [&](u64 address, u32& value) {
+            const u8* const bytes = impl.GuestPointer(address, 4);
+            if (bytes == nullptr) {
+                return false;
+            }
+            std::memcpy(&value, bytes, 4);
+            return true;
+        };
+        u32 index = 0;
+        u32 head = 0;
+        std::string result;
+        if (!read32(bound.storage[0].address + 564, index)) {
+            result = "slot0 unreadable";
+        } else if (!read32(bound.storage[8].address + u64{index} * 32, head)) {
+            result = fmt::format("index {} head unreadable", index);
+        } else {
+            const u64 nodes = bound.storage[9].address;
+            const u64 node_count = bound.storage[9].size / 320;
+            std::vector<bool> seen(node_count + 1);
+            u32 node = head;
+            u32 steps = 0;
+            u64 items = 0;
+            std::string path;
+            while (node != 0xffffffffu && steps < 100000) {
+                if (node >= node_count) {
+                    result = fmt::format("node {} past the array ({} nodes)", node, node_count);
+                    break;
+                }
+                if (seen[node]) {
+                    result = fmt::format("cycle back to node {}", node);
+                    break;
+                }
+                seen[node] = true;
+                u32 next = 0;
+                u32 count = 0;
+                if (!read32(nodes + u64{node} * 320 + 16, next) ||
+                    !read32(nodes + u64{node} * 320 + 4, count)) {
+                    result = "node unreadable";
+                    break;
+                }
+                if (steps < 12) {
+                    path += fmt::format(" {}({})", node, count);
+                }
+                items += count;
+                node = next;
+                ++steps;
+            }
+            if (result.empty()) {
+                result = "ends";
+            }
+            result = fmt::format("index {} head {}: {} steps, {} items, {};{}", index, head, steps,
+                                 items, result, path);
+        }
+        if (walk < 400 || result.find("ends") == std::string::npos) {
+            static std::atomic<u32> bad{0};
+            if (result.find("ends") != std::string::npos || bad.fetch_add(1) < 400) {
+                LOG_INFO(Render_Vulkan, "[nvn] listwalk f{} prog={:016x} groups {}x{}x{} {}",
+                         impl.presents_recorded + 1, hash_it->second[STAGE_COMPUTE], p.x, p.y,
+                         p.z, result);
+            }
+        }
+    }
+    if (const auto [scan_address, scan_size] = LinkScanRange();
+        scan_address != 0 && bound.storage.size() > 9 &&
+        bound.storage[9].address == scan_address) {
+        linkscan_program = hash_it->second[STAGE_COMPUTE];
+    }
     const Debug::Config& backing_config = Debug::Get();
     if (backing_config.log_backing_program == hash_it->second[STAGE_COMPUTE] &&
         log_backing_dispatches < backing_config.log_backing_max) {
@@ -786,6 +866,16 @@ void DrawContext::Dispatch(const VC::DispatchPayload& p) {
     // The shader may have written buffers and images: later commands order after them (a later
     // dispatch only behind a game barrier with dispatch ordering by barriers, as on NVN).
     host->HostMarkDispatchWritten();
+    // Diagnostic (Kirby Air Riders list freeze investigation): EDEN_NX2_NVN_HOST_BARRIER_DISPATCH=1: every submission with a
+    // dispatch ends with the host-read barrier (shader writes to imported guest memory visible to
+    // the CPU when the fence signals).
+    static const bool host_barrier_dispatch = [] {
+        const char* env = std::getenv("EDEN_NX2_NVN_HOST_BARRIER_DISPATCH");
+        return env != nullptr && env[0] == '1';
+    }();
+    if (host_barrier_dispatch) {
+        host->HostNeedHostReadBarrier();
+    }
     if (pathdiff) [[unlikely]] {
         PathDiffEnd(std::move(*pathdiff));
     }

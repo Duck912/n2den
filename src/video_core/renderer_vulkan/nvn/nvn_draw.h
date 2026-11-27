@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <cstdlib>
+#include <utility>
 #include <algorithm>
 #include <array>
 #include <bitset>
@@ -421,6 +423,23 @@ public:
     }
     u64 peek_address{0};
     u64 peek_chase_address{0};
+    /// Diagnostic (Kirby Air Riders list freeze investigation): EDEN_NX2_NVN_LINKSCAN=<hex guest address>:<hex size>: the last
+    /// dispatch that bound that range as storage slot 9 (its program, 0 once taken); the replay
+    /// copies the range back after it and scans it for self-linked 320-byte nodes.
+    u64 linkscan_program{0};
+    [[nodiscard]] static std::pair<u64, u64> LinkScanRange() {
+        static const std::pair<u64, u64> range = [] {
+            const char* env = std::getenv("EDEN_NX2_NVN_LINKSCAN");
+            if (env == nullptr || env[0] == 0) {
+                return std::pair<u64, u64>{0, 0};
+            }
+            char* end = nullptr;
+            const u64 address = std::strtoull(env, &end, 16);
+            const u64 size = *end == ':' ? std::strtoull(end + 1, nullptr, 16) : 0;
+            return std::pair<u64, u64>{address, size};
+        }();
+        return range;
+    }
 
 private:
     struct InlineUpdate {

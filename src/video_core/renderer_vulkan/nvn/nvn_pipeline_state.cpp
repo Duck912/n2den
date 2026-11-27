@@ -1487,7 +1487,8 @@ u64 HashTranslationSwitches(const TranslationSwitches& switches) {
     // set, read here as the recompiler reads them (once per process).
     for (const char* const name :
          {"EDEN_NX2_WIDE_COMPUTE_SSBOS", "EDEN_NX2_NO_IDENTITY_FOLD", "EDEN_NX2_HANDLE_STUB",
-          "EDEN_NX2_BARRIER_STUB", "EDEN_N2DEN_GLOBAL_NOINLINE"}) {
+          "EDEN_NX2_BARRIER_STUB", "EDEN_N2DEN_GLOBAL_NOINLINE",
+          "EDEN_NX2_LOOP_SAFETY_ITERATIONS", "EDEN_NX2_BARRIER_ALL_MEMORY"}) {
         if (const char* const value = std::getenv(name)) {
             key += fmt::format(" {}={}", name, value);
         }

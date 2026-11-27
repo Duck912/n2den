@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <span>
 #include <tuple>
 #include <type_traits>
@@ -173,7 +174,11 @@ Id TypeIdOf(const EmitContext& ctx, IR::Type type) {
 }
 
 void Traverse(EmitContext& ctx, IR::Program& program) {
-    static constexpr u32 LOOP_SAFETY_ITERATIONS{0x2000};
+    // Diagnostic (Kirby Air Riders list freeze investigation): EDEN_NX2_LOOP_SAFETY_ITERATIONS overrides the cap.
+    static const u32 LOOP_SAFETY_ITERATIONS{[] {
+        const char* const value = std::getenv("EDEN_NX2_LOOP_SAFETY_ITERATIONS");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : 0x2000u;
+    }()};
     const bool loop_safety_checks{!Settings::values.disable_shader_loop_safety_checks};
     // Safety counters of the loops being emitted, by loop header, innermost last.
     std::vector<std::pair<const IR::Block*, Id>> safety_counters;

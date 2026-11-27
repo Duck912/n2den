@@ -717,6 +717,7 @@ struct InFlight {
         vk::Buffer buffer;
         std::string tag;
         u32 size{};
+        bool link_scan{}; ///< diagnostic (EDEN_NX2_NVN_LINKSCAN): scan for self-linked 320-byte nodes, log changes
     };
     std::vector<Watch> watches;
     /// Texture copies of a `textures` diag request, converted and written at completion.
